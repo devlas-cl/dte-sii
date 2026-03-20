@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Devlas SpA — https://devlas.cl
+// Copyright (c) 2026 Devlas SpA — https://devlas.cl
 // Licencia MIT. Ver archivo LICENSE para mas detalles.
 /**
  * LibroVentas.js - Generador de Libro de Ventas para Certificación SII

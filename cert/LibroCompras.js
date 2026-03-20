@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Devlas SpA — https://devlas.cl
+// Copyright (c) 2026 Devlas SpA — https://devlas.cl
 // Licencia MIT. Ver archivo LICENSE para mas detalles.
 /**
  * LibroCompras.js - Generador de Libro de Compras para Certificación SII

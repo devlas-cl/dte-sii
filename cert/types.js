@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Devlas SpA — https://devlas.cl
+// Copyright (c) 2026 Devlas SpA — https://devlas.cl
 // Licencia MIT. Ver archivo LICENSE para mas detalles.
 /**
  * Tipos e interfaces para módulo de Certificación SII
