@@ -5,9 +5,10 @@
  *
  * Facturación y boletas electrónicas para el SII de Chile.
  *
- * @version 2.5.0
+ * @version 2.5.2
  * @author Devlas SpA <hola@devlas.cl>
  * @license MIT
+ */
 
 // Módulos core
 const Certificado = require('./Certificado');
