@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @devlas/dte-sii - Type Definitions
  * 
  * TypeScript declarations for @devlas/dte-sii

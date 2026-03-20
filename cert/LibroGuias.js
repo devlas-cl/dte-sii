@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Devlas SpA — https://devlas.cl
+// Copyright (c) 2026 Devlas SpA — https://devlas.cl
 // Licencia MIT. Ver archivo LICENSE para mas detalles.
 /**
  * LibroGuias.js - Generador de Libro de Guías para Certificación SII
