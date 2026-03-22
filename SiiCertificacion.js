@@ -221,10 +221,13 @@ class SiiCertificacion {
           TOTAL:      totalMatch      ? totalMatch[1]      : '15',
         };
 
-        // Marcar TODOS los checkboxes disponibles en la página del SII (dinámico)
-        // Esto evita que sets nuevos que agrega el SII queden sin marcar
+        // Marcar solo los sets opcionales configurados (DEFAULT_SETS_OPCIONALES)
+        // No marcar todos para evitar incluir Exportación, Liquidación, etc.
+        const requestedSets = options.setsOpcionales || {};
         for (const set of setsOpcionales) {
-          formData[set.id] = 'S';
+          if (requestedSets[set.id]) {
+            formData[set.id] = 'S';
+          }
         }
         // SET01 (básico) siempre incluido aunque no aparezca como checkbox opcional
         formData.SET01 = 'S';
