@@ -355,7 +355,7 @@ class SiiSession {
       cookieJar: this.cookieJar,
       baseHost: this.baseHost,
       savedAt: Date.now(),
-      expiresAt: Date.now() + (25 * 60 * 1000), // 25 minutos de validez
+      expiresAt: Date.now() + (90 * 60 * 1000), // 90 minutos de validez
     };
     fs.writeFileSync(filePath, JSON.stringify(sessionData, null, 2), 'utf8');
   }
@@ -375,7 +375,7 @@ class SiiSession {
       
       // Verificar que la sesión no haya expirado
       if (data.expiresAt && Date.now() > data.expiresAt) {
-        console.log('Sesión SII expirada, se requiere nuevo login');
+        console.log('Sesión SII (maullin) expirada, se requiere nuevo login');
         return false;
       }
       

@@ -143,7 +143,9 @@ class SiiPortalAuth {
         res.on('end', () => {
           const buf = Buffer.concat(chunks);
           const ct = res.headers['content-type'] || '';
-          const encoding = /iso-8859|latin-1|windows-1252/i.test(ct) ? 'latin1' : 'utf8';
+          // Todos los hosts *.sii.cl sirven páginas ISO-8859-1; a veces no incluyen charset en Content-Type.
+          const isSiiHost = url.hostname.endsWith('.sii.cl');
+          const encoding = (isSiiHost || /iso-8859|latin-1|windows-1252/i.test(ct)) ? 'latin1' : 'utf8';
           resolve({ status: res.statusCode, headers: res.headers, body: buf.toString(encoding), cookieJar });
         });
       });
@@ -228,7 +230,10 @@ class SiiPortalAuth {
       const loc = res.headers['location'] || '';
       if (loc.includes('InicioAutenticacion') || loc.includes('IngresoRutClave')) return false;
       // Si el body contiene formulario de empresa → válida
-      return res.status === 200 && (res.body.includes('RUT_EMP') || res.body.includes('ad_empresa'));
+      const valida = res.status === 200 && (res.body.includes('RUT_EMP') || res.body.includes('ad_empresa'));
+      // Refrescar timestamp del caché para extender TTL mientras la sesión se usa activamente
+      if (valida) SiiPortalAuth._guardarSesionCache(this._certHash, cookieJar);
+      return valida;
     } catch {
       return false;
     }
@@ -240,8 +245,8 @@ class SiiPortalAuth {
       if (!fs.existsSync(SESSION_CACHE_PATH)) return null;
       const data = JSON.parse(fs.readFileSync(SESSION_CACHE_PATH, 'utf8'));
       if (data.certHash !== certHash) return null;
-      // TTL: 25 minutos (el SII expira sesiones ~30 min de inactividad)
-      if (Date.now() - data.ts > 25 * 60 * 1000) return null;
+      // TTL: 90 minutos (SII permite ~2h de inactividad; se refresca en cada validación)
+      if (Date.now() - data.ts > 90 * 60 * 1000) return null;
       return data.cookies;
     } catch {
       return null;
@@ -410,26 +415,29 @@ class SiiPortalAuth {
    */
   static _parsearTablaEmpresa(html) {
     const datos = {};
+    const decode = s => s
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, '')
+      .replace(/&oacute;/g, 'ó')
+      .replace(/&aacute;/g, 'á')
+      .replace(/&eacute;/g, 'é')
+      .replace(/&iacute;/g, 'í')
+      .replace(/&uacute;/g, 'ú')
+      .replace(/&ntilde;/g, 'ñ')
+      .replace(/&amp;/g, '&')
+      .trim();
 
-    for (const row of html.matchAll(/<tr>[\s\S]*?<\/tr>/gi)) {
-      const celdas = [...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-        .map(m => m[1]
-          .replace(/<[^>]+>/g, '')
-          .replace(/&nbsp;/gi, '')
-          .replace(/&oacute;/g, 'ó')
-          .replace(/&aacute;/g, 'á')
-          .replace(/&eacute;/g, 'é')
-          .replace(/&iacute;/g, 'í')
-          .replace(/&uacute;/g, 'ú')
-          .replace(/&ntilde;/g, 'ñ')
-          .replace(/&amp;/g, '&')
-          .trim()
-        );
-      if (celdas.length === 2 && celdas[0]) datos[celdas[0]] = celdas[1];
+    // Dividir por apertura <TR> — HTML 4.01 no exige tags </TR> de cierre
+    for (const seg of html.split(/<tr[^>]*>/i)) {
+      const celdas = [...seg.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => decode(m[1]));
+      if (celdas.length >= 2 && celdas[0]) datos[celdas[0]] = celdas[1];
     }
 
-    const fechaResol = datos['Fecha Resolución'] || null;
-    const nroResol   = datos['Resolución'] !== undefined ? datos['Resolución'] : null;
+    // Buscar por regex para ser resiliente ante variaciones de encoding / tildes
+    const fechaKey  = Object.keys(datos).find(k => /fecha.*resol/i.test(k)) || null;
+    const nroKey    = Object.keys(datos).find(k => /^resoluci/i.test(k) && !/fecha/i.test(k)) || null;
+    const fechaResol = fechaKey ? datos[fechaKey] : null;
+    const nroResol   = nroKey   ? datos[nroKey]   : null;
 
     if (fechaResol === null && nroResol === null) {
       // Loguear los campos encontrados para diagnóstico

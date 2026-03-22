@@ -24,15 +24,14 @@ function loadConfig(options = {}) {
   // Determinar baseDir
   const baseDir = options.baseDir || path.resolve(__dirname, '..', '..', '..');
   
-  // Cargar .env
+  // Cargar .env (opcional — las vars pueden venir de process.env inyectadas por el proceso padre)
   const envPath = options.envPath || path.join(baseDir, '.env');
   
-  if (!fs.existsSync(envPath)) {
-    throw new Error(`Archivo .env no encontrado: ${envPath}\nCopia .env.example a .env y configura tus valores.`);
+  if (fs.existsSync(envPath)) {
+    require('dotenv').config({ path: envPath });
+  } else {
+    console.warn(`[ConfigLoader] .env no encontrado en ${envPath} — usando variables de entorno del proceso.`);
   }
-  
-  // Usar dotenv para cargar
-  require('dotenv').config({ path: envPath });
   
   // Resolver rutas relativas
   const resolvePath = (filePath) => {
@@ -40,11 +39,10 @@ function loadConfig(options = {}) {
     return path.isAbsolute(filePath) ? filePath : path.resolve(baseDir, filePath);
   };
   
-  // Validar variables requeridas
-  const required = ['CERT_PATH', 'EMISOR_RUT', 'EMISOR_RAZON_SOCIAL'];
-  const missing = required.filter(v => !process.env[v]);
-  if (missing.length > 0) {
-    throw new Error(`Variables de entorno faltantes: ${missing.join(', ')}`);
+  // Validar variables requeridas (solo CERT_PATH es estrictamente necesario;
+  // el resto puede no estar si los datos vienen del portal SII vía getEmisorFromPortal)
+  if (!process.env.CERT_PATH) {
+    throw new Error('Variable de entorno faltante: CERT_PATH');
   }
   
   // Construir objetos de configuración
