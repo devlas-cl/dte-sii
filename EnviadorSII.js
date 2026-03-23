@@ -396,7 +396,7 @@ class EnviadorSII {
     
     log.log('SignedInfo para firmar (length):', signedInfoParaFirmar.length);
     
-    const xmlFirmado = `<?xml version="1.0" encoding="ISO-8859-1"?>
+    const xmlFirmado = `<?xml version="1.0" encoding="UTF-8"?>
 <getToken><item><Semilla>${semilla}</Semilla></item><Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/><SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1"/><Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/></Transforms><DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/><DigestValue>${digestValue}</DigestValue></Reference></SignedInfo><SignatureValue>${signatureValue}</SignatureValue><KeyInfo><KeyValue><RSAKeyValue><Modulus>${modulus}</Modulus><Exponent>${exponent}</Exponent></RSAKeyValue></KeyValue><X509Data><X509Certificate>${cert}</X509Certificate></X509Data></KeyInfo></Signature></getToken>`;
     
     log.log('DigestValue:', digestValue);
@@ -528,7 +528,7 @@ class EnviadorSII {
     const url = this.urls[this.ambiente].envio;
     
     if (!xml.startsWith('<?xml')) {
-      xml = '<?xml version="1.0" encoding="ISO-8859-1"?>\n' + xml;
+      xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml;
     }
     
     const [rutSenderStr, dvSender] = rutEnvia.split('-');
