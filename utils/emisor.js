@@ -94,9 +94,11 @@ function buildEmisorBoleta(config) {
  * @returns {Object} Emisor normalizado
  */
 function normalizeEmisor(emisor, esBoleta = false) {
+  // El schema SII no permite puntos en RUTEmisor (maxLength=10). Siempre normalizar.
+  const rutNorm = formatRutSii(emisor.RUTEmisor || '');
   if (esBoleta) {
     return {
-      RUTEmisor: emisor.RUTEmisor,
+      RUTEmisor: rutNorm,
       RznSocEmisor: sanitizeSiiText(emisor.RznSocEmisor || emisor.RznSoc),
       GiroEmisor: sanitizeSiiText(emisor.GiroEmisor || emisor.GiroEmis),
       DirOrigen: sanitizeSiiText(emisor.DirOrigen),
@@ -106,7 +108,7 @@ function normalizeEmisor(emisor, esBoleta = false) {
   }
 
   const result = {
-    RUTEmisor: emisor.RUTEmisor,
+    RUTEmisor: rutNorm,
     RznSoc: sanitizeSiiText(emisor.RznSoc || emisor.RznSocEmisor),
     GiroEmis: sanitizeSiiText(emisor.GiroEmis || emisor.GiroEmisor),
   };
