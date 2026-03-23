@@ -873,6 +873,55 @@ class EnviadorSII {
         mensaje = `❌ Rechazado: ${glosa || 'Error en documento'}`;
         esRechazado = true;
         break;
+      // Códigos numéricos del SII (QueryEstUp)
+      case '-11':
+        mensaje = `⏳ Pendiente de proceso - El sobre aún no ha sido revisado por el SII`;
+        esIntermedio = true;
+        break;
+      case '-10':
+        mensaje = `❌ Token inválido o no autorizado`;
+        esRechazado = true;
+        break;
+      case '-9':
+        mensaje = `❌ Firma del envío inválida - ${glosa || 'Verificar certificado'}`;
+        esRechazado = true;
+        break;
+      case '-8':
+        mensaje = `❌ El envío no pertenece al firmante`;
+        esRechazado = true;
+        break;
+      case '-7':
+        mensaje = `❌ Error en datos del receptor - ${glosa || 'Verificar RUT receptor'}`;
+        esRechazado = true;
+        break;
+      case '-6':
+        mensaje = `❌ Error en datos del emisor - ${glosa || 'Verificar RUT emisor'}`;
+        esRechazado = true;
+        break;
+      case '-5':
+        mensaje = `❌ Error de certificación - ${glosa || 'Verificar proceso de certificación'}`;
+        esRechazado = true;
+        break;
+      case '-4':
+        mensaje = `❌ Envío fuera de plazo - ${glosa || 'El plazo de envío ha vencido'}`;
+        esRechazado = true;
+        break;
+      case '-3':
+        mensaje = `❌ RUT emisor no coincide con el certificado`;
+        esRechazado = true;
+        break;
+      case '-2':
+        mensaje = `❌ Error de firma en el sobre - ${glosa || 'Verificar firma digital'}`;
+        esRechazado = true;
+        break;
+      case '-1':
+        mensaje = `❌ Error de schema XML - ${glosa || 'El XML no cumple el XSD del SII'}`;
+        esRechazado = true;
+        break;
+      case '0':
+        mensaje = `⏳ Enviado al SII, pendiente de validación`;
+        esIntermedio = true;
+        break;
       default:
         mensaje = `Estado: ${estado} - ${glosa || 'Sin descripción'}`;
     }
