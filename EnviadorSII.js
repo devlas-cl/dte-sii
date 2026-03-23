@@ -1002,7 +1002,10 @@ class EnviadorSII {
     body += xml;
     body += `\r\n--${boundary}--\r\n`;
 
-    return await this._enviarMultipart(url, body, boundary, xml, 'EnvioBOLETA');
+    // El SII DTEUpload requiere ISO-8859-1. Convertir body a latin1 para que los bytes
+    // coincidan con la declaración XML → el SII decodifica correctamente → C14N correcto.
+    const bodyBuffer = Buffer.from(body, 'latin1');
+    return await this._enviarMultipart(url, bodyBuffer, boundary, xml, 'EnvioBOLETA');
   }
 
   /**
