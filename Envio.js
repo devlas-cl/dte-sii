@@ -128,8 +128,7 @@ class EnvioBOLETA extends EnvioBase {
       .map(s => `<SubTotDTE><TpoDTE>${s.TpoDTE}</TpoDTE><NroDTE>${s.NroDTE}</NroDTE></SubTotDTE>`)
       .join('');
     
-    const xmlBase = `<?xml version="1.0" encoding="ISO-8859-1"?>`
-<EnvioBOLETA xmlns="http://www.sii.cl/SiiDte" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sii.cl/SiiDte EnvioBOLETA_v11.xsd" version="1.0"><SetDTE ID="${this.setId}"><Caratula version="1.0"><RutEmisor>${this.caratula.RutEmisor}</RutEmisor><RutEnvia>${this.caratula.RutEnvia}</RutEnvia><RutReceptor>${this.caratula.RutReceptor}</RutReceptor><FchResol>${this.caratula.FchResol}</FchResol><NroResol>${this.caratula.NroResol}</NroResol><TmstFirmaEnv>${this.caratula.TmstFirmaEnv}</TmstFirmaEnv>${subTotDTEs}</Caratula><!-- DTES_PLACEHOLDER --></SetDTE></EnvioBOLETA>`;
+    const xmlBase = `<?xml version="1.0" encoding="ISO-8859-1"?>\n<EnvioBOLETA xmlns="http://www.sii.cl/SiiDte" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sii.cl/SiiDte EnvioBOLETA_v11.xsd" version="1.0"><SetDTE ID="${this.setId}"><Caratula version="1.0"><RutEmisor>${this.caratula.RutEmisor}</RutEmisor><RutEnvia>${this.caratula.RutEnvia}</RutEnvia><RutReceptor>${this.caratula.RutReceptor}</RutReceptor><FchResol>${this.caratula.FchResol}</FchResol><NroResol>${this.caratula.NroResol}</NroResol><TmstFirmaEnv>${this.caratula.TmstFirmaEnv}</TmstFirmaEnv>${subTotDTEs}</Caratula><!-- DTES_PLACEHOLDER --></SetDTE></EnvioBOLETA>`;
     
     const dtesXml = this._extractDTEsXml();
     this.xmlSinFirma = xmlBase.replace('<!-- DTES_PLACEHOLDER -->', dtesXml);
@@ -182,8 +181,7 @@ class EnvioDTE extends EnvioBase {
       .map(s => `<SubTotDTE><TpoDTE>${s.TpoDTE}</TpoDTE><NroDTE>${s.NroDTE}</NroDTE></SubTotDTE>`)
       .join('');
     
-    const xmlBase = `<?xml version="1.0" encoding="UTF-8"?>
-<EnvioDTE xmlns="http://www.sii.cl/SiiDte" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sii.cl/SiiDte EnvioDTE_v10.xsd" version="1.0"><SetDTE ID="${this.setId}"><Caratula version="1.0"><RutEmisor>${this.caratula.RutEmisor}</RutEmisor><RutEnvia>${this.caratula.RutEnvia}</RutEnvia><RutReceptor>${this.caratula.RutReceptor}</RutReceptor><FchResol>${this.caratula.FchResol}</FchResol><NroResol>${this.caratula.NroResol}</NroResol><TmstFirmaEnv>${this.caratula.TmstFirmaEnv}</TmstFirmaEnv>${subTotDTEs}</Caratula><!-- DTES_PLACEHOLDER --></SetDTE></EnvioDTE>`;
+    const xmlBase = `<?xml version="1.0" encoding="ISO-8859-1"?>\n<EnvioDTE xmlns="http://www.sii.cl/SiiDte" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sii.cl/SiiDte EnvioDTE_v10.xsd" version="1.0"><SetDTE ID="${this.setId}"><Caratula version="1.0"><RutEmisor>${this.caratula.RutEmisor}</RutEmisor><RutEnvia>${this.caratula.RutEnvia}</RutEnvia><RutReceptor>${this.caratula.RutReceptor}</RutReceptor><FchResol>${this.caratula.FchResol}</FchResol><NroResol>${this.caratula.NroResol}</NroResol><TmstFirmaEnv>${this.caratula.TmstFirmaEnv}</TmstFirmaEnv>${subTotDTEs}</Caratula><!-- DTES_PLACEHOLDER --></SetDTE></EnvioDTE>`;
     
     const dtesXml = this._extractDTEsXml();
     this.xmlSinFirma = xmlBase.replace('<!-- DTES_PLACEHOLDER -->', dtesXml);
