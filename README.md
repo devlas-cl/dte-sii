@@ -78,6 +78,40 @@ console.log(resultado.trackId)
 
 Soporta `'certificacion'` y `'produccion'`. Pasarlo al instanciar `EnviadorSII`.
 
+## Estados SII — Interpretación de respuestas
+
+`EnviadorSII` interpreta automáticamente los códigos del SII en tres categorías:
+
+### QueryEstUp — Estado del sobre de envío
+
+| Código | Descripción | `esExitoso` | `esIntermedio` | `esRechazado` |
+|--------|-------------|:-----------:|:--------------:|:-------------:|
+| `EPR` | Envío Procesado | ✅ | | |
+| `RPR` | Procesado con Reparos | ✅ | | |
+| `REC` / `SOK` / `FOK` / `CRT` / `PRD` / `PDR` | En proceso de validación | | ✅ | |
+| `RSC` | Error en Schema XML | | | ✅ |
+| `RFR` | Error en Firma Digital | | | ✅ |
+| `RCT` | Error en Carátula | | | ✅ |
+
+### QueryEstDte — Estado del DTE individual
+
+| Código | Descripción | Clasificación |
+|--------|-------------|---------------|
+| `DOK` | Datos coinciden | ✅ Exitoso |
+| `DNK` | Datos no coinciden | ⏳ Intermedio |
+| `FAU` | Folio no autorizado | ❌ Rechazado |
+| `FNA` | Emisor no habilitado | ❌ Rechazado |
+| `FAN` / `AND` / `ANC` | Anulado | ❌ Rechazado |
+| `EMP` | Empresa sin autorización | ❌ Rechazado |
+
+### Códigos negativos (errores de consulta)
+
+Los códigos `-1` a `-14` son **errores del servidor de consulta SII**, no implican rechazo del documento. Todos resultan en `esIntermedio = true` y se pueden reintentar.
+
+> Ver `docs/README.md` en el repositorio para la tabla completa de estados con descripción detallada.
+
+---
+
 ## Licencia
 
 MIT — Copyright (c) 2026 [Devlas SpA](https://devlas.cl)
