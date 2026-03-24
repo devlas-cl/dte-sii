@@ -818,7 +818,7 @@ class EnviadorSII {
     
     switch (estado) {
       case 'EPR':
-        mensaje = '✅ Envío Procesado - ¡Listo para declarar cumplimiento!';
+        mensaje = '✅ Envío Procesado';
         esExitoso = true;
         break;
       case 'RPR':
@@ -873,50 +873,72 @@ class EnviadorSII {
         mensaje = `❌ Rechazado: ${glosa || 'Error en documento'}`;
         esRechazado = true;
         break;
-      // Códigos numéricos del SII (QueryEstUp)
+      // Códigos de schema/firma rechazados
+      case 'RSC':
+        mensaje = `❌ Rechazado por Error en Schema: ${glosa || 'XML no cumple XSD del SII'}`;
+        esRechazado = true;
+        break;
+      case 'PDR':
+        mensaje = '⏳ Envío en Proceso - Validando...';
+        esIntermedio = true;
+        break;
+      // Códigos numéricos negativos = errores del servicio de consulta SII (NO rechazo del documento)
+      // Según doc SII: son errores del sistema de consulta, el documento puede estar OK
       case '-11':
-        mensaje = `⏳ Pendiente de proceso - El sobre aún no ha sido revisado por el SII`;
+        mensaje = `⏳ Error de consulta SII (ERR/SQL/SRV_CODE) - Reintente más tarde`;
+        esIntermedio = true;
+        break;
+      case '-12':
+        mensaje = `⏳ Error retorno consulta SII - Reintente más tarde`;
+        esIntermedio = true;
+        break;
+      case '-13':
+        mensaje = `⏳ Error: RUT usuario nulo - Verificar autenticación`;
+        esIntermedio = true;
+        break;
+      case '-14':
+        mensaje = `⏳ Error XML retorno datos SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-10':
-        mensaje = `❌ Token inválido o no autorizado`;
-        esRechazado = true;
+        mensaje = `⏳ Error validación RUT usuario - Verificar credenciales`;
+        esIntermedio = true;
         break;
       case '-9':
-        mensaje = `❌ Firma del envío inválida - ${glosa || 'Verificar certificado'}`;
-        esRechazado = true;
+        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        esIntermedio = true;
         break;
       case '-8':
-        mensaje = `❌ El envío no pertenece al firmante`;
-        esRechazado = true;
+        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        esIntermedio = true;
         break;
       case '-7':
-        mensaje = `❌ Error en datos del receptor - ${glosa || 'Verificar RUT receptor'}`;
-        esRechazado = true;
+        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        esIntermedio = true;
         break;
       case '-6':
-        mensaje = `❌ Error en datos del emisor - ${glosa || 'Verificar RUT emisor'}`;
-        esRechazado = true;
+        mensaje = `⏳ Error: Usuario no autorizado para consultar - Verificar credenciales`;
+        esIntermedio = true;
         break;
       case '-5':
-        mensaje = `❌ Error de certificación - ${glosa || 'Verificar proceso de certificación'}`;
-        esRechazado = true;
+        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        esIntermedio = true;
         break;
       case '-4':
-        mensaje = `❌ Envío fuera de plazo - ${glosa || 'El plazo de envío ha vencido'}`;
-        esRechazado = true;
+        mensaje = `⏳ Error obtención de datos SII - Reintente más tarde`;
+        esIntermedio = true;
         break;
       case '-3':
-        mensaje = `❌ RUT emisor no coincide con el certificado`;
-        esRechazado = true;
+        mensaje = `⏳ Error: RUT usuario no existe en SII - Verificar autenticación`;
+        esIntermedio = true;
         break;
       case '-2':
-        mensaje = `❌ Error de firma en el sobre - ${glosa || 'Verificar firma digital'}`;
-        esRechazado = true;
+        mensaje = `⏳ Error retorno SII - Reintente más tarde`;
+        esIntermedio = true;
         break;
       case '-1':
-        mensaje = `❌ Error de schema XML - ${glosa || 'El XML no cumple el XSD del SII'}`;
-        esRechazado = true;
+        mensaje = `⏳ Error: Campo estado no retornado por SII - Reintente más tarde`;
+        esIntermedio = true;
         break;
       case '0':
         mensaje = `⏳ Enviado al SII, pendiente de validación`;
@@ -936,6 +958,7 @@ class EnviadorSII {
       glosa,
       mensaje,
       numAtencion: numAtencionMatch ? numAtencionMatch[1] : null,
+      xmlRaw: decoded,
     };
   }
 
