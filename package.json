@@ -1,6 +1,6 @@
 {
   "name": "@devlas/dte-sii",
-  "version": "2.5.10",
+  "version": "2.5.11",
   "description": "Facturación y boletas electrónicas para el SII de Chile. Genera, timbra, firma y envía DTEs, libros electrónicos y automatiza la certificación.",
   "main": "index.js",
   "types": "dte-sii.d.ts",
