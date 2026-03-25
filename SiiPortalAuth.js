@@ -326,7 +326,7 @@ class SiiPortalAuth {
    * @param {string} rutEmpresa - RUT sin DV (ej: "78206276")
    * @param {string} dvEmpresa  - DV (ej: "K")
    * @param {Object} [cookieJar] - Sesión autenticada (si omite, autenticará)
-   * @returns {Promise<Object>} { rut, razonSocial, direccion, comuna, acteco, glosa }
+   * @returns {Promise<Object>} { rut, razonSocial, direccion, comuna, dirReg, acteco, glosa }
    */
   async obtenerDatosContribuyente(rutEmpresa, dvEmpresa, cookieJar = null) {
     const jar = cookieJar || await this.autenticar();
@@ -395,14 +395,20 @@ class SiiPortalAuth {
       }
     }
 
+    const dirReg = datos['DIRECCIÓN REGIONAL DEL CONTRIBUYENTE'] || datos['DIRECCION REGIONAL DEL CONTRIBUYENTE'] || null;
+    const glosa  = datos['GLOSA DESCRIPTIVA'] || null;
+
     return {
-      rut:        datos['DATOS DEL CONTRIBUYENTE RUT'] || null,
-      razonSocial: datos['NOMBRE O RAZÓN SOCIAL'] || datos['NOMBRE O RAZON SOCIAL'] || null,
+      rut:          datos['DATOS DEL CONTRIBUYENTE RUT'] || null,
+      razonSocial:  datos['NOMBRE O RAZÓN SOCIAL'] || datos['NOMBRE O RAZON SOCIAL'] || null,
+      giro:         actividades[0]?.descripcion || null,  // descripción de la primera actividad económica
       direccion,
       comuna,
-      acteco:     actividades[0]?.codigo || null,
-      actividades: actividades.length ? actividades : null,
-      glosa:      datos['GLOSA DESCRIPTIVA'] || null,
+      dirReg,
+      sucursal_sii: dirReg ? `S.I.I. - ${dirReg}` : null,
+      acteco:       actividades[0]?.codigo || null,
+      actividades:  actividades.length ? actividades : null,
+      glosa,
     };
   }
 
