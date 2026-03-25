@@ -208,7 +208,7 @@ class MuestrasImpresas {
    * @param {string} tedXml - XML del TED
    * @returns {Promise<string>} Data URI de la imagen PNG
    */
-  async generarPdf417(tedXml) {
+  async generarPdf417(tedXml, height = 12) {
     if (!tedXml || !tedXml.includes('<TED')) {
       throw new Error('No se encontró TED para generar PDF417');
     }
@@ -223,7 +223,7 @@ class MuestrasImpresas {
       bcid: 'pdf417',
       text: binaryString,
       scale: 3,
-      height: 12,
+      height,
       padding: 6,
       includetext: false,
       // CRÍTICO: Indicar a bwip-js que el texto ya está en formato binario 8-bit
