@@ -1102,13 +1102,17 @@ class SiiCertificacion {
     for (const [key, { nombre, regex }] of Object.entries(SiiCertificacion.ESTADO_PATTERNS)) {
       const match = result.rawHtml?.match(regex);
       if (match) {
+        const estadoTexto = match[1].trim();
+        const upper = estadoTexto.toUpperCase();
         estados[key] = {
           nombre,
-          estado: match[1].trim(),
-          esConforme: match[1].trim().toUpperCase().includes('REVISADO CONFORME'),
-          enRevision: match[1].trim().toUpperCase().includes('EN REVISION'),
-          esRechazado: match[1].trim().toUpperCase().includes('RECHAZADO') || 
-                       match[1].trim().toUpperCase().includes('ERRORES'),
+          estado: estadoTexto,
+          esConforme:  upper.includes('REVISADO CONFORME'),
+          enRevision:  upper.includes('EN REVISION'),
+          esRechazado: upper.includes('RECHAZADO') || upper.includes('ERRORES'),
+          esReparos:   upper.includes('REPAROS'),
+          porRealizar: upper.includes('POR REALIZAR'),
+          esAnulado:   upper.includes('ANULADO'),
         };
       }
     }
@@ -1119,9 +1123,12 @@ class SiiCertificacion {
       estados.setSimulacion = {
         nombre: 'SET SIMULACION',
         estado: 'PENDIENTE CONFIRMAR',
-        esConforme: false,
-        enRevision: true,
+        esConforme:  false,
+        enRevision:  true,
         esRechazado: false,
+        esReparos:   false,
+        porRealizar: false,
+        esAnulado:   false,
         pendienteConfirmar: true,
       };
     }
