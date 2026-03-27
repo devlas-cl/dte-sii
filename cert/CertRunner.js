@@ -1217,6 +1217,14 @@ class CertRunner {
         return { success: true, etapa: 'INTERCAMBIO' };
       }
 
+      // ✅ TAMBIÉN: Etapas que vienen DESPUÉS de INTERCAMBIO (simulación + intercambio ya completos)
+      const ETAPAS_POST_INTERCAMBIO = ['DOCUMENTOS IMPRESOS', 'MUESTRAS IMPRESAS', 'BOLETA', 'AUTORIZADO', 'COMPLETADO'];
+      if (avance.etapaActual && ETAPAS_POST_INTERCAMBIO.some(e => avance.etapaActual.toUpperCase().includes(e))) {
+        console.log(`      📍 Etapa actual: ${avance.etapaActual}`);
+        console.log('\n   🎉 ¡SIMULACIÓN + INTERCAMBIO COMPLETADOS! Empresa en etapa: ' + avance.etapaActual);
+        return { success: true, etapa: avance.etapaActual, postIntercambio: true };
+      }
+
       // ✅ SEGUNDO: Verificar indicador de formulario de confirmación (simulación aprobada pendiente confirmar)
       if (avance.simulacionAprobadaIndicador) {
         console.log(`      ✅ Formulario de confirmación detectado`);
