@@ -5,7 +5,7 @@
   "main": "index.js",
   "types": "dte-sii.d.ts",
   "license": "MIT",
-  "author": "Devlas SpA <hola@devlas.cl> (https://devlas.cl)",
+  "author": "Devlas SpA <ti@devlas.cl> (https://devlas.cl)",
   "homepage": "https://github.com/devlas-cl/dte-sii",
   "repository": {
     "type": "git",
