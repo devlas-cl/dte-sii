@@ -124,12 +124,12 @@ function mapearTipoDocLibro(tipo) {
   if (t.includes('FACTURA EXENTA ELECTRONICA') || (t.includes('NO AFECTA') && t.includes('ELECTRONICA'))) return 34;
   if (t.includes('FACTURA ELECTRONICA')) return 33;
   if (t.includes('FACTURA EXENTA') || t.includes('FACTURA NO AFECTA')) return 30; // exenta papel
-  if (t === 'FACTURA') return 30;
+  if (t === 'FACTURA') return 30; // factura afecta papel → TpoDoc=30 (regular libro); exentos libro usa lógica especial
   if (t.includes('NOTA DE CREDITO') && (t.includes('ELECTRONICA') || t.includes('ELECTRONICO'))) return 61;
   if (t.includes('NOTA DE CREDITO')) return 60;
   if (t.includes('NOTA DE DEBITO') && (t.includes('ELECTRONICA') || t.includes('ELECTRONICO'))) return 56;
   if (t.includes('NOTA DE DEBITO')) return 55;
-  return 30;
+  return null;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -991,13 +991,25 @@ function generarEstructuraSetExportacion(set) {
 /**
  * Genera estructura para LIBRO DE COMPRAS (IECV)
  */
-function generarEstructuraLibroCompras(set) {
+function generarEstructuraLibroCompras(set, opts = {}) {
+  const esExentos = opts.esExentos === true;
   const detalle = [];
   const resumen = {};
 
   for (const doc of set.documentosLibro) {
-    const tipoDoc = mapearTipoDocLibro(doc.tipoDocumento);
+    let tipoDoc = mapearTipoDocLibro(doc.tipoDocumento);
     const tasaIva = 0.19;
+
+    // En libro de compras EXENTOS, los TpoDoc correctos son:
+    //   FACTURA (papel afecta)         → 30  (con IVANoRec)
+    //   FACTURA EXENTA (papel)         → 32  (Fac. Venta B&S No Afectos/Exentos, papel)
+    //   FACTURA ELECTRONICA            → 33  (con IVANoRec si tiene montoAfecto)
+    //   FACTURA EXENTA ELECTRONICA     → 34  (puramente exenta)
+    //   NC/NCE/ND/NDE                  → 60/61/55/56
+    // Total: 7 tipos distintos = 7 líneas de resumen
+    const esFacturaExentaPapel = esExentos && tipoDoc === 30
+      && !doc.montoAfecto && !!doc.montoExento;
+    if (esFacturaExentaPapel) tipoDoc = 32;
 
     const detalleDoc = {
       TpoDoc: tipoDoc,
@@ -1035,16 +1047,56 @@ function generarEstructuraLibroCompras(set) {
       detalleDoc.IVARetTotal = Math.round((doc.montoAfecto || 0) * tasaIva);
     }
 
-    // Referencia para notas de crédito
-    if (tipoDoc === 60 && doc.observacion) {
-      const matchRef = doc.observacion.match(/FACTURA(?:\s+ELECTRONICA)?\s+(\d+)/i);
-      if (matchRef) {
-        detalleDoc.TpoDocRef = doc.observacion.includes('ELECTRONICA') ? 33 : 30;
-        detalleDoc.FolioDocRef = parseInt(matchRef[1]);
+    // Referencia para notas de crédito/débito (TpoDoc 60/61/55/56)
+    const esNota = (tipoDoc === 60 || tipoDoc === 61 || tipoDoc === 55 || tipoDoc === 56);
+    if (esNota && doc.observacion) {
+      // El folio referenciado es siempre el último número de la observación
+      const matchFolio = doc.observacion.match(/(\d+)\s*$/i);
+      if (matchFolio) {
+        detalleDoc.FolioDocRef = parseInt(matchFolio[1]);
+        if (doc.observacion.match(/FACTURA EXENTA ELECTRONICA/i)) {
+          detalleDoc.TpoDocRef = 34;
+        } else if (doc.observacion.match(/FACTURA EXENTA/i)) {
+          detalleDoc.TpoDocRef = esExentos ? 32 : 30;
+        } else if (doc.observacion.match(/FACTURA.*ELECTRONICA/i)) {
+          detalleDoc.TpoDocRef = 33;
+        } else if (doc.observacion.match(/FACTURA/i)) {
+          detalleDoc.TpoDocRef = 30;
+        }
+        // Sin TpoDocRef si no se menciona FACTURA (ej. referencia a otra NC/ND)
       }
     }
 
-    detalleDoc.MntTotal = (detalleDoc.MntNeto || 0) + (detalleDoc.MntIVA || 0) + (detalleDoc.MntExe || 0);
+    // En libro de compras EXENTOS: lógica por tipo de doc
+    //   Docs con montoAfecto → IVANoRec (IVA no recuperable)
+    //   Docs puramente exentos (TpoDoc=32/34) → sin IVANoRec
+    //   TpoDoc=46 → usa IVARetTotal (no IVANoRec)
+    const esPuramenteExento = !doc.montoAfecto && !!doc.montoExento;
+    if (esExentos && tipoDoc !== 46 && !esPuramenteExento) {
+      const mntIVA = detalleDoc.MntIVA || 0;
+      detalleDoc.IVANoRec = { CodIVANoRec: 1, MntIVANoRec: mntIVA };
+      detalleDoc.MntIVA = 0;
+      if (detalleDoc.MntNeto === undefined || detalleDoc.MntNeto === null) {
+        detalleDoc.MntNeto = 0;
+      }
+    }
+    // TpoDoc=32 (Fac. Exenta papel): solo MntExe + MntTotal, sin TasaImp/MntNeto/MntIVA/IVANoRec
+    if (esFacturaExentaPapel) {
+      delete detalleDoc.TasaImp;
+      delete detalleDoc.MntNeto;
+      delete detalleDoc.MntIVA;
+      delete detalleDoc.IVANoRec;
+    }
+    // Para docs puramente exentos que NO son TpoDoc=32: TasaImp=19 + MntNeto=0 + MntIVA=0
+    if (esExentos && esPuramenteExento && !esFacturaExentaPapel) {
+      detalleDoc.TasaImp = Math.round(tasaIva * 100); // TasaImp=19 requerido
+      detalleDoc.MntNeto = 0;
+      detalleDoc.MntIVA = 0;
+    }
+
+    // MntTotal incluye IVANoRec (IVA pagado pero no deducible)
+    const mntIvaNoRecTotal = (esExentos && detalleDoc.IVANoRec) ? (detalleDoc.IVANoRec.MntIVANoRec || 0) : 0;
+    detalleDoc.MntTotal = (detalleDoc.MntNeto || 0) + (detalleDoc.MntIVA || 0) + (detalleDoc.MntExe || 0) + mntIvaNoRecTotal;
     if (doc.retencionTotal && tipoDoc === 46) {
       detalleDoc.MntTotal = detalleDoc.MntNeto || 0; // Sin IVA pagado
     }
@@ -1067,6 +1119,36 @@ function generarEstructuraLibroCompras(set) {
     resumen[tipoDoc].TotMntNeto += detalleDoc.MntNeto || 0;
     resumen[tipoDoc].TotMntIVA += detalleDoc.MntIVA || 0;
     resumen[tipoDoc].TotMntTotal += detalleDoc.MntTotal || 0;
+  }
+
+  // Post-proceso para libro de compras EXENTOS:
+  // NC/NCE con sin montos declarados que anulan un doc con montos deben heredar esos montos
+  if (esExentos) {
+    for (const doc of detalle) {
+      const esNotaAnulacion = (doc.TpoDoc === 60 || doc.TpoDoc === 61 || doc.TpoDoc === 55 || doc.TpoDoc === 56)
+        && !doc.MntNeto && !doc.MntExe && doc.FolioDocRef;
+      if (esNotaAnulacion) {
+        const refDoc = detalle.find(d => d.NroDoc === doc.FolioDocRef);
+        if (refDoc) {
+          if (refDoc.MntExe) doc.MntExe = refDoc.MntExe;
+          if (refDoc.MntNeto) {
+            doc.MntNeto = refDoc.MntNeto;
+            // Heredar IVANoRec del doc referenciado
+            if (refDoc.IVANoRec) {
+              doc.IVANoRec = { CodIVANoRec: 1, MntIVANoRec: refDoc.IVANoRec.MntIVANoRec || 0 };
+            }
+          }
+          const mntIvaNoRecDoc = (doc.IVANoRec ? (doc.IVANoRec.MntIVANoRec || 0) : 0);
+          doc.MntTotal = (doc.MntNeto || 0) + (doc.MntExe || 0) + mntIvaNoRecDoc;
+          // Actualizar resumen para este TpoDoc
+          if (resumen[doc.TpoDoc]) {
+            resumen[doc.TpoDoc].TotMntExe += doc.MntExe || 0;
+            resumen[doc.TpoDoc].TotMntNeto += doc.MntNeto || 0;
+            resumen[doc.TpoDoc].TotMntTotal += doc.MntTotal;
+          }
+        }
+      }
+    }
   }
 
   return {
@@ -1136,8 +1218,9 @@ function generarEstructurasParaScripts(datosExtraidos, receptorConfig = {}) {
         estructuras.libroCompras = generarEstructuraLibroCompras(set);
         break;
       case 'LIBRO_COMPRAS_EXENTOS':
-        // Misma estructura que LIBRO_COMPRAS pero marcado como exentos
-        estructuras.libroComprasExentos = generarEstructuraLibroCompras(set);
+        // En el libro de exentos, FACTURA afecta papel usa TpoDoc=29 (Factura de Inicio)
+        // para distinguirse de FACTURA EXENTA (TpoDoc=30) en el ResumenPeriodo
+        estructuras.libroComprasExentos = generarEstructuraLibroCompras(set, { esExentos: true });
         break;
       case 'LIBRO_VENTAS':
         // El libro de ventas se genera con los datos del set básico o exento

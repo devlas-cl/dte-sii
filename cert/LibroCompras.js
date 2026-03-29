@@ -120,10 +120,32 @@ class LibroCompras {
       else if (doc.IVANoRec) {
         docAjustado.TasaImp = 0;
         docAjustado.MntIVA = 0;
+        // SII requiere MntNeto presente (aunque sea 0) cuando hay IVANoRec — LBR-3 si falta
+        if (docAjustado.MntNeto === undefined || docAjustado.MntNeto === null) {
+          docAjustado.MntNeto = 0;
+        }
       }
       // Caso normal: Asegurar TasaImp sea número entero (19) no decimal (0.19)
+      // Si hay TasaImp pero no hay MntNeto, el SII igual exige TasaImp + MntNeto=0 + MntIVA=0 explícitos
       else if (doc.TasaImp !== undefined) {
-        docAjustado.TasaImp = doc.TasaImp < 1 ? Math.round(doc.TasaImp * 100) : doc.TasaImp;
+        const tasaNum = doc.TasaImp < 1 ? Math.round(doc.TasaImp * 100) : doc.TasaImp;
+        const tieneMntNeto = doc.MntNeto !== undefined && Number(doc.MntNeto) > 0;
+        const tieneMntExe = doc.MntExe !== undefined && Number(doc.MntExe) > 0;
+        if (tasaNum > 0 && !tieneMntNeto && tieneMntExe) {
+          // Documento con TasaImp + MntExe pero sin MntNeto (p.ej. TipoDoc=30 folio exento)
+          // SII exige TasaImp + MntNeto + MntIVA presentes; con MntNeto=0 da LOK+LBR-2 (aceptado)
+          // Borrar los campos da LRH+LBR-3 (rechazado) — NO borrar
+          docAjustado.TasaImp = tasaNum;
+          docAjustado.MntNeto = 0;
+          docAjustado.MntIVA = 0;
+        } else if (tasaNum > 0 && !tieneMntNeto) {
+          // TasaImp presente pero sin MntNeto ni MntExe: SII exige ceros explícitos
+          docAjustado.TasaImp = tasaNum;
+          docAjustado.MntNeto = 0;
+          docAjustado.MntIVA = 0;
+        } else {
+          docAjustado.TasaImp = tasaNum;
+        }
       }
 
       return docAjustado;
@@ -262,6 +284,7 @@ class LibroCompras {
           TotIVANoRec: {},
           TotOtrosImp: {},
           TotIVARetTotal: 0,
+          TotMntNoFact: 0,
         });
       }
 
@@ -271,6 +294,7 @@ class LibroCompras {
       r.TotMntNeto += Number(doc.MntNeto || 0);
       r.TotMntIVA += Number(doc.MntIVA || 0);
       r.TotMntTotal += Number(doc.MntTotal || 0);
+      r.TotMntNoFact += Number(doc.MntNoFact || 0);
 
       // IVA Uso Común
       if (doc.IVAUsoComun) {
@@ -319,10 +343,26 @@ class LibroCompras {
         TotDoc: r.TotDoc,
       };
 
-      if (r.TotMntExe > 0) limpio.TotMntExe = r.TotMntExe;
-      if (r.TotMntNeto > 0) limpio.TotMntNeto = r.TotMntNeto;
-      if (r.TotMntIVA > 0) limpio.TotMntIVA = r.TotMntIVA;
-      if (r.TotMntTotal > 0) limpio.TotMntTotal = r.TotMntTotal;
+      // TotMntExe siempre presente (incluso como 0)
+      // TotMntNeto y TotMntIVA solo se emiten cuando son > 0:
+      //   - Para docs afectos: siempre > 0 → se emiten
+      //   - Para docs puramente exentos (TpoDoc=30/34/etc sin IVA): son 0
+      //     y emitir <TotMntNeto>0</TotMntNeto> causa 'El Monto Neto No Cuadra'
+      //     porque el SII espera que esté AUSENTE, no cero
+      limpio.TotMntExe = r.TotMntExe;
+      // El XSD LibroCV requiere el orden estricto: TotMntNeto → TotMntIVA → TotIVANoRec/TotOtrosImp
+      // TotMntNeto y TotMntIVA son SIEMPRE requeridos por el XSD (incluso como 0)
+      const tieneIVANoRec = Object.keys(r.TotIVANoRec).length > 0;
+      const tieneOtrosImp = Object.keys(r.TotOtrosImp).length > 0;
+      const necesitaIVAFields = tieneIVANoRec || tieneOtrosImp;
+      limpio.TotMntNeto = r.TotMntNeto;
+      limpio.TotMntIVA = r.TotMntIVA;
+      limpio.TotMntTotal = r.TotMntTotal;
+
+      // MntNoFact (TpoDoc=32 Liquidación-Factura)
+      if (r.TotMntNoFact > 0) {
+        limpio.TotMntNoFact = r.TotMntNoFact;
+      }
 
       // IVA Uso Común
       if (r.TotOpIVAUsoComun > 0) {

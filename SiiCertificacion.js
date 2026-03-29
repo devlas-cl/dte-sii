@@ -378,14 +378,22 @@ class SiiCertificacion {
       // Parsear estado de cada set/libro
       const estadoSets = {};
       
-      // Buscar filas de la tabla con formato:
-      // <td>SET/LIBRO nombre</td><td><b>ESTADO</b></td>
-      const rowRegex = /<tr[^>]*>[\s\S]*?<td[^>]*>[\s\S]*?(SET[^<]*|LIBRO[^<]*)<\/font><\/td>[\s\S]*?<td[^>]*>[\s\S]*?<b>([^<]+)<\/b>/gi;
-      let rowMatch;
-      while ((rowMatch = rowRegex.exec(html)) !== null) {
-        const nombre = rowMatch[1].trim();
-        const estado = rowMatch[2].trim().toUpperCase();
-        estadoSets[nombre] = estado;
+      // Parsear estado de cada set/libro fila por fila para evitar falsos positivos
+      // (la regex global cruzaba filas y asignaba REVISADO CONFORME de SET CASO GENERAL a LIBRO DE VENTAS)
+      const rows = html.split(/<\/tr>/i);
+      for (const row of rows) {
+        const nameMatch = /(SET[^<\n\r]*|LIBRO[^<\n\r]*)<\/font><\/td>/i.exec(row);
+        if (!nameMatch) continue;
+        const nombre = nameMatch[1].trim();
+        // Estado explícito en <b>...</b>
+        const stateMatch = /<b>([^<]+)<\/b>/i.exec(row);
+        if (stateMatch) {
+          estadoSets[nombre] = stateMatch[1].trim().toUpperCase();
+        } else {
+          // Fila con campos input: leer valor EST oculto (S01 = sin declarar, S21 = declarado)
+          const estMatch = /name="EST\d+"[^>]*value="([^"]+)"/i.exec(row);
+          estadoSets[nombre] = estMatch ? estMatch[1] : 'S01';
+        }
       }
       
       // Verificar si todos los sets requeridos están REVISADO CONFORME
@@ -541,16 +549,17 @@ class SiiCertificacion {
       // El SII cambia el orden según qué sets están aprobados
       const fieldMapping = {};
       
-      if (process.env.DEBUG_SII) {
+      // Guardar pe_avance2 para debug (siempre)
+      {
         const fs = require('fs');
         const path = require('path');
-        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug');
+        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
         if (!fs.existsSync(debugDir)) {
           fs.mkdirSync(debugDir, { recursive: true });
         }
-        const debugPath = path.join(debugDir, 'pe_avance2.html');
+        const debugPath = path.join(debugDir, 'pe_avance2_form.html');
         fs.writeFileSync(debugPath, formHtml, 'utf8');
-        console.log('   [DEBUG] HTML guardado en:', debugPath);
+        console.log('   📄 HTML pe_avance2 formulario guardado en debug/cert-v2/pe_avance2_form.html');
       }
       
       // Extraer todas las filas <tr>...</tr> del formulario
@@ -737,13 +746,112 @@ class SiiCertificacion {
       // Éxito si el form se envió sin errores de sesión/contenido.
       // El estado del envío (ERRORES O REPAROS / EN REVISION / REVISADO CONFORME)
       // NO determina el éxito de la declaración — eso se resuelve vía polling.
-      const success = (!hasError || hasSuccess) && !sesionExpirada && !contenidoNoCorresponde;
+      const postOk = (!hasError || hasSuccess) && !sesionExpirada && !contenidoNoCorresponde;
+
+      if (!postOk) {
+        return {
+          success: false,
+          error: errorMsg || undefined,
+          status: declareResponse.status,
+          rawHtml: body,
+          formHtml,
+          setsDeclarados: Object.keys(sets),
+          formDataSent: formData,
+        };
+      }
+
+      // Guardar HTML de pe_avance3 (respuesta de declaración) siempre para debug
+      {
+        const fs = require('fs');
+        const path = require('path');
+        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
+        if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+        fs.writeFileSync(path.join(debugDir, 'pe_avance3_response.html'), body, 'utf8');
+        console.log('   📄 HTML pe_avance3 guardado en debug/cert-v2/pe_avance3_response.html');
+      }
+
+      // 7. VERIFICACIÓN POST-DECLARACIÓN: Re-leer pe_avance2 y confirmar que los TrackIDs se guardaron
+      // Si aparece "EN REVISION" → la declaración fue aceptada y el SII está procesando
+      // Si reaparecen inputs vacíos → la declaración no se guardó
+      let verificado = true;
+      let verificacionError = '';
+      let enRevision = false;
+      try {
+        const verifyResponse = await this.session.submitForm(
+          '/cvc_cgi/dte/pe_avance2',
+          { RUT_EMP: this.rutEmpresa, DV_EMP: this.dvEmpresa, ACEPTAR: 'Continuar' },
+          'https://maullin.sii.cl/cvc_cgi/dte/pe_avance1'
+        );
+        const verifyHtml = verifyResponse.body || '';
+
+        // Guardar HTML de verificación pe_avance2 siempre
+        {
+          const fs = require('fs');
+          const path = require('path');
+          const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
+          if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+          fs.writeFileSync(path.join(debugDir, 'pe_avance2_verify.html'), verifyHtml, 'utf8');
+          console.log('   📄 HTML pe_avance2 verificación guardado en debug/cert-v2/pe_avance2_verify.html');
+        }
+
+        // Para cada set que declaramos, verificar estado
+        const verifyRows = verifyHtml.split(/<\/tr>/i);
+        const camposVacios = [];
+        const camposEnRevision = [];
+        for (const [setName, index] of Object.entries(fieldMapping)) {
+          if (!sets[setName]) continue;
+          for (const row of verifyRows) {
+            const numEnvMatch = row.match(new RegExp(`NAME="NUM_ENV${index}"`, 'i'));
+            if (!numEnvMatch) {
+              // Si no hay input NUM_ENV, verificar si aparece REVISADO CONFORME o EN REVISION
+              const labelPattern = patterns.find(p => p.name === setName);
+              if (labelPattern && labelPattern.label.test(row)) {
+                if (/<b>[^<]*REVISADO CONFORME[^<]*<\/b>/i.test(row)) break;
+                if (/EN REVISION/i.test(row)) {
+                  camposEnRevision.push(setName);
+                  break;
+                }
+              }
+              continue;
+            }
+            // Tiene input — verificar si tiene valor o está REVISADO CONFORME
+            const tieneConforme = /<b>[^<]*REVISADO CONFORME[^<]*<\/b>/i.test(row);
+            if (tieneConforme) break;
+            if (/EN REVISION/i.test(row)) {
+              camposEnRevision.push(setName);
+              break;
+            }
+            const valueMatch = row.match(new RegExp(`NAME="NUM_ENV${index}"[^>]*value="([^"]*)"`, 'i'));
+            const tieneValor = valueMatch && valueMatch[1] && valueMatch[1].trim() !== '';
+            if (!tieneValor) {
+              camposVacios.push(setName);
+            }
+            break;
+          }
+        }
+
+        if (camposEnRevision.length > 0) {
+          enRevision = true;
+          console.log(`   🔄 EN REVISION: ${camposEnRevision.join(', ')} — declaración aceptada, SII procesando`);
+        }
+
+        if (camposVacios.length > 0 && !enRevision) {
+          verificado = false;
+          verificacionError = `Declaración NO se guardó en el portal SII. Campos vacíos para: ${camposVacios.join(', ')}. Posible error de sesión o TrackID no reconocido.`;
+          console.log(`   ⚠️ ${verificacionError}`);
+        }
+      } catch (verifyErr) {
+        console.log(`   ⚠️ No se pudo verificar la declaración: ${verifyErr.message}`);
+      }
 
       return {
-        success,
-        error: errorMsg || undefined,
+        success: verificado || enRevision,
+        error: verificacionError || errorMsg || undefined,
+        verificado,
+        enRevision,
         status: declareResponse.status,
         rawHtml: body,
+        formHtml,
         setsDeclarados: Object.keys(sets),
         formDataSent: formData,
       };

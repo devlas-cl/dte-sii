@@ -348,6 +348,16 @@ class CertRunner {
       const result = await this.siiCert.declararAvance({ sets });
       lastResult = result;
 
+      // Guardar el form pe_avance2 (antes del POST) para debug
+      if (result.formHtml) {
+        fs.writeFileSync(
+          path.join(this.debugDir, `${debugPrefix}-pe_avance2-${intento}.html`),
+          result.formHtml,
+          'utf8'
+        );
+      }
+
+      // Guardar la respuesta pe_avance3 (despues del POST) para debug
       if (result.rawHtml) {
         fs.writeFileSync(
           path.join(this.debugDir, `${debugPrefix}-${intento}.html`),
@@ -369,6 +379,11 @@ class CertRunner {
 
       if (noProcessedError && intento < maxIntentos) {
         console.log(`   ⏳ SII aún procesando, reintentando en ${intervalo / 1000}s...`);
+        await sleep(intervalo);
+      } else if (result.verificado === false && intento < maxIntentos) {
+        // Verificación post-declaración falló: los campos quedaron vacíos en el portal
+        console.log(`   ⚠️ Verificación fallida: ${result.error}`);
+        console.log(`   🔄 Reintentando declaración en ${intervalo / 1000}s...`);
         await sleep(intervalo);
       } else if (!result.success) {
         console.log(`   ⚠️ Error declarando ${label}: ${result.error || 'desconocido'}`);
@@ -460,6 +475,7 @@ class CertRunner {
    * @param {Object} [options] - Opciones
    * @param {Object} [options.setBasicoResult] - Resultado del SetBasico
    * @param {Object} [options.setGuiaResult] - Resultado del SetGuia
+   * @param {Object} [options.setsResultados] - Track IDs de los sets (basico/guia/exenta/compra) para incluirlos en la declaración conjunta
    * @returns {Promise<Object>} Resultado con todos los libros
    */
   async ejecutarFase4Libros(options = {}) {
@@ -471,12 +487,49 @@ class CertRunner {
     const resultados = {};
     const errores = [];
 
+    // Verificar cuáles libros ya están REVISADO CONFORME en el portal (no re-enviar)
+    let _estadoActual = {};
+    try {
+      const _consultaPrevia = await this.siiCert.consultarEstadoSets();
+      if (_consultaPrevia.success) _estadoActual = _consultaPrevia.estadoSets || {};
+      const _yaConformes = Object.entries(_estadoActual)
+        .filter(([k, v]) => k.toUpperCase().includes('LIBRO') && v === 'REVISADO CONFORME')
+        .map(([k]) => k);
+      if (_yaConformes.length) {
+        console.log(`   ℹ️  Ya en REVISADO CONFORME (se omitirán): ${_yaConformes.join(', ')}`);
+      }
+    } catch (_e) { /* ignorar error de consulta previa */ }
+
+    const _estaConforme = (nombre) => {
+      const nombreUpper = nombre.toUpperCase();
+      const e = Object.entries(_estadoActual).find(([k]) => {
+        const ku = k.toUpperCase();
+        if (nombreUpper === 'LIBRO DE COMPRAS') return ku.includes('LIBRO DE COMPRAS') && !ku.includes('EXENTOS');
+        return ku.includes(nombreUpper);
+      });
+      return e && e[1] === 'REVISADO CONFORME';
+    };
+
+    // Helper: guardar resultados parciales a disco tras cada envío exitoso
+    const _resultadosLibrosPath = path.join(this.debugDir, 'resultados-libros.json');
+    const _guardarResultadosParciales = () => {
+      try {
+        fs.writeFileSync(_resultadosLibrosPath, JSON.stringify(resultados, null, 2));
+      } catch (_e) { /* ignorar */ }
+    };
+
     try {
       // 1. Libro de Compras (usa datos del SII)
-      console.log('\n📖 Enviando Libro de Compras...');
-      resultados.libroCompras = await this.ejecutarLibroCompras(options);
-      if (!resultados.libroCompras.success) {
-        errores.push(`Libro Compras: ${resultados.libroCompras.error}`);
+      if (_estaConforme('LIBRO DE COMPRAS')) {
+        console.log('\n✅ Libro de Compras ya está REVISADO CONFORME — omitiendo');
+      } else {
+        console.log('\n📖 Enviando Libro de Compras...');
+        resultados.libroCompras = await this.ejecutarLibroCompras(options);
+        if (!resultados.libroCompras.success) {
+          errores.push(`Libro Compras: ${resultados.libroCompras.error}`);
+        } else {
+          _guardarResultadosParciales();
+        }
       }
     } catch (e) {
       errores.push(`Libro Compras: ${e.message}`);
@@ -484,10 +537,16 @@ class CertRunner {
 
     try {
       // 2. Libro de Ventas (usa SetBasico)
-      console.log('\n📖 Enviando Libro de Ventas...');
-      resultados.libroVentas = await this.ejecutarLibroVentas(options);
-      if (!resultados.libroVentas.success) {
-        errores.push(`Libro Ventas: ${resultados.libroVentas.error}`);
+      if (_estaConforme('LIBRO DE VENTAS')) {
+        console.log('\n✅ Libro de Ventas ya está REVISADO CONFORME — omitiendo');
+      } else {
+        console.log('\n📖 Enviando Libro de Ventas...');
+        resultados.libroVentas = await this.ejecutarLibroVentas(options);
+        if (!resultados.libroVentas.success) {
+          errores.push(`Libro Ventas: ${resultados.libroVentas.error}`);
+        } else {
+          _guardarResultadosParciales();
+        }
       }
     } catch (e) {
       errores.push(`Libro Ventas: ${e.message}`);
@@ -495,22 +554,34 @@ class CertRunner {
 
     try {
       // 3. Libro de Guías (usa SetGuia)
-      console.log('\n📖 Enviando Libro de Guías...');
-      resultados.libroGuias = await this.ejecutarLibroGuias(options);
-      if (!resultados.libroGuias.success) {
-        errores.push(`Libro Guías: ${resultados.libroGuias.error}`);
+      if (_estaConforme('LIBRO DE GUIAS')) {
+        console.log('\n✅ Libro de Guías ya está REVISADO CONFORME — omitiendo');
+      } else {
+        console.log('\n📖 Enviando Libro de Guías...');
+        resultados.libroGuias = await this.ejecutarLibroGuias(options);
+        if (!resultados.libroGuias.success) {
+          errores.push(`Libro Guías: ${resultados.libroGuias.error}`);
+        } else {
+          _guardarResultadosParciales();
+        }
       }
     } catch (e) {
       errores.push(`Libro Guías: ${e.message}`);
     }
 
-    // 4. Libro de Compras para Exentos (solo si el SII lo entregó)
+    // 4. Libro de Compras para Exentos (solo si el SII lo entregó y no está ya aprobado)
     if (this._estructuras?.libroComprasExentos) {
       try {
-        console.log('\n📖 Enviando Libro de Compras para Exentos...');
-        resultados.libroComprasExentos = await this.ejecutarLibroComprasExentos(options);
-        if (!resultados.libroComprasExentos.success) {
-          errores.push(`Libro Compras Exentos: ${resultados.libroComprasExentos.error}`);
+        if (_estaConforme('LIBRO DE COMPRAS PARA EXENTOS')) {
+          console.log('\n✅ Libro Compras Exentos ya está REVISADO CONFORME — omitiendo');
+        } else {
+          console.log('\n📖 Enviando Libro de Compras para Exentos...');
+          resultados.libroComprasExentos = await this.ejecutarLibroComprasExentos(options);
+          if (!resultados.libroComprasExentos.success) {
+            errores.push(`Libro Compras Exentos: ${resultados.libroComprasExentos.error}`);
+          } else {
+            _guardarResultadosParciales();
+          }
         }
       } catch (e) {
         errores.push(`Libro Compras Exentos: ${e.message}`);
@@ -518,18 +589,65 @@ class CertRunner {
     }
 
     // Contar libros obligatorios (ventas + compras + guías)
+    // Un libro cuenta como OK si fue enviado exitosamente O si ya era REVISADO CONFORME (omitido)
     const librosObligatorios = ['libroVentas', 'libroCompras', 'libroGuias'];
-    const librosEnviados = librosObligatorios.filter(k => resultados[k]?.success).length;
+    const librosEnviados = librosObligatorios.filter(k => {
+      if (resultados[k]?.success) return true;
+      // Mapeo clave→nombre para consultar _estaConforme
+      const nombreMap = { libroVentas: 'LIBRO DE VENTAS', libroCompras: 'LIBRO DE COMPRAS', libroGuias: 'LIBRO DE GUIAS' };
+      return _estaConforme(nombreMap[k]);
+    }).length;
     
     if (librosEnviados === 3) {
-      // 4. Declarar los libros
+      // 4. Declarar los libros (incluyendo sets para evitar que pe_avance3 los resetee)
       console.log('\n📝 Declarando libros...');
       try {
-        const declaracion = await this.declararLibros();
+        const declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
         resultados.declaracion = declaracion;
         
         if (declaracion.success) {
-          console.log('\n✅ FASE 4 COMPLETADA: Todos los libros enviados y declarados');
+          console.log('\n✅ Libros declarados — esperando revisión del SII...');
+
+          // Polling real: esperar hasta REVISADO CONFORME o S25 (máx 20 intentos x 15s = 5 min)
+          const _librosAEsperar = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
+          if (this._estructuras?.libroComprasExentos) _librosAEsperar.push('LIBRO DE COMPRAS PARA EXENTOS');
+          // Solo esperar los libros que realmente enviamos (no los que ya eran REVISADO CONFORME)
+          const _librosEnviados = _librosAEsperar.filter(n => !_estaConforme(n));
+
+          console.log(`\n⏳ Esperando aprobación del SII para: ${_librosEnviados.join(', ')}`);
+          let _aprobados = false;
+          for (let _i = 0; _i < 20; _i++) {
+            await sleep(15000);
+            const _poll = await this.siiCert.consultarEstadoSets();
+            if (!_poll.success) continue;
+            const _ss = _poll.estadoSets || {};
+            const _info = Object.entries(_ss)
+              .filter(([k]) => k.toUpperCase().includes('LIBRO'))
+              .map(([k, v]) => `${k.trim()}: ${v}`);
+            if (_info.length) console.log(`   🔄 Intento ${_i + 1}/20: ${_info.join(' | ')}`);
+
+            const _todosOk = _librosEnviados.every(nombre => {
+              const e = Object.entries(_ss).find(([k]) => k.toUpperCase().includes(nombre));
+              return e && (e[1] === 'REVISADO CONFORME' || e[1] === 'S25');
+            });
+            const _algunError = _librosEnviados.some(nombre => {
+              const e = Object.entries(_ss).find(([k]) => k.toUpperCase().includes(nombre));
+              return e && (e[1] === 'LNC' || e[1] === 'LRH' || e[1].includes('RECHAZADO') || e[1].includes('ERROR'));
+            });
+
+            if (_todosOk) {
+              console.log('\n🎉 ¡LIBROS APROBADOS POR EL SII!');
+              _aprobados = true;
+              break;
+            }
+            if (_algunError) {
+              console.log('\n❌ Hay libros rechazados. Revisar emails del SII.');
+              break;
+            }
+          }
+          if (!_aprobados) {
+            console.log('\n⚠️  Timeout (5 min). El SII aún no responde. Verifica con --avance más tarde.');
+          }
         } else {
           console.log(`\n⚠️ Libros enviados pero declaración con error: ${declaracion.error}`);
         }
@@ -563,6 +681,12 @@ class CertRunner {
     const sets = {};
 
     const mapping = {
+      // Sets — incluirlos para que pe_avance3 no los resetee a S01
+      basico: 'setBasico',
+      guia: 'setGuiaDespacho',
+      exenta: 'setFacturaExenta',
+      compra: 'setFacturaCompra',
+      // Libros
       libroVentas: 'libroVentas',
       libroCompras: 'libroCompras',
       libroGuias: 'libroGuias',
