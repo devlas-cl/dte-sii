@@ -1212,7 +1212,7 @@ class EnviadorSII {
    */
   async _enviarMultipart(url, body, boundary, xml, tipoEnvio) {
     const retryConfig = getConfigSection('retry');
-    const maxRetries = retryConfig?.maxRetries || 8;
+    const maxRetries = retryConfig?.maxRetries || 12;
     const initialDelay = retryConfig?.initialDelay || 2000;
     const backoffMultiplier = retryConfig?.backoffMultiplier || 1.8;
     let lastError = null;

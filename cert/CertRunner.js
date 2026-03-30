@@ -730,19 +730,9 @@ class CertRunner {
             const e = _findEntry(_ss, n);
             return e && (e[1] === 'LNC' || e[1] === 'LRH' || e[1].includes('RECHAZADO') || e[1].includes('ERROR'));
           });
-          const _exentosS21 = (() => {
-            const e = _findEntry(_ss, 'LIBRO DE COMPRAS PARA EXENTOS');
-            return e && e[1] === 'S21';
-          })();
           if (_todosOk) {
             emitProgress(STEPS.BOOKS_DONE);
             console.log('\n[OK] LIBROS APROBADOS POR EL SII!');
-            return { ok: true, estadosFinal: _ss };
-          }
-          if (_todosObligatoriosOk && _exentosS21) {
-            emitProgress(STEPS.BOOKS_DONE);
-            console.log('\n[OK] Libros obligatorios REVISADO CONFORME.');
-            console.log(' [!] Libro Compras Exentos sigue en S21 — el SII no reconoció el trackId. Reenviar con --solo-exentos.');
             return { ok: true, estadosFinal: _ss };
           }
           if (_algunError) {
@@ -777,7 +767,7 @@ class CertRunner {
       //    b) si libros quedan en S21 tras polling → decrementar y re-enviar solo los S21
       emitProgress(STEPS.BOOKS_DECLARING);
       console.log('\nDeclarando libros...');
-      const MAX_PERIOD_RETRIES = 24;
+      const MAX_PERIOD_RETRIES = 120;
       try {
         let declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
         resultados.declaracion = declaracion;
