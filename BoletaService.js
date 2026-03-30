@@ -93,7 +93,7 @@ class BoletaService {
     dte.timbrar(this.caf);
     dte.firmar(this.certificado);
     
-    log.log(`✅ Boleta creada: Folio ${folio}, Monto $${totales.MntTotal}`);
+    log.log(`[OK] Boleta creada: Folio ${folio}, Monto $${totales.MntTotal}`);
     
     return {
       ok: true,

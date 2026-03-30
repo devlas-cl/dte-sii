@@ -94,8 +94,6 @@ class EnviadorSII {
   async getSemilla() {
     const url = this.urls[this.ambiente].semilla;
     
-    log.log('   Solicitando semilla a:', url);
-    
     const response = await fetch(url, {
       method: 'GET',
       headers: {
@@ -108,8 +106,6 @@ class EnviadorSII {
     }
     
     const xml = await response.text();
-    log.log('   XML semilla recibido:', xml.substring(0, 500));
-    
     // Usar parser centralizado
     const data = parseXml(xml);
     
@@ -131,7 +127,7 @@ class EnviadorSII {
       return data.getToken.item.Semilla.toString();
     }
     
-    log.debug('   Estructura XML parseada:', JSON.stringify(data, null, 2));
+    log.debug(' Estructura XML parseada:', JSON.stringify(data, null, 2));
     throw new Error('No se pudo obtener semilla del SII');
   }
 
@@ -140,8 +136,6 @@ class EnviadorSII {
    */
   async getToken() {
     const semilla = await this.getSemilla();
-    log.log('Semilla obtenida:', semilla);
-    
     const xmlSemilla = this._crearXMLSemilla(semilla);
     
     const url = this.urls[this.ambiente].token;
@@ -161,8 +155,6 @@ class EnviadorSII {
     }
     
     const xml = await response.text();
-    log.log('Respuesta token:', xml);
-    
     // Usar parser centralizado con namespaces removidos
     const data = parseXmlNoNs(xml);
     
@@ -171,7 +163,6 @@ class EnviadorSII {
       const respBody = respuesta.RESP_BODY || respuesta['SII:RESP_BODY'];
       if (respBody && respBody.TOKEN) {
         this.token = respBody.TOKEN;
-        log.log('✅ Token obtenido:', this.token);
         return this.token;
       }
     }
@@ -189,7 +180,6 @@ class EnviadorSII {
    */
   async getSemillaSoap() {
     const url = this.urls[this.ambiente].semillaSoap;
-    log.log('   Solicitando semilla SOAP a:', url);
     const retryConfig = getConfigSection('retry');
     const maxRetries = retryConfig?.maxRetries || 6;
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -204,7 +194,7 @@ class EnviadorSII {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (attempt > 1) {
-          log.log(`   🔄 Reintento semilla SOAP ${attempt}/${maxRetries}...`);
+          log.log(` [...] Reintento semilla SOAP ${attempt}/${maxRetries}...`);
           await wait(attempt * 1000);
         }
 
@@ -219,22 +209,19 @@ class EnviadorSII {
 
         if (!response.ok) {
           if (isRetryableStatus(response.status) && attempt < maxRetries) {
-            log.log(`   ⚠️ Error semilla SOAP (${response.status}), reintentando...`);
+            log.log(` [!] Error semilla SOAP (${response.status}), reintentando...`);
             continue;
           }
           throw siiError(`Error obteniendo semilla SOAP: ${response.status}`, ERROR_CODES.SII_CONNECTION_FAILED);
         }
 
         const xml = await response.text();
-        log.log('   Respuesta semilla SOAP (primeros 400 chars):', xml.substring(0, 400));
-
         // Usar utilidad centralizada para decodificar entidades
         const decodedXml = decodeXmlEntities(xml);
 
         // Usar utilidad centralizada para extraer contenido de etiqueta
         const semilla = extractTagContent(decodedXml, 'SEMILLA');
         if (semilla) {
-          log.log('   Semilla extraída:', semilla);
           return semilla;
         }
 
@@ -246,7 +233,7 @@ class EnviadorSII {
         throw siiError('No se pudo extraer semilla de la respuesta SOAP', ERROR_CODES.SII_INVALID_RESPONSE);
       } catch (error) {
         if (isRetryableError(error) && attempt < maxRetries) {
-          log.log(`   ⚠️ Error de conexión semilla SOAP (${error.cause?.code || 'socket'}), reintentando...`);
+          log.log(` [!] Error de conexión semilla SOAP (${error.cause?.code || 'socket'}), reintentando...`);
           continue;
         }
         throw error;
@@ -265,7 +252,7 @@ class EnviadorSII {
     if (this.useTokenCache) {
       const cached = getCachedToken(this.ambiente, 'soap', this.rutCert);
       if (cached) {
-        log.log('   ✅ Token SOAP desde cache');
+        log.log(' [OK] Token SOAP desde cache');
         this.tokenSoap = cached;
         return cached;
       }
@@ -279,15 +266,12 @@ class EnviadorSII {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (attempt > 1) {
-          log.log(`   🔄 Reintento token SOAP ${attempt}/${maxRetries}...`);
+          log.log(` [...] Reintento token SOAP ${attempt}/${maxRetries}...`);
           await wait(attempt * 1000);
         }
 
         const semilla = await this.getSemillaSoap();
-        log.log('   Semilla SOAP obtenida:', semilla);
-
         const xmlSemilla = this._crearXMLSemilla(semilla);
-        log.log('   Obteniendo token SOAP de:', url);
 
         const soapEnvelope = `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
@@ -310,15 +294,13 @@ class EnviadorSII {
         if (!response.ok) {
           const errorText = await response.text();
           if (isRetryableStatus(response.status) && attempt < maxRetries) {
-            log.log(`   ⚠️ Error token SOAP (${response.status}), reintentando...`);
+            log.log(` [!] Error token SOAP (${response.status}), reintentando...`);
             continue;
           }
           throw siiError(`Error obteniendo token SOAP: ${response.status} - ${errorText}`, ERROR_CODES.SII_CONNECTION_FAILED);
         }
 
         const xml = await response.text();
-        log.log('   Respuesta token SOAP (primeros 600 chars):', xml.substring(0, 600));
-
         const decodedXml = xml
           .replace(/&lt;/g, '<')
           .replace(/&gt;/g, '>')
@@ -334,7 +316,7 @@ class EnviadorSII {
             setCachedToken(this.ambiente, 'soap', this.rutCert, this.tokenSoap);
           }
           
-          log.log('   ✅ Token SOAP obtenido:', this.tokenSoap);
+          log.log(' [OK] Token SOAP obtenido');
           return this.tokenSoap;
         }
 
@@ -347,7 +329,7 @@ class EnviadorSII {
         throw siiError('No se pudo obtener token SOAP del SII', ERROR_CODES.SII_INVALID_RESPONSE);
       } catch (error) {
         if (isRetryableError(error) && attempt < maxRetries) {
-          log.log(`   ⚠️ Error de conexión token SOAP (${error.cause?.code || 'socket'}), reintentando...`);
+          log.log(` [!] Error de conexión token SOAP (${error.cause?.code || 'socket'}), reintentando...`);
           continue;
         }
         throw error;
@@ -394,12 +376,8 @@ class EnviadorSII {
     const exponent = this.certificado.getExponent();
     const cert = this._wordwrap(this.certificado.getCertificateBase64(), 64);
     
-    log.log('SignedInfo para firmar (length):', signedInfoParaFirmar.length);
-    
     const xmlFirmado = `<?xml version="1.0" encoding="UTF-8"?>
 <getToken><item><Semilla>${semilla}</Semilla></item><Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/><SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1"/><Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/></Transforms><DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/><DigestValue>${digestValue}</DigestValue></Reference></SignedInfo><SignatureValue>${signatureValue}</SignatureValue><KeyInfo><KeyValue><RSAKeyValue><Modulus>${modulus}</Modulus><Exponent>${exponent}</Exponent></RSAKeyValue></KeyValue><X509Data><X509Certificate>${cert}</X509Certificate></X509Data></KeyInfo></Signature></getToken>`;
-    
-    log.log('DigestValue:', digestValue);
     
     return xmlFirmado;
   }
@@ -620,7 +598,7 @@ class EnviadorSII {
           ok: true,
           status: 0,
           trackId: json.trackid.toString(),
-          mensaje: `✅ Enviado al SII - TrackID: ${json.trackid}`,
+          mensaje: `[OK] Enviado al SII - TrackID: ${json.trackid}`,
           respuesta: json,
         };
       }
@@ -654,7 +632,7 @@ class EnviadorSII {
           ok: true,
           status: status,
           trackId: trackId,
-          mensaje: `✅ Enviado al SII - TrackID: ${trackId}`,
+          mensaje: `[OK] Enviado al SII - TrackID: ${trackId}`,
         };
       }
       
@@ -710,19 +688,19 @@ class EnviadorSII {
       
       let mensaje = '';
       const estado = json.estado;
-      if (estado === 'REC') mensaje = '📥 Envío recibido';
-      else if (estado === 'SOK') mensaje = '✅ Esquema validado';
-      else if (estado === 'FOK') mensaje = '✅ Firma de envío validada';
-      else if (estado === 'PRD') mensaje = '⏳ Envío en proceso';
-      else if (estado === 'CRT') mensaje = '✅ Carátula OK';
-      else if (estado === 'EPR') mensaje = '✅ Envío procesado';
-      else if (estado === 'RPT') mensaje = '❌ Rechazado por schema';
-      else if (estado === 'RFR') mensaje = '❌ Rechazado por error en firma';
-      else if (estado === 'VOF') mensaje = '❌ Error interno en SII';
-      else if (estado === 'RCT') mensaje = '❌ Rechazado por error en carátula';
-      else if (estado === 'RPR') mensaje = '⚠️ Aceptado con reparos';
-      else if (estado === 'RLV') mensaje = '✅ Aceptado - Documento(s) válido(s)';
-      else if (estado === 'RCH') mensaje = `❌ Rechazado: ${json.glosa || json.descripcion || 'Sin detalle'}`;
+      if (estado === 'REC') mensaje = 'Envío recibido';
+      else if (estado === 'SOK') mensaje = '[OK] Esquema validado';
+      else if (estado === 'FOK') mensaje = '[OK] Firma de envío validada';
+      else if (estado === 'PRD') mensaje = '[...] Envío en proceso';
+      else if (estado === 'CRT') mensaje = '[OK] Carátula OK';
+      else if (estado === 'EPR') mensaje = '[OK] Envío procesado';
+      else if (estado === 'RPT') mensaje = '[ERR] Rechazado por schema';
+      else if (estado === 'RFR') mensaje = '[ERR] Rechazado por error en firma';
+      else if (estado === 'VOF') mensaje = '[ERR] Error interno en SII';
+      else if (estado === 'RCT') mensaje = '[ERR] Rechazado por error en carátula';
+      else if (estado === 'RPR') mensaje = '[!] Aceptado con reparos';
+      else if (estado === 'RLV') mensaje = '[OK] Aceptado - Documento(s) válido(s)';
+      else if (estado === 'RCH') mensaje = `[ERR] Rechazado: ${json.glosa || json.descripcion || 'Sin detalle'}`;
       else mensaje = `Estado: ${estado}`;
       
       return {
@@ -768,8 +746,8 @@ class EnviadorSII {
   </soapenv:Body>
 </soapenv:Envelope>`;
     
-    log.log('📊 Consultando estado SOAP:', urlQueryEstUp);
-    log.log('   TrackID:', trackId, 'RUT:', rutEmisor);
+    log.log('Consultando estado SOAP:', urlQueryEstUp);
+    log.log(' TrackID:', trackId, 'RUT:', rutEmisor);
     
     const response = await fetch(urlQueryEstUp, {
       method: 'POST',
@@ -785,7 +763,7 @@ class EnviadorSII {
     // Usar decodeXmlEntities centralizado
     const decoded = decodeXmlEntities(text).replace(/&#xd;/g, '\n');
     
-    log.log('   Respuesta SOAP estado:', decoded.substring(0, 500));
+
 
     const estadoMatch = decoded.match(/<ESTADO>([^<]+)<\/ESTADO>/i);
     const glosaMatch = decoded.match(/<GLOSA>([^<]+)<\/GLOSA>/i);
@@ -818,130 +796,130 @@ class EnviadorSII {
     
     switch (estado) {
       case 'EPR':
-        mensaje = '✅ Envío Procesado';
+        mensaje = '[OK] Envío Procesado';
         esExitoso = true;
         break;
       case 'RPR':
-        mensaje = '⚠️ Aceptado con Reparos';
+        mensaje = '[!] Aceptado con Reparos';
         esExitoso = true;
         break;
       case 'REC':
-        mensaje = '⏳ Envío Recibido - Esperando validación';
+        mensaje = '[...] Envío Recibido - Esperando validación';
         esIntermedio = true;
         break;
       case 'SOK':
-        mensaje = '⏳ Schema OK - Validando firma...';
+        mensaje = '[...] Schema OK - Validando firma...';
         esIntermedio = true;
         break;
       case 'FOK':
-        mensaje = '⏳ Firma Validada - Procesando envío...';
+        mensaje = '[...] Firma Validada - Procesando envío...';
         esIntermedio = true;
         break;
       case 'PRD':
-        mensaje = '⏳ Envío en Proceso - Validando carátula...';
+        mensaje = '[...] Envío en Proceso - Validando carátula...';
         esIntermedio = true;
         break;
       case 'CRT':
-        mensaje = '⏳ Carátula OK - Finalizando proceso...';
+        mensaje = '[...] Carátula OK - Finalizando proceso...';
         esIntermedio = true;
         break;
       case 'DNK':
-        mensaje = '⏳ En proceso de revisión';
+        mensaje = '[...] En proceso de revisión';
         esIntermedio = true;
         break;
       case 'RPT':
-        mensaje = `❌ Rechazado por Schema: ${glosa || 'Error en estructura XML'}`;
+        mensaje = `[ERR] Rechazado por Schema: ${glosa || 'Error en estructura XML'}`;
         esRechazado = true;
         break;
       case 'RFR':
-        mensaje = `❌ Rechazado por Firma: ${glosa || 'Error en firma digital'}`;
+        mensaje = `[ERR] Rechazado por Firma: ${glosa || 'Error en firma digital'}`;
         esRechazado = true;
         break;
       case 'VOF':
-        mensaje = `❌ Error Interno del SII: ${glosa || 'Reintentar más tarde'}`;
+        mensaje = `[ERR] Error Interno del SII: ${glosa || 'Reintentar más tarde'}`;
         esRechazado = true;
         break;
       case 'RCT':
-        mensaje = `❌ Rechazado por Error en Carátula: ${glosa || 'Verificar datos del emisor'}`;
+        mensaje = `[ERR] Rechazado por Error en Carátula: ${glosa || 'Verificar datos del emisor'}`;
         esRechazado = true;
         break;
       case 'RCH':
-        mensaje = `❌ Rechazado: ${glosa || 'Sin detalle'}`;
+        mensaje = `[ERR] Rechazado: ${glosa || 'Sin detalle'}`;
         esRechazado = true;
         break;
       case 'RLV':
-        mensaje = `❌ Rechazado: ${glosa || 'Error en documento'}`;
+        mensaje = `[ERR] Rechazado: ${glosa || 'Error en documento'}`;
         esRechazado = true;
         break;
       // Códigos de schema/firma rechazados
       case 'RSC':
-        mensaje = `❌ Rechazado por Error en Schema: ${glosa || 'XML no cumple XSD del SII'}`;
+        mensaje = `[ERR] Rechazado por Error en Schema: ${glosa || 'XML no cumple XSD del SII'}`;
         esRechazado = true;
         break;
       case 'PDR':
-        mensaje = '⏳ Envío en Proceso - Validando...';
+        mensaje = '[...] Envío en Proceso - Validando...';
         esIntermedio = true;
         break;
       // Códigos numéricos negativos = errores del servicio de consulta SII (NO rechazo del documento)
       // Según doc SII: son errores del sistema de consulta, el documento puede estar OK
       case '-11':
-        mensaje = `⏳ Error de consulta SII (ERR/SQL/SRV_CODE) - Reintente más tarde`;
+        mensaje = `[...] Error de consulta SII (ERR/SQL/SRV_CODE) - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-12':
-        mensaje = `⏳ Error retorno consulta SII - Reintente más tarde`;
+        mensaje = `[...] Error retorno consulta SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-13':
-        mensaje = `⏳ Error: RUT usuario nulo - Verificar autenticación`;
+        mensaje = `[...] Error: RUT usuario nulo - Verificar autenticación`;
         esIntermedio = true;
         break;
       case '-14':
-        mensaje = `⏳ Error XML retorno datos SII - Reintente más tarde`;
+        mensaje = `[...] Error XML retorno datos SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-10':
-        mensaje = `⏳ Error validación RUT usuario - Verificar credenciales`;
+        mensaje = `[...] Error validación RUT usuario - Verificar credenciales`;
         esIntermedio = true;
         break;
       case '-9':
-        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        mensaje = `[...] Error retorno datos SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-8':
-        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        mensaje = `[...] Error retorno datos SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-7':
-        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        mensaje = `[...] Error retorno datos SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-6':
-        mensaje = `⏳ Error: Usuario no autorizado para consultar - Verificar credenciales`;
+        mensaje = `[...] Error: Usuario no autorizado para consultar - Verificar credenciales`;
         esIntermedio = true;
         break;
       case '-5':
-        mensaje = `⏳ Error retorno datos SII - Reintente más tarde`;
+        mensaje = `[...] Error retorno datos SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-4':
-        mensaje = `⏳ Error obtención de datos SII - Reintente más tarde`;
+        mensaje = `[...] Error obtención de datos SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-3':
-        mensaje = `⏳ Error: RUT usuario no existe en SII - Verificar autenticación`;
+        mensaje = `[...] Error: RUT usuario no existe en SII - Verificar autenticación`;
         esIntermedio = true;
         break;
       case '-2':
-        mensaje = `⏳ Error retorno SII - Reintente más tarde`;
+        mensaje = `[...] Error retorno SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '-1':
-        mensaje = `⏳ Error: Campo estado no retornado por SII - Reintente más tarde`;
+        mensaje = `[...] Error: Campo estado no retornado por SII - Reintente más tarde`;
         esIntermedio = true;
         break;
       case '0':
-        mensaje = `⏳ Enviado al SII, pendiente de validación`;
+        mensaje = `[...] Enviado al SII, pendiente de validación`;
         esIntermedio = true;
         break;
       default:
@@ -973,7 +951,7 @@ class EnviadorSII {
     const { DOMParser } = require('@xmldom/xmldom');
     
     if (!this.tokenSoap) {
-      log.log('📡 Obteniendo token SOAP para DTEUpload...');
+      log.log('Obteniendo token SOAP para DTEUpload...');
       await this.getTokenSoap();
     }
 
@@ -993,9 +971,9 @@ class EnviadorSII {
 
     const url = this.urls[this.ambiente].rcof;
     
-    log.log('📤 Enviando EnvioBOLETA via SOAP/DTEUpload...');
-    log.log('   URL:', url);
-    log.log('   XML Length:', xml.length, 'bytes');
+    log.log('Enviando EnvioBOLETA via SOAP/DTEUpload...');
+    log.log(' URL:', url);
+    log.log(' XML Length:', xml.length, 'bytes');
 
     const [rutNum, dv] = rutEmisor.split('-');
     const [rutEnviaNum, dvEnvia] = rutEnvia.split('-');
@@ -1038,7 +1016,7 @@ class EnviadorSII {
     const { DOMParser } = require('@xmldom/xmldom');
 
     if (!this.tokenSoap) {
-      log.log('📡 Obteniendo token SOAP para DTEUpload...');
+      log.log('Obteniendo token SOAP para DTEUpload...');
       await this.getTokenSoap();
     }
 
@@ -1060,9 +1038,9 @@ class EnviadorSII {
 
     const xmlBuffer = Buffer.from(xml, 'latin1');
 
-    log.log('📤 Enviando EnvioDTE via SOAP/DTEUpload...');
-    log.log('   URL:', url);
-    log.log('   XML Length:', xmlBuffer.length, 'bytes');
+    log.log('Enviando EnvioDTE via SOAP/DTEUpload...');
+    log.log(' URL:', url);
+    log.log(' XML Length:', xmlBuffer.length, 'bytes');
 
     const [rutNum, dv] = rutEmisor.split('-');
     const [rutEnviaNum, dvEnvia] = rutEnvia.split('-');
@@ -1104,7 +1082,7 @@ class EnviadorSII {
     const { DOMParser } = require('@xmldom/xmldom');
     
     if (!this.tokenSoap) {
-      log.log('📡 Obteniendo token SOAP para DTEUpload...');
+      log.log('Obteniendo token SOAP para DTEUpload...');
       await this.getTokenSoap();
     }
 
@@ -1164,7 +1142,7 @@ class EnviadorSII {
     const { DOMParser } = require('@xmldom/xmldom');
 
     if (!this.tokenSoap) {
-      log.log('📡 Obteniendo token SOAP para DTEUpload...');
+      log.log('Obteniendo token SOAP para DTEUpload...');
       await this.getTokenSoap();
     }
 
@@ -1184,10 +1162,6 @@ class EnviadorSII {
     }
 
     const url = this.urls[this.ambiente].rcof;
-
-    log.log('📤 Enviando Libro via SOAP/DTEUpload...');
-    log.log('   URL:', url);
-    log.log('   XML Length:', xml.length, 'bytes');
 
     const [rutNum, dv] = rutEmisor.split('-');
     const [rutEnviaNum, dvEnvia] = rutEnvia.split('-');
@@ -1255,7 +1229,7 @@ class EnviadorSII {
       try {
         if (attempt > 1) {
           const delay = Math.min(initialDelay * Math.pow(backoffMultiplier, attempt - 2), 15000);
-          log.log(`   🔄 Reintento ${tipoEnvio} ${attempt}/${maxRetries} (delay: ${Math.round(delay/1000)}s)...`);
+          log.log(` [...] Reintento ${tipoEnvio} ${attempt}/${maxRetries} (delay: ${Math.round(delay/1000)}s)...`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
 
@@ -1275,7 +1249,6 @@ class EnviadorSII {
         clearTimeout(timeout);
 
         const responseText = await response.text();
-        log.log(`   Respuesta ${tipoEnvio}:`, responseText);
 
         const result = this._parsearRespuestaSoap(responseText, response.ok, response.status, tipoEnvio);
         
@@ -1296,7 +1269,7 @@ class EnviadorSII {
         
         // Usar isRetryableError centralizado de utils
         if (isRetryableError(fetchError) && attempt < maxRetries) {
-          log.log(`   ⚠️ Error de conexión ${tipoEnvio} (${fetchError.cause?.code || 'socket'}), reintentando...`);
+          log.log(` [!] Error de conexión ${tipoEnvio} (${fetchError.cause?.code || 'socket'}), reintentando...`);
           continue;
         }
         
@@ -1353,7 +1326,7 @@ class EnviadorSII {
         status: status,
         trackId: trackId,
         archivo: fileName,
-        mensaje: `✅ ${tipoEnvio} Enviado - TrackID: ${trackId}`,
+        mensaje: `[OK] ${tipoEnvio} Enviado - TrackID: ${trackId}`,
         respuesta: responseText,
       };
     }

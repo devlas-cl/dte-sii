@@ -53,7 +53,7 @@ class Simulacion {
     const docRefs = {};
 
     if (plan.length < 10) {
-      console.warn('⚠️  Se recomienda mínimo 10 documentos para simulación.');
+      console.warn('[!] Se recomienda mínimo 10 documentos para simulación.');
     }
 
     const envioDte = new EnvioDTE({ certificado: this.certificado });

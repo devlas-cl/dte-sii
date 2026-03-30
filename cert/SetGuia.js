@@ -64,7 +64,7 @@ class SetGuia extends SetBase {
   async generarDtes(casos, cafs) {
     const dtes = [];
     
-    this.logger.log('   📄 Generando guías de despacho...');
+    this.logger.log(' Generando guías de despacho...');
     for (const caso of casos.casos || []) {
       const dte = await this._generarGuia(caso, cafs[52]);
       dtes.push(dte);
@@ -138,7 +138,7 @@ class SetGuia extends SetBase {
     const dte = new DTE(dteDatos);
     this._timbrarYFirmar(dte, caf);
     
-    this.logger.log(`      ✓ Guía caso ${caso.id}: folio ${folio} (IndTraslado: ${idDoc.IndTraslado})`);
+    this.logger.log(` ✓ Guía caso ${caso.id}: folio ${folio} (IndTraslado: ${idDoc.IndTraslado})`);
     return dte;
   }
 

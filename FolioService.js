@@ -399,7 +399,7 @@ class FolioService {
       // Log de progreso
       foliosAnulados += 1;
       const pct = Math.round((foliosAnulados / totalFolios) * 100);
-      process.stdout.write(`\r         Anulando folio ${folio} (${foliosAnulados}/${totalFolios} - ${pct}%)`);
+      process.stdout.write(`\r Anulando folio ${folio} (${foliosAnulados}/${totalFolios} - ${pct}%)`);
 
       return { folio, ...this._parseAnulacionResult(resultRes.body || '') };
     };

@@ -16,9 +16,10 @@
  */
 
 const SiiSession = require('./SiiSession.js');
+const { STEPS, emitProgress } = require('./utils/progress');
 
 /**
- * Etapas de certificación DTE
+ * Etapas de certificacion DTE
  */
 const ETAPAS_CERTIFICACION = {
   SET_BASICO: 'SET_BASICO',
@@ -71,6 +72,20 @@ class SiiCertificacion {
       pfxPassword: options.pfxPassword,
       ambiente: 'certificacion',
     });
+
+    // Reutilización de sesión: cargar desde archivo y guardar automáticamente tras cada login
+    if (options.sessionPath) {
+      this._sessionPath = options.sessionPath;
+      this.session.loadSession(options.sessionPath);
+      const _origEnsure = this.session.ensureSession.bind(this.session);
+      const _sess = this.session;
+      const _sp = options.sessionPath;
+      this.session.ensureSession = async function(targetPath) {
+        const result = await _origEnsure(targetPath);
+        _sess.saveSession(_sp);
+        return result;
+      };
+    }
   }
 
   /**
@@ -518,7 +533,7 @@ class SiiCertificacion {
       }
       
       if (process.env.DEBUG_SII) {
-        console.log('   [DEBUG] Campos hidden encontrados:', Object.keys(hiddenFields).join(', '));
+        console.log(' [DEBUG] Campos hidden encontrados:', Object.keys(hiddenFields).join(', '));
       }
 
       // Si no hay formulario para declarar (página de estado/reparos)
@@ -559,7 +574,7 @@ class SiiCertificacion {
         }
         const debugPath = path.join(debugDir, 'pe_avance2_form.html');
         fs.writeFileSync(debugPath, formHtml, 'utf8');
-        console.log('   📄 HTML pe_avance2 formulario guardado en debug/cert-v2/pe_avance2_form.html');
+
       }
       
       // Extraer todas las filas <tr>...</tr> del formulario
@@ -596,7 +611,7 @@ class SiiCertificacion {
               // Solo agregar si tiene NUM_ENV (no si tiene REVISADO CONFORME o EN REVISION)
               fieldMapping[pattern.name] = parseInt(numEnvMatch[1]);
               if (process.env.DEBUG_SII) {
-                console.log(`   [DEBUG] ${pattern.name} → NUM_ENV${numEnvMatch[1]}`);
+                console.log(` [DEBUG] ${pattern.name} → NUM_ENV${numEnvMatch[1]}`);
               }
             }
             break; // Ya encontramos la fila para este pattern
@@ -605,7 +620,7 @@ class SiiCertificacion {
       }
       
       if (process.env.DEBUG_SII) {
-        console.log('   [DEBUG] Mapeo dinámico de índices:', fieldMapping);
+        console.log(' [DEBUG] Mapeo dinámico de índices:', fieldMapping);
       }
 
       if (sets.setSimulacion && !fieldMapping.setSimulacion) {
@@ -646,7 +661,7 @@ class SiiCertificacion {
             numEnvValues[index] = cleanTrackId;
             fecEnvValues[index] = formatDate(fecha);
             if (String(trackId) !== cleanTrackId) {
-              console.log(`   [TrackID] Normalizado: ${trackId} → ${cleanTrackId}`);
+
             }
           }
         }
@@ -677,16 +692,16 @@ class SiiCertificacion {
 
       // Debug: mostrar datos del formulario
       if (process.env.DEBUG_SII) {
-        console.log('   [DEBUG] Datos del formulario a enviar:');
+        console.log(' [DEBUG] Datos del formulario a enviar:');
         for (const [k, v] of Object.entries(formData)) {
-          console.log(`      ${k}: ${v || '(vacío)'}`);
+          console.log(` ${k}: ${v || '(vacío)'}`);
         }
         
         // Mostrar el body codificado
         const SiiSession = require('./SiiSession');
         const encodedBody = SiiSession.formEncode(formData);
-        console.log('   [DEBUG] Body codificado (primeros 500 chars):');
-        console.log(`      ${encodedBody.substring(0, 500)}`);
+        console.log(' [DEBUG] Body codificado (primeros 500 chars):');
+        console.log(` ${encodedBody.substring(0, 500)}`);
       }
 
       // 5. Enviar formulario de declaración
@@ -706,7 +721,7 @@ class SiiCertificacion {
       
       // Debug - guardar respuesta
       if (process.env.DEBUG_SII) {
-        console.log(`   [DEBUG] Respuesta: ${body.length} bytes, status: ${declareResponse.status}`);
+        console.log(` [DEBUG] Respuesta: ${body.length} bytes, status: ${declareResponse.status}`);
         // Guardar respuesta de pe_avance3 para debug
         const fs = require('fs');
         const path = require('path');
@@ -716,7 +731,7 @@ class SiiCertificacion {
         }
         const debugPath = path.join(debugDir, 'pe_avance3_response.html');
         fs.writeFileSync(debugPath, body);
-        console.log(`   [DEBUG] Respuesta guardada en: ${debugPath}`);
+        console.log(` [DEBUG] Respuesta guardada en: ${debugPath}`);
       }
       
       const bodyLower = body.toLowerCase();
@@ -767,7 +782,7 @@ class SiiCertificacion {
         const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
         if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
         fs.writeFileSync(path.join(debugDir, 'pe_avance3_response.html'), body, 'utf8');
-        console.log('   📄 HTML pe_avance3 guardado en debug/cert-v2/pe_avance3_response.html');
+
       }
 
       // 7. VERIFICACIÓN POST-DECLARACIÓN: Re-leer pe_avance2 y confirmar que los TrackIDs se guardaron
@@ -776,6 +791,7 @@ class SiiCertificacion {
       let verificado = true;
       let verificacionError = '';
       let enRevision = false;
+      let camposVacios = [];
       try {
         const verifyResponse = await this.session.submitForm(
           '/cvc_cgi/dte/pe_avance2',
@@ -791,12 +807,11 @@ class SiiCertificacion {
           const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
           if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
           fs.writeFileSync(path.join(debugDir, 'pe_avance2_verify.html'), verifyHtml, 'utf8');
-          console.log('   📄 HTML pe_avance2 verificación guardado en debug/cert-v2/pe_avance2_verify.html');
+
         }
 
         // Para cada set que declaramos, verificar estado
         const verifyRows = verifyHtml.split(/<\/tr>/i);
-        const camposVacios = [];
         const camposEnRevision = [];
         for (const [setName, index] of Object.entries(fieldMapping)) {
           if (!sets[setName]) continue;
@@ -832,23 +847,28 @@ class SiiCertificacion {
 
         if (camposEnRevision.length > 0) {
           enRevision = true;
-          console.log(`   🔄 EN REVISION: ${camposEnRevision.join(', ')} — declaración aceptada, SII procesando`);
+          console.log(` [...] EN REVISION: ${camposEnRevision.join(', ')} — declaración aceptada, SII procesando`);
         }
 
         if (camposVacios.length > 0 && !enRevision) {
           verificado = false;
           verificacionError = `Declaración NO se guardó en el portal SII. Campos vacíos para: ${camposVacios.join(', ')}. Posible error de sesión o TrackID no reconocido.`;
-          console.log(`   ⚠️ ${verificacionError}`);
+          console.log(` [!] ${verificacionError}`);
         }
       } catch (verifyErr) {
-        console.log(`   ⚠️ No se pudo verificar la declaración: ${verifyErr.message}`);
+        console.log(` [!] No se pudo verificar la declaración: ${verifyErr.message}`);
       }
+
+      // allRejected: SII rechazó todos los sets declarados — período incorrecto, no tiene sentido reintentar
+      const _declaredCount = Object.keys(fieldMapping).filter(k => sets[k]).length;
+      const allRejected = !enRevision && camposVacios.length > 0 && camposVacios.length >= _declaredCount && _declaredCount > 0;
 
       return {
         success: verificado || enRevision,
         error: verificacionError || errorMsg || undefined,
         verificado,
         enRevision,
+        allRejected,
         status: declareResponse.status,
         rawHtml: body,
         formHtml,
@@ -906,7 +926,7 @@ class SiiCertificacion {
         }
         const debugPath = path.join(debugDir, 'pe_avance2_avanzar.html');
         fs.writeFileSync(debugPath, formHtml, 'utf8');
-        console.log('   [DEBUG] HTML avanzar guardado en:', debugPath);
+        console.log(' [DEBUG] HTML avanzar guardado en:', debugPath);
       }
 
       let avanceResponse = await this.session.submitForm(
@@ -932,7 +952,7 @@ class SiiCertificacion {
         }
         const debugPath = path.join(debugDir, 'pe_avance3_avanzar_response.html');
         fs.writeFileSync(debugPath, body);
-        console.log('   [DEBUG] Respuesta avanzar guardada en:', debugPath);
+        console.log(' [DEBUG] Respuesta avanzar guardada en:', debugPath);
       }
 
       const hasError = body.toLowerCase().includes('error') && !body.includes('Error de Sesión');
@@ -1269,6 +1289,7 @@ class SiiCertificacion {
       if (onProgress) {
         onProgress({ intento, maxIntentos, estado: 'polling' });
       }
+      emitProgress(STEPS.POLLING, { intento, max: maxIntentos, label: 'sets' });
 
       const result = await this.verAvanceParsed();
       if (!result.success) continue;
@@ -1288,10 +1309,12 @@ class SiiCertificacion {
       }
 
       if (todosConformes) {
+        emitProgress(STEPS.SETS_APPROVED);
         return { success: true, estados: estadosRelevantes };
       }
 
       if (algunoRechazado) {
+        emitProgress(STEPS.SETS_REJECTED);
         return { success: false, error: 'Sets rechazados', estados: estadosRelevantes };
       }
     }

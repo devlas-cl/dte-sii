@@ -37,8 +37,8 @@ class SetBase {
     this.logger = deps.logger || console;
     
     // Subclases deben definir estos
-    this.key = '';           // 'basico', 'exenta', 'guia', 'compra'
-    this.label = '';         // 'Set Básico (Facturas)'
+    this.key = ''; // 'basico', 'exenta', 'guia', 'compra'
+    this.label = ''; // 'Set Básico (Facturas)'
     this.tiposDte = [];      // [33, 56, 61]
   }
 
@@ -82,7 +82,7 @@ class SetBase {
   async ejecutar(casos, preloadedCafs = null) {
     const startTime = Date.now();
     this.logger.log(`\n${'═'.repeat(60)}`);
-    this.logger.log(`🚀 ${this.label}`);
+    this.logger.log(`${this.label}`);
     this.logger.log(`${'═'.repeat(60)}\n`);
 
     try {
@@ -90,26 +90,26 @@ class SetBase {
       this._validarCasos(casos);
       
       // 2. Asegurar CAFs disponibles (usa pre-cargados si existen)
-      this.logger.log('📋 Verificando folios (CAFs)...');
+      this.logger.log('Verificando folios (CAFs)...');
       const cafs = preloadedCafs || await this.ensureCafs(casos);
       
       if (preloadedCafs) {
         for (const [tipoDte, cafPath] of Object.entries(preloadedCafs)) {
-          this.logger.log(`   ✓ CAF tipo ${tipoDte} (pre-cargado): ${cafPath}`);
+          this.logger.log(` ✓ CAF tipo ${tipoDte} (pre-cargado)`);
         }
       }
       
       // 3. Generar DTEs (subclases implementan)
-      this.logger.log('📝 Generando DTEs...');
+      this.logger.log('Generando DTEs...');
       const dtes = await this.generarDtes(casos, cafs);
-      this.logger.log(`   ✓ ${dtes.length} DTEs generados`);
+      this.logger.log(` ✓ ${dtes.length} DTEs generados`);
       
       // 4. Crear envío firmado
-      this.logger.log('🔐 Firmando envío...');
+      this.logger.log('Firmando envío...');
       const envio = await this.crearEnvio(dtes);
       
       // 5. Enviar al SII
-      this.logger.log('📤 Enviando al SII...');
+      this.logger.log('Enviando al SII...');
       const respuesta = await this.enviarSii(envio);
       
       // 6. Construir resultado con documentos para libros
@@ -160,14 +160,14 @@ class SetBase {
         duration: Date.now() - startTime,
       });
 
-      this.logger.log(`\n✅ ${this.label} completado`);
-      this.logger.log(`   Track ID: ${result.trackId}`);
-      this.logger.log(`   Duración: ${result.duration}ms\n`);
+      this.logger.log(`\n[OK] ${this.label} completado`);
+      this.logger.log(` Track ID: ${result.trackId}`);
+      this.logger.log(` Duración: ${result.duration}ms\n`);
 
       return result;
 
     } catch (error) {
-      this.logger.error(`\n❌ Error en ${this.label}: ${error.message}\n`);
+      this.logger.error(`\n[ERR] Error en ${this.label}: ${error.message}\n`);
       
       const result = SetResult.failure(error.message);
       result.duration = Date.now() - startTime;
@@ -197,7 +197,7 @@ class SetBase {
     
     for (const tipoDte of this.tiposDte) {
       const cantidad = this._calcularCantidadFolios(casos, tipoDte);
-      this.logger.log(`   Tipo ${tipoDte}: ${cantidad} folios requeridos`);
+      this.logger.log(` Tipo ${tipoDte}: ${cantidad} folios requeridos`);
       
       const cafPath = await this.cafManager.ensureCaf({
         tipoDte,
@@ -212,7 +212,7 @@ class SetBase {
       }
       
       cafs[tipoDte] = cafPath;
-      this.logger.log(`   ✓ CAF tipo ${tipoDte}: ${cafPath}`);
+      this.logger.log(` ✓ CAF tipo ${tipoDte}: ${cafPath}`);
     }
     
     return cafs;
@@ -237,7 +237,7 @@ class SetBase {
   /**
    * Genera los DTEs del set
    * 
-   * ⚠️ DEBE SER IMPLEMENTADO POR SUBCLASES
+   * [!] DEBE SER IMPLEMENTADO POR SUBCLASES
    * 
    * @abstract
    * @param {Object} casos - Casos parseados del SII

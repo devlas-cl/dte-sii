@@ -251,12 +251,12 @@ class ConsumoFolio {
     // Calcular C14N manual (incluye namespace heredado como PHP)
     const c14nDocumento = this._c14nDocumentoConsumoFolios(documentoConsumoFolios, nsDefault);
     
-    console.log('🔍 C14N Length:', c14nDocumento.length);
-    console.log('🔍 C14N primeros 300 chars:', c14nDocumento.substring(0, 300));
+    console.log('C14N Length:', c14nDocumento.length);
+    console.log('C14N primeros 300 chars:', c14nDocumento.substring(0, 300));
     
     // Calcular DigestValue = base64(sha1(C14N))
     const digest = crypto.createHash('sha1').update(c14nDocumento).digest('base64');
-    console.log('🔍 DigestValue:', digest);
+    console.log('DigestValue:', digest);
 
     // Construir SignedInfo (con tags expandidos para firmar)
     // PHP incluye xmlns:xsi en SignedInfo para ConsumoFolio

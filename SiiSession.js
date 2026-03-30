@@ -279,7 +279,7 @@ class SiiSession {
     // Detectar bloqueo por demasiadas sesiones
     if (response.body && response.body.includes('superado el m')) {
       const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
-      console.error(`\n❌ ${errorMsg}\n`);
+      console.error(`\n[ERR] ${errorMsg}\n`);
       throw new Error(errorMsg);
     }
 
@@ -292,7 +292,7 @@ class SiiSession {
         // Verificar si el login resultó en bloqueo por sesiones
         if (response.body && response.body.includes('superado el m')) {
           const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
-          console.error(`\n❌ ${errorMsg}\n`);
+          console.error(`\n[ERR] ${errorMsg}\n`);
           throw new Error(errorMsg);
         }
       }
@@ -386,10 +386,10 @@ class SiiSession {
       }
       
       this.cookieJar = data.cookieJar || '';
-      console.log('Sesión SII cargada desde archivo');
+      console.log('[SessionSii] Sesión SII cargada desde archivo');
       return true;
     } catch (err) {
-      console.log('Error cargando sesión SII:', err.message);
+      console.log('[SessionSii] Error cargando sesión SII:', err.message);
       return false;
     }
   }

@@ -85,7 +85,6 @@ class CafSolicitor {
   _saveDebug(debugDir, filename, content) {
     const filePath = path.join(debugDir, filename);
     fs.writeFileSync(filePath, content, 'utf-8');
-    console.log(`${filename}`);
   }
 
   /**
@@ -124,8 +123,8 @@ class CafSolicitor {
     const cafPath = path.join(cafDir, cafFileName);
     fs.writeFileSync(cafPath, xml, 'utf-8');
     
-    console.log(`✅ CAF guardado: ${cafFileName}`);
-    console.log(`   Ruta: ${cafPath}`);
+    console.log(`[OK] CAF guardado: ${cafFileName}`);
+    console.log(` Ruta: ${cafPath}`);
     
     return cafPath;
   }
@@ -158,7 +157,7 @@ class CafSolicitor {
     
     console.log('─'.repeat(60));
     console.log(`[CafSolicitor] Solicitando CAF tipo ${tipoDte} x${cantidad}`);
-    console.log(`   RUT: ${this.rutEmisor} | Ambiente: ${this.ambiente}`);
+    console.log(` RUT: ${this.rutEmisor} | Ambiente: ${this.ambiente}`);
 
     try {
       // Paso 1: POST inicial a of_solicita_folios
@@ -189,7 +188,7 @@ class CafSolicitor {
       response = await this._processMultiStepFlow(response, rut, dv, tipoDte, cantidad, debugDir);
 
       // Guardar respuesta final
-      this._saveDebug(debugDir, `caf-final-${this.runStamp}.html`, response.body || '');
+      this._saveDebug(debugDir, 'caf-final.html', response.body || '');
 
       // Verificar si obtuvimos el CAF
       if (response.body && response.body.includes('<AUTORIZACION')) {
@@ -229,7 +228,7 @@ class CafSolicitor {
 
       response = await this.session.submitForm(formAction, step2Fields);
       currentHtml = response.body || '';
-      this._saveDebug(debugDir, `step2-${this.runStamp}.html`, currentHtml);
+      this._saveDebug(debugDir, 'step2.html', currentHtml);
 
       // Selección de tipo de documento
       if (currentHtml.includes('COD_DOCTO')) {
@@ -243,7 +242,7 @@ class CafSolicitor {
 
         response = await this.session.submitForm('/cvc_cgi/dte/of_solicita_folios_dcto', selectFields);
         currentHtml = response.body || '';
-        this._saveDebug(debugDir, `select-${this.runStamp}.html`, currentHtml);
+        this._saveDebug(debugDir, 'select.html', currentHtml);
       }
 
       // Paso 3: Solicitar numeración
@@ -274,7 +273,7 @@ class CafSolicitor {
 
     response = await this.session.submitForm(formAction3, step3Fields);
     currentHtml = response.body || '';
-    this._saveDebug(debugDir, `step3-${this.runStamp}.html`, currentHtml);
+    this._saveDebug(debugDir, 'step3.html', currentHtml);
 
     // Confirmar folio inicial
     if (currentHtml.includes('of_confirma_folio')) {
@@ -304,7 +303,7 @@ class CafSolicitor {
 
     response = await this.session.submitForm(formAction, fields);
     currentHtml = response.body || '';
-    this._saveDebug(debugDir, `confirm-${this.runStamp}.html`, currentHtml);
+    this._saveDebug(debugDir, 'confirm.html', currentHtml);
 
     if (currentHtml.includes('of_genera_folio')) {
       response = await this._processGeneraFolio(response, debugDir);
@@ -330,7 +329,7 @@ class CafSolicitor {
 
     response = await this.session.submitForm(formAction, fields);
     currentHtml = response.body || '';
-    this._saveDebug(debugDir, `genera-${this.runStamp}.html`, currentHtml);
+    this._saveDebug(debugDir, 'genera.html', currentHtml);
 
     // Paso final: of_genera_archivo
     if (!currentHtml.includes('<AUTORIZACION') && currentHtml.includes('of_genera_archivo')) {
@@ -357,7 +356,7 @@ class CafSolicitor {
 
     response = await this.session.submitForm(formAction, fields);
     currentHtml = response.body || '';
-    this._saveDebug(debugDir, `archivo-${this.runStamp}.xml`, currentHtml);
+    this._saveDebug(debugDir, 'archivo.xml', currentHtml);
 
     // A veces hay un paso extra
     if (!currentHtml.includes('<AUTORIZACION') && currentHtml.includes('of_genera_archivo')) {
@@ -370,7 +369,7 @@ class CafSolicitor {
       };
 
       response = await this.session.submitForm(formAction2, fields2);
-      this._saveDebug(debugDir, `archivo2-${this.runStamp}.xml`, response.body || '');
+      this._saveDebug(debugDir, 'archivo2.xml', response.body || '');
     }
 
     return response;

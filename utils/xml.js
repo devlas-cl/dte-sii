@@ -54,7 +54,7 @@ const prettyBuilder = new XMLBuilder({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   format: true,
-  indentBy: '  ',
+  indentBy: ' ',
   suppressEmptyNode: true,
 });
 
@@ -326,7 +326,7 @@ function saveEnvioArtifacts({
       fs.writeFileSync(path.join(debugDir, `respuesta-${debugPrefix}.xml`), responseText, 'utf-8');
     }
   } catch (saveError) {
-    console.warn('⚠️ No se pudo guardar histórico/debug:', saveError.message || saveError);
+    console.warn('[!] No se pudo guardar histórico/debug:', saveError.message || saveError);
   }
 }
 

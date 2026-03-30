@@ -105,13 +105,13 @@ class SetsProvider {
    * @returns {Promise<boolean>}
    */
   async initSession() {
-    this.logger.log('[SetsProvider] 🔐 Inicializando sesión SII...');
+    this.logger.log('[SessionSii] Inicializando sesión SII...');
     
     const siiCert = this._getSiiCert();
     
     // Intentar cargar sesión existente
     if (this.sessionPath && SiiCertificacion.isSessionValid(this.sessionPath)) {
-      this.logger.log('[SetsProvider]    ✓ Sesión existente válida');
+      this.logger.log('[SessionSii] ✓ Sesión existente válida');
       const loaded = siiCert.loadSession(this.sessionPath);
       if (loaded) {
         return true;
@@ -119,7 +119,7 @@ class SetsProvider {
     }
     
     // Crear nueva sesión
-    this.logger.log('[SetsProvider]    Estableciendo nueva sesión...');
+    this.logger.log('[SessionSii] Estableciendo nueva sesión...');
     try {
       // verAvance() fuerza el login
       await siiCert.verAvance();
@@ -128,12 +128,12 @@ class SetsProvider {
       if (this.sessionPath) {
         this._ensureDir(path.dirname(this.sessionPath));
         siiCert.saveSession(this.sessionPath);
-        this.logger.log('[SetsProvider]    ✓ Sesión guardada');
+        this.logger.log('[SessionSii] ✓ Sesión guardada');
       }
       
       return true;
     } catch (error) {
-      this.logger.error(`[SetsProvider]    ❌ Error: ${error.message}`);
+      this.logger.error(`[SessionSii] [ERR] Error: ${error.message}`);
       return false;
     }
   }
@@ -153,11 +153,11 @@ class SetsProvider {
       setsOpcionales = DEFAULT_SETS_OPCIONALES,
     } = options;
 
-    this.logger.log('\n[SetsProvider] 📦 Obteniendo sets de prueba...');
+    this.logger.log('\n[SessionSii] Obteniendo sets de prueba...');
 
     // Si hay cache y no se fuerza refresh, retornar cache
     if (!forceRefresh && this._estructurasCache) {
-      this.logger.log('[SetsProvider]    ✓ Usando cache de estructuras');
+      this.logger.log('[SetsProvider] ✓ Usando cache de estructuras');
       return {
         success: true,
         regenerated: false,
@@ -212,7 +212,7 @@ class SetsProvider {
       // Detectar si el set fue regenerado
       const regenerated = this._detectRegeneration(result);
       if (regenerated) {
-        this.logger.log('[SetsProvider]    ⚠️ Set regenerado - reiniciar proceso');
+        this.logger.log('[SetsProvider] [!] Set regenerado - reiniciar proceso');
         // Invalidar cualquier cache anterior
         this.invalidateCache();
       }
@@ -228,13 +228,13 @@ class SetsProvider {
             (htmlLower.includes('postulacion factura electronica') && !htmlLower.includes('caso'))) {
           // Distinguir: ¿es "no inscrito" o expiró la sesión?
           if (htmlLower.includes('no inscrito') || (htmlLower.includes('no est') && htmlLower.includes('inscrito'))) {
-            this.logger.log('[SetsProvider]    ℹ️  pe_generar2: empresa no inscrita en Postulación (fase avanzada).');
+            this.logger.log('[SessionSii] pe_generar2: empresa no inscrita en Postulación (fase avanzada).');
             return { success: false, error: 'El contribuyente no está inscrito en Postulación en el portal SII.' };
           }
           // Sesión expiró en el portal aunque el archivo no lo sabía → forzar re-autenticación
           // Cookies vencidas server-side: limpiar sesión guardada y pedir a
           // generarSetPruebas que re-autentique por sí mismo via pe_generar
-          this.logger.log('[SetsProvider]    ⚠️ Sesión rechazada por portal, limpiando y reintentando...');
+          this.logger.log('[SessionSii] [!] Sesión rechazada por portal, limpiando y reintentando...');
           if (this.sessionPath) {
             const SiiSession = require('../SiiSession');
             SiiSession.clearSession(this.sessionPath);
@@ -284,7 +284,7 @@ class SetsProvider {
         }
       }
 
-      this.logger.log('[SetsProvider]    ✓ Sets obtenidos correctamente');
+      this.logger.log('[SetsProvider] ✓ Sets obtenidos correctamente');
 
       return {
         success: true,
@@ -296,7 +296,7 @@ class SetsProvider {
       };
 
     } catch (error) {
-      this.logger.error(`[SetsProvider]    ❌ Error: ${error.message}`);
+      this.logger.error(`[SetsProvider] [ERR] Error: ${error.message}`);
       return {
         success: false,
         error: error.message,
@@ -329,7 +329,7 @@ class SetsProvider {
     if (result.setDescargado?.rawHtml && this._lastNumeroAtencion) {
       const match = result.setDescargado.rawHtml.match(/NUMERO DE ATENCI[^:]*:\s*(\d+)/i);
       if (match && match[1] !== this._lastNumeroAtencion) {
-        this.logger.log(`[SetsProvider]    Número de atención cambió: ${this._lastNumeroAtencion} → ${match[1]}`);
+        this.logger.log(`[SetsProvider] Número de atención cambió: ${this._lastNumeroAtencion} → ${match[1]}`);
         return true;
       }
     }
@@ -351,19 +351,16 @@ class SetsProvider {
     if (this.debugDir) {
       this._saveDebug('set-texto.txt', textoLimpio);
     }
-
-    // Usar SetParser del core
-    this.logger.log('[SetsProvider]    Usando SetParser del core...');
     
     const datosExtraidos = SetParser.extraerCasosDelSet(textoLimpio);
     
     if (datosExtraidos.sets.length === 0) {
-      this.logger.log('[SetsProvider]    ⚠️ No se encontraron sets en el contenido');
+      this.logger.log('[SetsProvider] [!] No se encontraron sets en el contenido');
       return { estructuras: null, datosExtraidos: null };
     }
 
-    this.logger.log(`[SetsProvider]    📦 Sets encontrados: ${datosExtraidos.sets.length}`);
-    this.logger.log(`[SetsProvider]    📄 Total casos: ${datosExtraidos.totalCasos}`);
+    this.logger.log(`[SetsProvider] Sets encontrados: ${datosExtraidos.sets.length}`);
+    this.logger.log(`[SetsProvider] Total casos: ${datosExtraidos.totalCasos}`);
 
     // Guardar número de atención para detectar regeneración
     if (datosExtraidos.sets[0]?.numeroAtencion) {
