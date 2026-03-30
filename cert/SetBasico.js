@@ -72,21 +72,21 @@ class SetBasico extends SetBase {
     const dtes = [];
     
     // 1. Generar facturas primero (las NC/ND referencian facturas)
-    this.logger.log('   📄 Generando facturas...');
+    this.logger.log(' Generando facturas...');
     for (const caso of casos.casosFactura || []) {
       const dte = await this._generarFactura(caso, cafs[33]);
       dtes.push(dte);
     }
     
     // 2. Generar notas de crédito
-    this.logger.log('   📄 Generando notas de crédito...');
+    this.logger.log(' Generando notas de crédito...');
     for (const caso of casos.casosNC || []) {
       const dte = await this._generarNotaCredito(caso, cafs[61]);
       dtes.push(dte);
     }
     
     // 3. Generar notas de débito
-    this.logger.log('   📄 Generando notas de débito...');
+    this.logger.log(' Generando notas de débito...');
     for (const caso of casos.casosND || []) {
       const dte = await this._generarNotaDebito(caso, cafs[56]);
       dtes.push(dte);
@@ -161,7 +161,7 @@ class SetBasico extends SetBase {
       descuentoGlobalPct: caso.descuentoGlobalPct,
     };
     
-    this.logger.log(`      ✓ Factura caso ${caso.id}: folio ${folio}`);
+    this.logger.log(` ✓ Factura caso ${caso.id}: folio ${folio}`);
     return dte;
   }
 
@@ -248,7 +248,7 @@ class SetBasico extends SetBase {
       items: itemsFinal,
     };
     
-    this.logger.log(`      ✓ NC caso ${caso.id}: folio ${folio} (ref: caso ${caso.referenciaCaso})`);
+    this.logger.log(` ✓ NC caso ${caso.id}: folio ${folio} (ref: caso ${caso.referenciaCaso})`);
     return dte;
   }
 
@@ -309,7 +309,7 @@ class SetBasico extends SetBase {
     const dte = new DTE(dteDatos);
     this._timbrarYFirmar(dte, caf);
     
-    this.logger.log(`      ✓ ND caso ${caso.id}: folio ${folio} (ref: caso ${caso.referenciaCaso})`);
+    this.logger.log(` ✓ ND caso ${caso.id}: folio ${folio} (ref: caso ${caso.referenciaCaso})`);
     return dte;
   }
 

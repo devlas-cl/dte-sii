@@ -519,10 +519,10 @@ class MuestrasImpresas {
     fs.mkdirSync(simulacionDir, { recursive: true });
 
     console.log('\n' + '═'.repeat(60));
-    console.log('📄 GENERACIÓN DE MUESTRAS IMPRESAS');
+    console.log('GENERACIÓN DE MUESTRAS IMPRESAS');
     console.log('═'.repeat(60));
-    console.log(`   📂 SET-PRUEBAS: ${pruebasDir}`);
-    console.log(`   📂 SET-SIMULACION: ${simulacionDir}`);
+    console.log(` SET-PRUEBAS: ${pruebasDir}`);
+    console.log(` SET-SIMULACION: ${simulacionDir}`);
 
     const browser = await puppeteer.launch({ headless: true });
     const resultado = {
@@ -537,20 +537,20 @@ class MuestrasImpresas {
 
     try {
       for (const filePath of xmlFiles) {
-        console.log(`\n   📄 Procesando: ${path.basename(filePath)}`);
+        console.log(`\n Procesando: ${path.basename(filePath)}`);
         const xml = fs.readFileSync(filePath, 'utf8');
         
         let documentos;
         try {
           documentos = this.parseEnvioDTE(xml);
         } catch (e) {
-          console.log(`      ⚠️ Error parseando: ${e.message}`);
+          console.log(` [!] Error parseando: ${e.message}`);
           resultado.errores.push({ file: filePath, error: e.message });
           continue;
         }
 
         if (!documentos.length) {
-          console.log('      ⚠️ Sin documentos');
+          console.log(' [!] Sin documentos');
           continue;
         }
 
@@ -559,7 +559,7 @@ class MuestrasImpresas {
         const isPruebas = /envio-set-(basico|guia|exenta|compra)\.xml/i.test(sourceFile);
         const targetDir = isPruebas ? pruebasDir : simulacionDir;
         const categoria = isPruebas ? 'PRUEBAS' : 'SIMULACION';
-        console.log(`      📁 Categoría: SET-${categoria}`);
+        console.log(` Categoria: SET-${categoria}`);
 
         for (const doc of documentos) {
           resultado.totalDocs++;
@@ -579,13 +579,13 @@ class MuestrasImpresas {
             resultado.archivos.push(outputPath);
             if (isPruebas) resultado.setPruebas++;
             else resultado.setSimulacion++;
-            console.log(`      ✓ ${outputName}`);
+            console.log(` ✓ ${outputName}`);
 
             // Generar copia cedible si corresponde
             if (generarCedible && CEDIBLE_TIPOS.has(doc.tipoDte)) {
               // Guía de traslado interno no tiene cedible
               if (doc.tipoDte === 52 && [5, 6].includes(doc.indTraslado)) {
-                console.log(`      ⏭️ Guía traslado interno - sin cedible`);
+                console.log(' Guia traslado interno - sin cedible');
                 continue;
               }
 
@@ -598,11 +598,11 @@ class MuestrasImpresas {
               resultado.archivos.push(outputPathCedible);
               if (isPruebas) resultado.setPruebas++;
               else resultado.setSimulacion++;
-              console.log(`      ✓ ${outputNameCedible}`);
+              console.log(` ✓ ${outputNameCedible}`);
             }
 
           } catch (e) {
-            console.log(`      ❌ Error: ${e.message}`);
+            console.log(` [ERR] Error: ${e.message}`);
             resultado.errores.push({ tipo: doc.tipoDte, folio: doc.folio, error: e.message });
           }
         }
@@ -613,17 +613,17 @@ class MuestrasImpresas {
 
     // Resumen
     console.log('\n' + '═'.repeat(60));
-    console.log('✅ MUESTRAS IMPRESAS GENERADAS');
+    console.log('[OK] MUESTRAS IMPRESAS GENERADAS');
     console.log('═'.repeat(60));
-    console.log(`   📄 Documentos procesados: ${resultado.totalDocs}`);
-    console.log(`   📄 PDFs generados: ${resultado.totalPdfs}`);
-    console.log(`   📂 SET-PRUEBAS: ${resultado.setPruebas} PDFs`);
-    console.log(`   📂 SET-SIMULACION: ${resultado.setSimulacion} PDFs`);
-    console.log(`   📂 Directorio base: ${outDir}`);
+    console.log(` Documentos procesados: ${resultado.totalDocs}`);
+    console.log(` PDFs generados: ${resultado.totalPdfs}`);
+    console.log(` SET-PRUEBAS: ${resultado.setPruebas} PDFs`);
+    console.log(` SET-SIMULACION: ${resultado.setSimulacion} PDFs`);
+    console.log(` Directorio base: ${outDir}`);
 
     if (resultado.errores.length > 0) {
       resultado.success = false;
-      console.log(`   ⚠️ Errores: ${resultado.errores.length}`);
+      console.log(` [!] Errores: ${resultado.errores.length}`);
     }
 
     return resultado;

@@ -66,20 +66,20 @@ class SetCompra extends SetBase {
     const dtes = [];
     
     // 1. Generar factura de compra
-    this.logger.log('   📄 Generando factura de compra...');
+    this.logger.log(' Generando factura de compra...');
     const dteFactura = await this._generarFacturaCompra(casos.casoFactura, cafs[46]);
     dtes.push(dteFactura);
     
     // 2. Generar nota de crédito
     if (casos.casoNC) {
-      this.logger.log('   📄 Generando nota de crédito...');
+      this.logger.log(' Generando nota de crédito...');
       const dteNc = await this._generarNotaCredito(casos.casoNC, cafs[61]);
       dtes.push(dteNc);
     }
     
     // 3. Generar nota de débito
     if (casos.casoND) {
-      this.logger.log('   📄 Generando nota de débito...');
+      this.logger.log(' Generando nota de débito...');
       const dteNd = await this._generarNotaDebito(casos.casoND, cafs[56]);
       dtes.push(dteNd);
     }
@@ -139,7 +139,7 @@ class SetCompra extends SetBase {
       items,
     };
     
-    this.logger.log(`      ✓ Factura Compra caso ${caso.id}: folio ${folio}`);
+    this.logger.log(` ✓ Factura Compra caso ${caso.id}: folio ${folio}`);
     return dte;
   }
 
@@ -207,7 +207,7 @@ class SetCompra extends SetBase {
       items,
     };
     
-    this.logger.log(`      ✓ NC Compra caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
+    this.logger.log(` ✓ NC Compra caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
     return dte;
   }
 
@@ -265,7 +265,7 @@ class SetCompra extends SetBase {
     const dte = new DTE(dteDatos);
     this._timbrarYFirmar(dte, caf);
     
-    this.logger.log(`      ✓ ND Compra caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
+    this.logger.log(` ✓ ND Compra caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
     return dte;
   }
 

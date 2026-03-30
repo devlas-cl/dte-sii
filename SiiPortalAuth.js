@@ -173,10 +173,10 @@ class SiiPortalAuth {
     if (cached) {
       const valida = await this._validarSesion(cached);
       if (valida) {
-        console.log('[SiiPortalAuth] ♻️  Reutilizando sesión SII cacheada');
+        console.log('[SiiPortalAuth] Reutilizando sesión SII cacheada');
         return cached;
       }
-      console.log('[SiiPortalAuth] ⚠️  Sesión cacheada expirada, re-autenticando...');
+      console.warn('[SiiPortalAuth] Sesión cacheada expirada, re-autenticando...');
     }
 
     // ── 2. Nueva autenticación ────────────────────────────────────────────────
@@ -187,6 +187,7 @@ class SiiPortalAuth {
       { cookieJar }
     );
 
+    console.log('[SiiPortalAuth] Autenticando con certificado en herculesr.sii.cl...');
     const r2 = await this._request(
       `https://herculesr.sii.cl/cgi_AUT2000/CAutInicio.cgi?${TARGET}`,
       {
@@ -196,6 +197,7 @@ class SiiPortalAuth {
         usarCert: true,
       }
     );
+    console.log(`[SiiPortalAuth] Respuesta herculesr: status=${r2.status}`);
 
     // Verificar mensaje de límite de sesiones
     if (r2.body.includes('m\u00e1ximo de sesiones') || r2.body.includes('maximo de sesiones') ||
@@ -222,19 +224,25 @@ class SiiPortalAuth {
    */
   async _validarSesion(cookieJar) {
     try {
+      console.log('[SiiPortalAuth] Validando sesión cacheada en SII...');
       const res = await this._request(
         'https://maullin.sii.cl/cvc_cgi/dte/ad_empresa1',
         { cookieJar: { ...cookieJar } } // copia para no contaminar
       );
       // Si redirige al login SII → expirada
       const loc = res.headers['location'] || '';
-      if (loc.includes('InicioAutenticacion') || loc.includes('IngresoRutClave')) return false;
+      if (loc.includes('InicioAutenticacion') || loc.includes('IngresoRutClave')) {
+        console.warn('[SiiPortalAuth] Validación: SII redirigió al login → sesión expirada');
+        return false;
+      }
       // Si el body contiene formulario de empresa → válida
       const valida = res.status === 200 && (res.body.includes('RUT_EMP') || res.body.includes('ad_empresa'));
+      console.log(`[SiiPortalAuth] Validación: status=${res.status} → sesión ${valida ? 'VÁLIDA ✓' : 'INVÁLIDA ✗'}`);
       // Refrescar timestamp del caché para extender TTL mientras la sesión se usa activamente
       if (valida) SiiPortalAuth._guardarSesionCache(this._certHash, cookieJar);
       return valida;
-    } catch {
+    } catch (err) {
+      console.warn('[SiiPortalAuth] Validación: error de red →', err.message);
       return false;
     }
   }
@@ -242,13 +250,25 @@ class SiiPortalAuth {
   /** Lee sesión cacheada del disco para el cert dado. @private */
   static _cargarSesionCache(certHash) {
     try {
-      if (!fs.existsSync(SESSION_CACHE_PATH)) return null;
+if (!fs.existsSync(SESSION_CACHE_PATH)) {
+        console.log('[SiiPortalAuth] Cache: archivo no existe →', SESSION_CACHE_PATH);
+        return null;
+      }
       const data = JSON.parse(fs.readFileSync(SESSION_CACHE_PATH, 'utf8'));
-      if (data.certHash !== certHash) return null;
+      if (data.certHash !== certHash) {
+        console.log(`[SiiPortalAuth] Cache: cert no coincide (guardado=${data.certHash} actual=${certHash})`);
+        return null;
+      }
+      const edadMin = Math.round((Date.now() - data.ts) / 60000);
       // TTL: 90 minutos (SII permite ~2h de inactividad; se refresca en cada validación)
-      if (Date.now() - data.ts > 90 * 60 * 1000) return null;
+      if (Date.now() - data.ts > 90 * 60 * 1000) {
+        console.log(`[SiiPortalAuth] Cache: sesión expirada (edad=${edadMin} min, TTL=90 min)`);
+        return null;
+      }
+      console.log(`[SiiPortalAuth] Cache: sesión encontrada`);
       return data.cookies;
-    } catch {
+    } catch (err) {
+      console.warn('[SiiPortalAuth] Cache: error leyendo caché →', err.message);
       return null;
     }
   }
@@ -262,7 +282,11 @@ class SiiPortalAuth {
         ts: Date.now(),
         cookies: cookieJar,
       }), 'utf8');
-    } catch { /* no crítico */ }
+      const cookieKeys = Object.keys(cookieJar);
+      console.log(`[SiiPortalAuth] Cache: sesión guardada`);
+    } catch (err) {
+      console.warn('[SiiPortalAuth] Cache: error guardando caché →', err.message);
+    }
   }
 
   /** Borra la sesión cacheada (útil para forzar re-login). */

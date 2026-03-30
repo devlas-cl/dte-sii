@@ -43,6 +43,7 @@ const Simulacion = require('./Simulacion');
 const IntercambioCert = require('./IntercambioCert');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { STEPS, emitProgress } = require('../utils/progress');
 
 /**
  * @typedef {Object} CertConfig
@@ -136,6 +137,7 @@ class CertRunner {
         pfxPassword: this.config.certificado.password,
         rutEmpresa: rut,
         dvEmpresa: dv,
+        sessionPath: this.sessionPath,
       });
     }
     return this._siiCert;
@@ -210,7 +212,8 @@ class CertRunner {
     this.folioHelper.usedFolios.clear();
     
     for (const [tipoDte, cantidad] of Object.entries(cafRequired)) {
-      console.log(`   Tipo ${tipoDte}: ${cantidad} folios...`);
+      emitProgress(STEPS.CAF_REQUESTING, { tipo: Number(tipoDte) });
+      console.log(` Tipo ${tipoDte}: ${cantidad} folios...`);
       
       // Usar solicitarCafConFallback que solicita y retorna el path
       const cafPath = await this.folioService.solicitarCafConFallback({
@@ -223,7 +226,8 @@ class CertRunner {
       }
       
       cafs[tipoDte] = cafPath;
-      console.log(`   ✓ CAF tipo ${tipoDte}`);
+      emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
+      console.log(` ✓ CAF tipo ${tipoDte}`);
     }
     
     return cafs;
@@ -248,8 +252,6 @@ class CertRunner {
           // Guardar envío consolidado
           const envioPath = path.join(setsDir, `envio-set-${setName}.xml`);
           fs.writeFileSync(envioPath, envio.xml, 'utf8');
-          console.log(`   📄 XML guardado: ${envioPath}`);
-          
           // Guardar DTEs individuales
           if (envio.dtes && envio.dtes.length > 0) {
             const dtesDir = path.join(setsDir, 'dtes');
@@ -312,20 +314,36 @@ class CertRunner {
   }
 
   async ejecutarSetBasico(casos) {
-    return this._ejecutarSet(SetBasico, 'setBasico', 'basico', { 33: 4, 56: 1, 61: 3 }, 'basico', casos);
+    emitProgress(STEPS.SET_START, { set: 'basico' });
+    const r = await this._ejecutarSet(SetBasico, 'setBasico', 'basico', { 33: 4, 56: 1, 61: 3 }, 'basico', casos);
+    if (r.success) emitProgress(STEPS.SET_OK, { set: 'basico', trackId: r.trackId });
+    else emitProgress(STEPS.SET_ERROR, { set: 'basico', error: r.error });
+    return r;
   }
 
   async ejecutarSetGuia(casos) {
-    return this._ejecutarSet(SetGuia, 'setGuiaDespacho', 'guia',
+    emitProgress(STEPS.SET_START, { set: 'guia' });
+    const r = await this._ejecutarSet(SetGuia, 'setGuiaDespacho', 'guia',
       (setData) => ({ 52: setData.casos?.length || 1 }), 'guia', casos);
+    if (r.success) emitProgress(STEPS.SET_OK, { set: 'guia', trackId: r.trackId });
+    else emitProgress(STEPS.SET_ERROR, { set: 'guia', error: r.error });
+    return r;
   }
 
   async ejecutarSetExenta(casos) {
-    return this._ejecutarSet(SetExenta, 'setFacturaExenta', 'exenta', { 34: 3, 56: 1, 61: 4 }, 'exenta', casos);
+    emitProgress(STEPS.SET_START, { set: 'exenta' });
+    const r = await this._ejecutarSet(SetExenta, 'setFacturaExenta', 'exenta', { 34: 3, 56: 1, 61: 4 }, 'exenta', casos);
+    if (r.success) emitProgress(STEPS.SET_OK, { set: 'exenta', trackId: r.trackId });
+    else emitProgress(STEPS.SET_ERROR, { set: 'exenta', error: r.error });
+    return r;
   }
 
   async ejecutarSetCompra(casos) {
-    return this._ejecutarSet(SetCompra, 'setFacturaCompra', 'compra', { 46: 1, 56: 1, 61: 1 }, 'compra', casos);
+    emitProgress(STEPS.SET_START, { set: 'compra' });
+    const r = await this._ejecutarSet(SetCompra, 'setFacturaCompra', 'compra', { 46: 1, 56: 1, 61: 1 }, 'compra', casos);
+    if (r.success) emitProgress(STEPS.SET_OK, { set: 'compra', trackId: r.trackId });
+    else emitProgress(STEPS.SET_ERROR, { set: 'compra', error: r.error });
+    return r;
   }
 
   /**
@@ -338,12 +356,13 @@ class CertRunner {
   async _declararConReintentos(sets, debugPrefix, options = {}) {
     const { maxIntentos = 10, intervalo = 5000, label = 'avance' } = options;
 
-    console.log(`   ⏳ Esperando 10s para que SII procese los envíos...`);
+    console.log(` Esperando 10s para que SII procese los envios...`);
     await sleep(10000);
 
     let lastResult = null;
     for (let intento = 1; intento <= maxIntentos; intento++) {
-      console.log(`   🔄 Declarando ${label} (intento ${intento}/${maxIntentos})...`);
+      emitProgress(STEPS.POLLING, { intento, max: maxIntentos, label });
+      console.log(` Declarando ${label} (intento ${intento}/${maxIntentos})...`);
 
       const result = await this.siiCert.declararAvance({ sets });
       lastResult = result;
@@ -378,15 +397,19 @@ class CertRunner {
       }
 
       if (noProcessedError && intento < maxIntentos) {
-        console.log(`   ⏳ SII aún procesando, reintentando en ${intervalo / 1000}s...`);
+        console.log(` [...] SII aún procesando, reintentando en ${intervalo / 1000}s...`);
         await sleep(intervalo);
+      } else if (result.allRejected) {
+        // SII rechazó todos los sets/libros — período incorrecto, no tiene sentido reintentar
+        console.log(` [ERR] SII rechazó todos los envíos (campos vacíos en portal) — período incorrecto. Corregir período y reenviar.`);
+        break;
       } else if (result.verificado === false && intento < maxIntentos) {
         // Verificación post-declaración falló: los campos quedaron vacíos en el portal
-        console.log(`   ⚠️ Verificación fallida: ${result.error}`);
-        console.log(`   🔄 Reintentando declaración en ${intervalo / 1000}s...`);
+        console.log(` [!] Verificación fallida: ${result.error}`);
+        console.log(` [...] Reintentando declaración en ${intervalo / 1000}s...`);
         await sleep(intervalo);
       } else if (!result.success) {
-        console.log(`   ⚠️ Error declarando ${label}: ${result.error || 'desconocido'}`);
+        console.log(` [!] Error declarando ${label}: ${result.error || 'desconocido'}`);
         break;
       }
     }
@@ -434,8 +457,9 @@ class CertRunner {
       return { success: false, error: 'No hay sets para declarar' };
     }
 
+    emitProgress(STEPS.SETS_DECLARING);
     const result = await this._declararConReintentos(sets, 'declaracion-response', { maxIntentos, intervalo, label: 'avance de sets' });
-    if (result?.success) console.log('   ✓ Declaración de sets enviada');
+    if (result?.success) { emitProgress(STEPS.SETS_DECLARED); console.log(' ✓ Declaracion de sets enviada'); }
     return result;
   }
 
@@ -480,12 +504,18 @@ class CertRunner {
    */
   async ejecutarFase4Libros(options = {}) {
     // NOTA: Ya NO decrementamos aquí - cada libro decrementa su propio período
+    emitProgress(STEPS.BOOKS_START);
     console.log('\n' + '═'.repeat(60));
-    console.log(`📚 FASE 4: LIBROS (cada libro usará período diferente)`);
+    console.log('FASE 4: LIBROS (todos usan el mismo periodo)');
     console.log('═'.repeat(60) + '\n');
 
     const resultados = {};
     const errores = [];
+
+    // Decrementar período UNA VEZ para todos los libros (todos usan el mismo período)
+    this._decrementarPeriodoLibros();
+    const _periodoComunLibros = this._getPeriodoLibros();
+    console.log(` Período para todos los libros: ${_periodoComunLibros}`);
 
     // Verificar cuáles libros ya están REVISADO CONFORME en el portal (no re-enviar)
     let _estadoActual = {};
@@ -496,7 +526,7 @@ class CertRunner {
         .filter(([k, v]) => k.toUpperCase().includes('LIBRO') && v === 'REVISADO CONFORME')
         .map(([k]) => k);
       if (_yaConformes.length) {
-        console.log(`   ℹ️  Ya en REVISADO CONFORME (se omitirán): ${_yaConformes.join(', ')}`);
+        console.log(` Ya en REVISADO CONFORME (se omitirán): ${_yaConformes.join(', ')}`);
       }
     } catch (_e) { /* ignorar error de consulta previa */ }
 
@@ -521,13 +551,18 @@ class CertRunner {
     try {
       // 1. Libro de Compras (usa datos del SII)
       if (_estaConforme('LIBRO DE COMPRAS')) {
-        console.log('\n✅ Libro de Compras ya está REVISADO CONFORME — omitiendo');
+        emitProgress(STEPS.BOOK_SKIPPED, { book: 'libroCompras' });
+        resultados.libroCompras = { success: true, conforme: true };
+        console.log('\n[OK] Libro de Compras ya esta REVISADO CONFORME — omitiendo');
       } else {
-        console.log('\n📖 Enviando Libro de Compras...');
-        resultados.libroCompras = await this.ejecutarLibroCompras(options);
+        emitProgress(STEPS.BOOK_SENDING, { book: 'libroCompras' });
+        console.log('\nEnviando Libro de Compras...');
+        resultados.libroCompras = await this.ejecutarLibroCompras({ ...options, periodo: _periodoComunLibros });
         if (!resultados.libroCompras.success) {
+          emitProgress(STEPS.BOOK_ERROR, { book: 'libroCompras', error: resultados.libroCompras.error });
           errores.push(`Libro Compras: ${resultados.libroCompras.error}`);
         } else {
+          emitProgress(STEPS.BOOK_OK, { book: 'libroCompras', trackId: resultados.libroCompras.trackId });
           _guardarResultadosParciales();
         }
       }
@@ -538,13 +573,18 @@ class CertRunner {
     try {
       // 2. Libro de Ventas (usa SetBasico)
       if (_estaConforme('LIBRO DE VENTAS')) {
-        console.log('\n✅ Libro de Ventas ya está REVISADO CONFORME — omitiendo');
+        emitProgress(STEPS.BOOK_SKIPPED, { book: 'libroVentas' });
+        resultados.libroVentas = { success: true, conforme: true };
+        console.log('\n[OK] Libro de Ventas ya esta REVISADO CONFORME — omitiendo');
       } else {
-        console.log('\n📖 Enviando Libro de Ventas...');
-        resultados.libroVentas = await this.ejecutarLibroVentas(options);
+        emitProgress(STEPS.BOOK_SENDING, { book: 'libroVentas' });
+        console.log('\nEnviando Libro de Ventas...');
+        resultados.libroVentas = await this.ejecutarLibroVentas({ ...options, periodo: _periodoComunLibros });
         if (!resultados.libroVentas.success) {
+          emitProgress(STEPS.BOOK_ERROR, { book: 'libroVentas', error: resultados.libroVentas.error });
           errores.push(`Libro Ventas: ${resultados.libroVentas.error}`);
         } else {
+          emitProgress(STEPS.BOOK_OK, { book: 'libroVentas', trackId: resultados.libroVentas.trackId });
           _guardarResultadosParciales();
         }
       }
@@ -555,13 +595,18 @@ class CertRunner {
     try {
       // 3. Libro de Guías (usa SetGuia)
       if (_estaConforme('LIBRO DE GUIAS')) {
-        console.log('\n✅ Libro de Guías ya está REVISADO CONFORME — omitiendo');
+        emitProgress(STEPS.BOOK_SKIPPED, { book: 'libroGuias' });
+        resultados.libroGuias = { success: true, conforme: true };
+        console.log('\n[OK] Libro de Guias ya esta REVISADO CONFORME — omitiendo');
       } else {
-        console.log('\n📖 Enviando Libro de Guías...');
-        resultados.libroGuias = await this.ejecutarLibroGuias(options);
+        emitProgress(STEPS.BOOK_SENDING, { book: 'libroGuias' });
+        console.log('\nEnviando Libro de Guias...');
+        resultados.libroGuias = await this.ejecutarLibroGuias({ ...options, periodo: _periodoComunLibros });
         if (!resultados.libroGuias.success) {
-          errores.push(`Libro Guías: ${resultados.libroGuias.error}`);
+          emitProgress(STEPS.BOOK_ERROR, { book: 'libroGuias', error: resultados.libroGuias.error });
+          errores.push(`Libro Guias: ${resultados.libroGuias.error}`);
         } else {
+          emitProgress(STEPS.BOOK_OK, { book: 'libroGuias', trackId: resultados.libroGuias.trackId });
           _guardarResultadosParciales();
         }
       }
@@ -573,13 +618,18 @@ class CertRunner {
     if (this._estructuras?.libroComprasExentos) {
       try {
         if (_estaConforme('LIBRO DE COMPRAS PARA EXENTOS')) {
-          console.log('\n✅ Libro Compras Exentos ya está REVISADO CONFORME — omitiendo');
+          emitProgress(STEPS.BOOK_SKIPPED, { book: 'libroComprasExentos' });
+          resultados.libroComprasExentos = { success: true, conforme: true };
+          console.log('\n[OK] Libro Compras Exentos ya esta REVISADO CONFORME — omitiendo');
         } else {
-          console.log('\n📖 Enviando Libro de Compras para Exentos...');
-          resultados.libroComprasExentos = await this.ejecutarLibroComprasExentos(options);
+          emitProgress(STEPS.BOOK_SENDING, { book: 'libroComprasExentos' });
+          console.log('\nEnviando Libro de Compras para Exentos...');
+          resultados.libroComprasExentos = await this.ejecutarLibroComprasExentos({ ...options, periodo: _periodoComunLibros });
           if (!resultados.libroComprasExentos.success) {
+            emitProgress(STEPS.BOOK_ERROR, { book: 'libroComprasExentos', error: resultados.libroComprasExentos.error });
             errores.push(`Libro Compras Exentos: ${resultados.libroComprasExentos.error}`);
           } else {
+            emitProgress(STEPS.BOOK_OK, { book: 'libroComprasExentos', trackId: resultados.libroComprasExentos.trackId });
             _guardarResultadosParciales();
           }
         }
@@ -599,64 +649,203 @@ class CertRunner {
     }).length;
     
     if (librosEnviados === 3) {
-      // 4. Declarar los libros (incluyendo sets para evitar que pe_avance3 los resetee)
-      console.log('\n📝 Declarando libros...');
-      try {
-        const declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
-        resultados.declaracion = declaracion;
-        
-        if (declaracion.success) {
-          console.log('\n✅ Libros declarados — esperando revisión del SII...');
+      // Mapeo entre nombre SII y clave interna
+      const _SII_NOMBRE_A_KEY = {
+        'LIBRO DE VENTAS': 'libroVentas',
+        'LIBRO DE COMPRAS': 'libroCompras',
+        'LIBRO DE GUIAS': 'libroGuias',
+        'LIBRO DE COMPRAS PARA EXENTOS': 'libroComprasExentos',
+      };
+      const _KEY_A_SII_NOMBRE = Object.fromEntries(Object.entries(_SII_NOMBRE_A_KEY).map(([n, k]) => [k, n]));
 
-          // Polling real: esperar hasta REVISADO CONFORME o S25 (máx 20 intentos x 15s = 5 min)
-          const _librosAEsperar = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
-          if (this._estructuras?.libroComprasExentos) _librosAEsperar.push('LIBRO DE COMPRAS PARA EXENTOS');
-          // Solo esperar los libros que realmente enviamos (no los que ya eran REVISADO CONFORME)
-          const _librosEnviados = _librosAEsperar.filter(n => !_estaConforme(n));
+      // Busca el entry de _ss para un nombre SII (COMPRAS sin EXENTOS, etc.)
+      const _findEntry = (ss, nombre) => Object.entries(ss).find(([k]) => {
+        const ku = k.toUpperCase();
+        if (nombre === 'LIBRO DE COMPRAS') return ku.includes('LIBRO DE COMPRAS') && !ku.includes('EXENTOS');
+        return ku.includes(nombre);
+      });
 
-          console.log(`\n⏳ Esperando aprobación del SII para: ${_librosEnviados.join(', ')}`);
-          let _aprobados = false;
-          for (let _i = 0; _i < 20; _i++) {
-            await sleep(15000);
-            const _poll = await this.siiCert.consultarEstadoSets();
-            if (!_poll.success) continue;
-            const _ss = _poll.estadoSets || {};
-            const _info = Object.entries(_ss)
-              .filter(([k]) => k.toUpperCase().includes('LIBRO'))
-              .map(([k, v]) => `${k.trim()}: ${v}`);
-            if (_info.length) console.log(`   🔄 Intento ${_i + 1}/20: ${_info.join(' | ')}`);
+      // Retorna claves internas que están en S21 en ss, de entre los especificados
+      const _getS21Keys = (ss, nombres) =>
+        nombres
+          .filter(n => { const e = _findEntry(ss, n); return e && e[1] === 'S21'; })
+          .map(n => _SII_NOMBRE_A_KEY[n])
+          .filter(Boolean);
 
-            const _todosOk = _librosEnviados.every(nombre => {
-              const e = Object.entries(_ss).find(([k]) => k.toUpperCase().includes(nombre));
-              return e && (e[1] === 'REVISADO CONFORME' || e[1] === 'S25');
-            });
-            const _algunError = _librosEnviados.some(nombre => {
-              const e = Object.entries(_ss).find(([k]) => k.toUpperCase().includes(nombre));
-              return e && (e[1] === 'LNC' || e[1] === 'LRH' || e[1].includes('RECHAZADO') || e[1].includes('ERROR'));
-            });
-
-            if (_todosOk) {
-              console.log('\n🎉 ¡LIBROS APROBADOS POR EL SII!');
-              _aprobados = true;
-              break;
+      // Helper para re-enviar los libros no conformes con un nuevo período
+      // keysAReenviar: Set opcional — si se pasa, solo re-envía las claves del Set
+      const _reenviarLibros = async (nuevoPeriodo, keysAReenviar) => {
+        const _orden = [
+          { key: 'libroCompras', fn: (p) => this.ejecutarLibroCompras({ ...options, periodo: p }) },
+          { key: 'libroVentas', fn: (p) => this.ejecutarLibroVentas({ ...options, periodo: p }) },
+          { key: 'libroGuias', fn: (p) => this.ejecutarLibroGuias({ ...options, periodo: p }) },
+          { key: 'libroComprasExentos', fn: (p) => this.ejecutarLibroComprasExentos({ ...options, periodo: p }) },
+        ];
+        for (const { key, fn } of _orden) {
+          if (resultados[key]?.conforme) continue; // ya conforme en SII
+          if (keysAReenviar && !keysAReenviar.has(key)) continue; // filtro por S21
+          emitProgress(STEPS.BOOK_SENDING, { book: key });
+          try {
+            resultados[key] = await fn(nuevoPeriodo);
+            if (!resultados[key].success) {
+              emitProgress(STEPS.BOOK_ERROR, { book: key, error: resultados[key].error });
+            } else {
+              emitProgress(STEPS.BOOK_OK, { book: key, trackId: resultados[key].trackId });
             }
-            if (_algunError) {
-              console.log('\n❌ Hay libros rechazados. Revisar emails del SII.');
-              break;
-            }
+          } catch (e) {
+            resultados[key] = { success: false, error: e.message };
           }
-          if (!_aprobados) {
-            console.log('\n⚠️  Timeout (5 min). El SII aún no responde. Verifica con --avance más tarde.');
+        }
+      };
+
+      // Polling de aprobación (reutilizable)
+      // librosAVerificar: array de nombres SII a esperar. Si se omite, usa todos los no-conformes.
+      // Devuelve { ok, estadosFinal }
+      // Bail-out anticipado: si todos los pendientes llevan 5 polls consecutivos en S21 → período incorrecto
+      const _esperarAprobacion = async (librosAVerificar) => {
+        const _todosCandidatos = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
+        if (this._estructuras?.libroComprasExentos) _todosCandidatos.push('LIBRO DE COMPRAS PARA EXENTOS');
+        const _librosAVerif = librosAVerificar || _todosCandidatos.filter(n => !_estaConforme(n));
+        console.log(`\nEsperando aprobacion del SII para: ${_librosAVerif.join(', ')}`);
+        let _ss = {};
+        let _consecutivosS21 = 0;
+        for (let _i = 0; _i < 20; _i++) {
+          await sleep(15000);
+          emitProgress(STEPS.POLLING, { intento: _i + 1, max: 20, label: 'libros' });
+          const _poll = await this.siiCert.consultarEstadoSets();
+          if (!_poll.success) continue;
+          _ss = _poll.estadoSets || {};
+          const _info = Object.entries(_ss).filter(([k]) => k.toUpperCase().includes('LIBRO')).map(([k, v]) => `${k.trim()}: ${v}`);
+          if (_info.length) console.log(` [...] Intento ${_i + 1}/20: ${_info.join(' | ')}`);
+          const _librosObs = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
+          const _todosObligatoriosOk = _librosObs.every(n => {
+            const e = _findEntry(_ss, n);
+            return e && (e[1] === 'REVISADO CONFORME' || e[1] === 'S25');
+          });
+          const _todosOk = _librosAVerif.every(n => {
+            const e = _findEntry(_ss, n);
+            return e && (e[1] === 'REVISADO CONFORME' || e[1] === 'S25');
+          });
+          const _algunError = _librosAVerif.some(n => {
+            const e = _findEntry(_ss, n);
+            return e && (e[1] === 'LNC' || e[1] === 'LRH' || e[1].includes('RECHAZADO') || e[1].includes('ERROR'));
+          });
+          const _exentosS21 = (() => {
+            const e = _findEntry(_ss, 'LIBRO DE COMPRAS PARA EXENTOS');
+            return e && e[1] === 'S21';
+          })();
+          if (_todosOk) {
+            emitProgress(STEPS.BOOKS_DONE);
+            console.log('\n[OK] LIBROS APROBADOS POR EL SII!');
+            return { ok: true, estadosFinal: _ss };
+          }
+          if (_todosObligatoriosOk && _exentosS21) {
+            emitProgress(STEPS.BOOKS_DONE);
+            console.log('\n[OK] Libros obligatorios REVISADO CONFORME.');
+            console.log(' [!] Libro Compras Exentos sigue en S21 — el SII no reconoció el trackId. Reenviar con --solo-exentos.');
+            return { ok: true, estadosFinal: _ss };
+          }
+          if (_algunError) {
+            console.log('\n[ERR] Hay libros rechazados. Revisar emails del SII.');
+            return { ok: false, estadosFinal: _ss };
+          }
+          // Bail-out anticipado: todos los pendientes llevan N polls en S21 → período incorrecto
+          const _pendientesAun = _librosAVerif.filter(n => {
+            const e = _findEntry(_ss, n);
+            return !e || (e[1] !== 'REVISADO CONFORME' && e[1] !== 'S25');
+          });
+          const _todosS21 = _pendientesAun.length > 0 && _pendientesAun.every(n => {
+            const e = _findEntry(_ss, n);
+            return e && e[1] === 'S21';
+          });
+          if (_todosS21) {
+            _consecutivosS21++;
+            if (_consecutivosS21 >= 5) {
+              console.log(`\n[!] ${_pendientesAun.join(', ')} llevan ${_consecutivosS21} polls en S21 — período incorrecto.`);
+              return { ok: false, estadosFinal: _ss, stuckS21: true };
+            }
+          } else {
+            _consecutivosS21 = 0;
+          }
+        }
+        console.log('\n[!] Timeout (5 min). El SII aún no responde. Verifica con --avance más tarde.');
+        return { ok: false, estadosFinal: _ss };
+      };
+
+      // 4. Declarar + retry automático:
+      //    a) si allRejected al declarar → decrementar período y re-enviar todos
+      //    b) si libros quedan en S21 tras polling → decrementar y re-enviar solo los S21
+      emitProgress(STEPS.BOOKS_DECLARING);
+      console.log('\nDeclarando libros...');
+      const MAX_PERIOD_RETRIES = 24;
+      try {
+        let declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
+        resultados.declaracion = declaracion;
+
+        // Fase a: allRejected al declarar (período rechazado en pe_avance3)
+        for (let _pRetry = 0; _pRetry < MAX_PERIOD_RETRIES && declaracion.allRejected; _pRetry++) {
+          this._decrementarPeriodoLibros();
+          const _nuevoPeriodo = this._getPeriodoLibros();
+          console.log(`\n[!] Período rechazado por SII. Reintentando con ${_nuevoPeriodo} (${_pRetry + 1}/${MAX_PERIOD_RETRIES})...`);
+          await _reenviarLibros(_nuevoPeriodo);
+          declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
+          resultados.declaracion = declaracion;
+        }
+
+        if (declaracion.success) {
+          console.log('\n[OK] Libros declarados — esperando revisión del SII...');
+
+          // Construir la lista inicial de libros a verificar
+          const _todosLibrosNombres = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
+          if (this._estructuras?.libroComprasExentos) _todosLibrosNombres.push('LIBRO DE COMPRAS PARA EXENTOS');
+          let _librosAVerificar = _todosLibrosNombres.filter(n => !_estaConforme(n));
+
+          let { ok, estadosFinal } = await _esperarAprobacion(_librosAVerificar);
+
+          // Fase b: algunos libros quedaron en S21 → re-enviar solo esos con período decrementado
+          for (let _pRetry = 0; !ok && _pRetry < MAX_PERIOD_RETRIES; _pRetry++) {
+            const _s21Keys = _getS21Keys(estadosFinal, _librosAVerificar);
+            if (_s21Keys.length === 0) break; // errores reales (LNC/LRH), no de período
+
+            this._decrementarPeriodoLibros();
+            const _nuevoPeriodo = this._getPeriodoLibros();
+            const _s21Nombres = _s21Keys.map(k => _KEY_A_SII_NOMBRE[k]).filter(Boolean);
+            console.log(`\n[!] ${_s21Nombres.join(', ')} bloqueados en S21. Reintentando con período ${_nuevoPeriodo} (${_pRetry + 1}/${MAX_PERIOD_RETRIES})...`);
+
+            await _reenviarLibros(_nuevoPeriodo, new Set(_s21Keys));
+            declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
+            resultados.declaracion = declaracion;
+
+            if (!declaracion.success && !declaracion.allRejected) {
+              console.log(`\n[ERR] Declaración fallida: ${declaracion.error}`);
+              break;
+            }
+            if (declaracion.success) {
+              // Solo verificar los libros que acabamos de re-enviar
+              _librosAVerificar = _s21Nombres;
+              ;({ ok, estadosFinal } = await _esperarAprobacion(_librosAVerificar));
+            }
+            // si allRejected → continuar loop (decrementar de nuevo)
+          }
+
+          if (!ok) {
+            console.log('\n[!] No se pudo obtener aprobación del SII para todos los libros.');
           }
         } else {
-          console.log(`\n⚠️ Libros enviados pero declaración con error: ${declaracion.error}`);
+          const _errorDeclaracion = declaracion.error || 'Declaración rechazada por SII';
+          console.log(`\n[ERR] Declaración de libros fallida: ${_errorDeclaracion}`);
+          for (const k of ['libroVentas', 'libroCompras', 'libroGuias', 'libroComprasExentos']) {
+            if (resultados[k]?.success && !resultados[k]?.conforme) {
+              resultados[k] = { ...resultados[k], success: false, error: _errorDeclaracion };
+            }
+          }
         }
       } catch (e) {
-        console.log(`\n⚠️ Error declarando libros: ${e.message}`);
+        console.log(`\n[!] Error declarando libros: ${e.message}`);
         resultados.declaracion = { success: false, error: e.message };
       }
     } else {
-      console.log(`\n⚠️ Solo ${librosEnviados}/3 libros enviados. Errores: ${errores.join('; ')}`);
+      console.log(`\n[!] Solo ${librosEnviados}/3 libros enviados. Errores: ${errores.join('; ')}`);
     }
 
     return {
@@ -706,7 +895,7 @@ class CertRunner {
     const result = await this._declararConReintentos(sets, 'declaracion-libros-response', { maxIntentos, intervalo, label: 'libros' });
     if (result?.success) {
       const declarados = result.setsDeclarados || [];
-      console.log(`   ✅ Libros declarados: ${declarados.join(', ')}`);
+      console.log(` [OK] Libros declarados: ${declarados.join(', ')}`);
     }
     return result;
   }
@@ -774,9 +963,9 @@ class CertRunner {
     
     try {
       fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
-      console.log(`   📅 Período decrementado: ${currentPeriodo} → ${newPeriodo}`);
+      console.log(` Período decrementado: ${currentPeriodo} → ${newPeriodo}`);
     } catch (e) {
-      console.warn(`   ⚠️ No se pudo guardar período: ${e.message}`);
+      console.warn(` [!] No se pudo guardar período: ${e.message}`);
     }
     
     return newPeriodo;
@@ -792,9 +981,9 @@ class CertRunner {
     
     try {
       fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
-      console.log(`   📅 Período reseteado a: ${periodo}`);
+      console.log(` Período reseteado a: ${periodo}`);
     } catch (e) {
-      console.warn(`   ⚠️ No se pudo guardar período: ${e.message}`);
+      console.warn(` [!] No se pudo guardar período: ${e.message}`);
     }
   }
 
@@ -820,10 +1009,9 @@ class CertRunner {
       throw new Error('No hay resultado del SetBasico. Ejecutar ejecutarSetBasico() primero.');
     }
 
-    // IMPORTANTE: Decrementar período ANTES de usar para evitar "LNC - Libro Cerrado"
-    this._decrementarPeriodoLibros();
-    const periodo = this._getPeriodoLibros();
-    console.log(`   📚 Generando Libro de Ventas para período ${periodo}...`);
+    // Usar período pasado por opción (fase4 lo decrementa una vez para todos) o decrementar individualmente
+    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
+    console.log(` Generando Libro de Ventas para período ${periodo}...`);
 
     const libroVentas = new LibroVentas({
       emisor: this.config.emisor,
@@ -838,7 +1026,6 @@ class CertRunner {
     // Guardar XML de debug
     const outPath = path.join(this.debugDir, 'libro-ventas.xml');
     fs.writeFileSync(outPath, xml, 'utf-8');
-    console.log(`   XML guardado: ${outPath}`);
 
     // Enviar al SII
     const enviador = this._createLibroEnviador();
@@ -855,9 +1042,9 @@ class CertRunner {
     this.resultados.libroVentas = result;
     
     if (result.success) {
-      console.log(`   ✅ Libro de Ventas enviado - TrackId: ${result.trackId}`);
+      console.log(` [OK] Libro de Ventas enviado - TrackId: ${result.trackId}`);
     } else {
-      console.log(`   ❌ Error enviando Libro de Ventas: ${result.error}`);
+      console.log(` [ERR] Error enviando Libro de Ventas: ${result.error}`);
     }
 
     return result;
@@ -872,9 +1059,7 @@ class CertRunner {
   async ejecutarLibroCompras(options = {}) {
     const libroComprasData = options.libroComprasData || this._estructuras?.libroCompras;
 
-    // IMPORTANTE: Decrementar período ANTES de usar para evitar "LNC - Libro Cerrado"
-    this._decrementarPeriodoLibros();
-    const periodo = this._getPeriodoLibros();
+    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
 
     const libroCompras = new LibroCompras({
       emisor: this.config.emisor,
@@ -886,13 +1071,12 @@ class CertRunner {
       throw new Error('No hay datos del libro de compras. El SII no entregó el set LIBRO_COMPRAS al obtener las estructuras.');
     }
 
-    console.log(`   📚 Generando Libro de Compras para período ${periodo} (${libroComprasData.detalle.length} documentos del SII)...`);
+    console.log(` Generando Libro de Compras para período ${periodo} (${libroComprasData.detalle.length} documentos del SII)...`);
     const { libro, xml, detalle, resumen } = libroCompras.generarDesdeEstructuras(libroComprasData, periodo);
 
     // Guardar XML de debug
     const outPath = path.join(this.debugDir, 'libro-compras.xml');
     fs.writeFileSync(outPath, xml, 'utf-8');
-    console.log(`   XML guardado: ${outPath}`);
 
     // Enviar al SII
     const enviador = this._createLibroEnviador();
@@ -909,9 +1093,9 @@ class CertRunner {
     this.resultados.libroCompras = result;
     
     if (result.success) {
-      console.log(`   ✅ Libro de Compras enviado - TrackId: ${result.trackId}`);
+      console.log(` [OK] Libro de Compras enviado - TrackId: ${result.trackId}`);
     } else {
-      console.log(`   ❌ Error enviando Libro de Compras: ${result.error}`);
+      console.log(` [ERR] Error enviando Libro de Compras: ${result.error}`);
     }
 
     return result;
@@ -928,8 +1112,7 @@ class CertRunner {
       throw new Error('No hay datos del libro de compras para exentos. El SII no entregó el set LIBRO_COMPRAS_EXENTOS.');
     }
 
-    this._decrementarPeriodoLibros();
-    const periodo = this._getPeriodoLibros();
+    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
 
     const libroCompras = new LibroCompras({
       emisor: this.config.emisor,
@@ -937,12 +1120,11 @@ class CertRunner {
       certificado: this.certificado,
     });
 
-    console.log(`   📚 Generando Libro de Compras para Exentos para período ${periodo} (${libroData.detalle.length} documentos del SII)...`);
+    console.log(` Generando Libro de Compras para Exentos para período ${periodo} (${libroData.detalle.length} documentos del SII)...`);
     const { libro, xml, detalle } = libroCompras.generarDesdeEstructuras(libroData, periodo);
 
     const outPath = path.join(this.debugDir, 'libro-compras-exentos.xml');
     fs.writeFileSync(outPath, xml, 'utf-8');
-    console.log(`   XML guardado: ${outPath}`);
 
     const enviador = this._createLibroEnviador();
     const resultado = await enviador.enviarLibro(libro, 'LibroCVExentos.xml');
@@ -958,9 +1140,9 @@ class CertRunner {
     this.resultados.libroComprasExentos = result;
 
     if (result.success) {
-      console.log(`   ✅ Libro de Compras para Exentos enviado - TrackId: ${result.trackId}`);
+      console.log(` [OK] Libro de Compras para Exentos enviado - TrackId: ${result.trackId}`);
     } else {
-      console.log(`   ❌ Error enviando Libro de Compras para Exentos: ${result.error}`);
+      console.log(` [ERR] Error enviando Libro de Compras para Exentos: ${result.error}`);
     }
 
     return result;
@@ -980,10 +1162,8 @@ class CertRunner {
       throw new Error('No hay resultado del SetGuia. Ejecutar ejecutarSetGuia() primero.');
     }
 
-    // IMPORTANTE: Decrementar período ANTES de usar para evitar "LNC - Libro Cerrado"
-    this._decrementarPeriodoLibros();
-    const periodo = this._getPeriodoLibros();
-    console.log(`   📚 Generando Libro de Guías para período ${periodo}...`);
+    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
+    console.log(` Generando Libro de Guías para período ${periodo}...`);
 
     const libroGuias = new LibroGuias({
       emisor: this.config.emisor,
@@ -1000,7 +1180,6 @@ class CertRunner {
     // Guardar XML de debug
     const outPath = path.join(this.debugDir, 'libro-guias.xml');
     fs.writeFileSync(outPath, xml, 'utf-8');
-    console.log(`   XML guardado: ${outPath}`);
 
     // Enviar al SII
     const enviador = this._createLibroEnviador();
@@ -1017,9 +1196,9 @@ class CertRunner {
     this.resultados.libroGuias = result;
     
     if (result.success) {
-      console.log(`   ✅ Libro de Guías enviado - TrackId: ${result.trackId}`);
+      console.log(` [OK] Libro de Guías enviado - TrackId: ${result.trackId}`);
     } else {
-      console.log(`   ❌ Error enviando Libro de Guías: ${result.error}`);
+      console.log(` [ERR] Error enviando Libro de Guías: ${result.error}`);
     }
 
     return result;
@@ -1035,11 +1214,11 @@ class CertRunner {
    */
   async avanzarSiguientePaso() {
     console.log('\n' + '═'.repeat(60));
-    console.log('🚀 AVANZAR SIGUIENTE PASO');
+    console.log('AVANZAR SIGUIENTE PASO');
     console.log('═'.repeat(60) + '\n');
 
     try {
-      console.log('   📋 Enviando solicitud de avance...');
+      console.log(' Enviando solicitud de avance...');
       const result = await this.siiCert.avanzarSiguientePaso();
 
       if (result.rawHtml) {
@@ -1048,20 +1227,20 @@ class CertRunner {
           result.rawHtml,
           'utf8'
         );
-        console.log(`   📄 Respuesta guardada en: ${path.join(this.debugDir, 'avanzar-siguiente-paso-response.html')}`);
+        console.log(` Respuesta guardada en: ${path.join(this.debugDir, 'avanzar-siguiente-paso-response.html')}`);
       }
 
       if (result.success) {
-        console.log('   ✅ Avance al siguiente paso exitoso');
+        console.log(' [OK] Avance al siguiente paso exitoso');
         this.resultados.avanceSiguientePaso = { success: true };
       } else {
-        console.log(`   ❌ Error en avance: ${result.error || 'Error desconocido'}`);
+        console.log(` [ERR] Error en avance: ${result.error || 'Error desconocido'}`);
         this.resultados.avanceSiguientePaso = { success: false, error: result.error };
       }
 
       return result;
     } catch (error) {
-      console.log(`   ❌ Error: ${error.message}`);
+      console.log(` [ERR] Error: ${error.message}`);
       this.resultados.avanceSiguientePaso = { success: false, error: error.message };
       return { success: false, error: error.message };
     }
@@ -1075,15 +1254,15 @@ class CertRunner {
   async esperarLibrosYAvanzar(options = {}) {
     const { maxIntentos = 30, intervalo = 10000 } = options;
 
-    console.log('\n⏳ Esperando aprobación de libros...');
+    console.log('\n[...] Esperando aprobación de libros...');
 
     for (let i = 1; i <= maxIntentos; i++) {
-      console.log(`\n   🔄 Intento ${i}/${maxIntentos}...`);
+      console.log(`\n [...] Intento ${i}/${maxIntentos}...`);
       
       const avance = await this.siiCert.verAvanceParsed();
       
       if (!avance.success) {
-        console.log(`   ⚠️ Error consultando avance: ${avance.error}`);
+        console.log(` [!] Error consultando avance: ${avance.error}`);
         await sleep(intervalo);
         continue;
       }
@@ -1103,30 +1282,30 @@ class CertRunner {
                            estado.estado?.toUpperCase().includes('REPARO');
         
         if (esAprobado) {
-          console.log(`      ✅ ${libro}: REVISADO CONFORME`);
+          console.log(` [OK] ${libro}: REVISADO CONFORME`);
         } else if (esRechazado) {
-          console.log(`      ❌ ${libro}: ${estado.estado}`);
+          console.log(` [ERR] ${libro}: ${estado.estado}`);
           hayRechazados = true;
         } else {
-          console.log(`      🔄 ${libro}: ${estado.estado || 'EN REVISION'}`);
+          console.log(` [...] ${libro}: ${estado.estado || 'EN REVISION'}`);
           todosAprobados = false;
         }
       }
 
       if (hayRechazados) {
-        console.log('\n   ❌ Hay libros rechazados. No se puede avanzar.');
+        console.log('\n [ERR] Hay libros rechazados. No se puede avanzar.');
         return { success: false, error: 'Hay libros rechazados' };
       }
 
       if (todosAprobados) {
-        console.log('\n   🎉 ¡Todos los libros aprobados!');
+        console.log('\n ¡Todos los libros aprobados!');
         return await this.avanzarSiguientePaso();
       }
 
       await sleep(intervalo);
     }
 
-    console.log('\n   ⚠️ Timeout esperando aprobación de libros');
+    console.log('\n [!] Timeout esperando aprobación de libros');
     return { success: false, error: 'Timeout esperando aprobación' };
   }
 
@@ -1148,12 +1327,12 @@ class CertRunner {
     }
 
     console.log('\n' + '═'.repeat(60));
-    console.log('🧪 FASE 6: SIMULACIÓN');
+    console.log('FASE 6: SIMULACIÓN');
     console.log('═'.repeat(60) + '\n');
 
     // Calcular CAFs necesarios
     const cafRequired = this._calcularCafsSimulacion(estructuras);
-    console.log('   Solicitando CAFs para simulación...');
+    console.log(' Solicitando CAFs para simulación...');
     
     // Solicitar CAFs frescos
     const cafs = await this.solicitarCafs(cafRequired);
@@ -1178,22 +1357,21 @@ class CertRunner {
     });
 
     // Generar
-    console.log('   Generando DTEs de simulación...');
+    console.log(' Generando DTEs de simulación...');
     const { envioDte, dtes, xml, plan, tiposUsados } = simulacion.generar(
       estructuras,
       cafObjects,
       this.folioHelper,
     );
 
-    console.log(`   📦 Plan de simulación: ${plan.length} documentos`);
-    console.log(`   📄 Tipos usados: ${tiposUsados.join(', ')}`);
+    console.log(` Plan de simulación: ${plan.length} documentos`);
+    console.log(` Tipos usados: ${tiposUsados.join(', ')}`);
 
     // Guardar XML de debug
     const runDir = path.join(this.debugDir, 'simulacion');
     fs.mkdirSync(runDir, { recursive: true });
     const outPath = path.join(runDir, 'envio-simulacion.xml');
     fs.writeFileSync(outPath, xml, 'utf-8');
-    console.log(`   XML guardado: ${outPath}`);
 
     // Guardar DTEs individuales
     const dtesDir = path.join(runDir, 'dtes');
@@ -1204,7 +1382,7 @@ class CertRunner {
     });
 
     // Enviar al SII
-    console.log('\n   📤 Enviando al SII...');
+    console.log('\n Enviando al SII...');
     const enviador = this._createEnviador();
     const resultado = await enviador.enviar(envioDte);
 
@@ -1226,9 +1404,9 @@ class CertRunner {
     }, null, 2), 'utf8');
 
     if (result.success) {
-      console.log(`\n✅ Simulación enviada - TrackId: ${result.trackId}`);
+      console.log(`\n[OK] Simulación enviada - TrackId: ${result.trackId}`);
     } else {
-      console.log(`\n❌ Error en simulación: ${result.error}`);
+      console.log(`\n[ERR] Error en simulación: ${result.error}`);
     }
 
     return result;
@@ -1293,10 +1471,10 @@ class CertRunner {
     }
 
     // Verificar si ya pasamos a INTERCAMBIO (simulación ya aprobada)
-    console.log('   🔍 Verificando etapa actual...');
+    console.log(' Verificando etapa actual...');
     const avance = await this.siiCert.verAvanceParsed();
     if (avance.rawHtml && /paso\s*<b>\s*INTERCAMBIO/i.test(avance.rawHtml)) {
-      console.log('   ✅ Simulación ya aprobada - empresa en etapa INTERCAMBIO');
+      console.log(' [OK] Simulación ya aprobada - empresa en etapa INTERCAMBIO');
       return { success: true, skipped: true, message: 'Ya en etapa INTERCAMBIO' };
     }
 
@@ -1309,7 +1487,7 @@ class CertRunner {
     };
 
     const result = await this._declararConReintentos(sets, 'declaracion-simulacion-response', { maxIntentos, intervalo, label: 'simulación' });
-    if (result?.success) console.log('   ✅ Simulación declarada exitosamente');
+    if (result?.success) console.log(' [OK] Simulación declarada exitosamente');
     return result;
   }
 
@@ -1321,41 +1499,41 @@ class CertRunner {
   async esperarSimulacionAprobada(options = {}) {
     const { maxIntentos = 30, intervalo = 10000 } = options;
 
-    console.log('\n⏳ Esperando aprobación de simulación...');
+    console.log('\n[...] Esperando aprobación de simulación...');
 
     for (let i = 1; i <= maxIntentos; i++) {
-      console.log(`\n   🔄 Intento ${i}/${maxIntentos}...`);
+      console.log(`\n [...] Intento ${i}/${maxIntentos}...`);
       
       const avance = await this.siiCert.verAvanceParsed();
       
       if (!avance.success) {
-        console.log(`   ⚠️ Error consultando avance: ${avance.error}`);
+        console.log(` [!] Error consultando avance: ${avance.error}`);
         await sleep(intervalo);
         continue;
       }
 
-      // ✅ PRIMERO: Verificar si ya pasó a INTERCAMBIO (significa que simulación fue aprobada)
+      // [OK] PRIMERO: Verificar si ya pasó a INTERCAMBIO (significa que simulación fue aprobada)
       if (avance.etapaActual && avance.etapaActual.includes('INTERCAMBIO')) {
-        console.log(`      ✅ Etapa actual: ${avance.etapaActual}`);
-        console.log('\n   🎉 ¡SIMULACIÓN APROBADA! Empresa pasó a etapa INTERCAMBIO.');
+        console.log(` [OK] Etapa actual: ${avance.etapaActual}`);
+        console.log('\n ¡SIMULACIÓN APROBADA! Empresa pasó a etapa INTERCAMBIO.');
         return { success: true, etapa: 'INTERCAMBIO' };
       }
 
-      // ✅ TAMBIÉN: Etapas que vienen DESPUÉS de INTERCAMBIO (simulación + intercambio ya completos)
+      // [OK] TAMBIÉN: Etapas que vienen DESPUÉS de INTERCAMBIO (simulación + intercambio ya completos)
       const ETAPAS_POST_INTERCAMBIO = ['DOCUMENTOS IMPRESOS', 'MUESTRAS IMPRESAS', 'BOLETA', 'AUTORIZADO', 'COMPLETADO'];
       if (avance.etapaActual && ETAPAS_POST_INTERCAMBIO.some(e => avance.etapaActual.toUpperCase().includes(e))) {
-        console.log(`      📍 Etapa actual: ${avance.etapaActual}`);
-        console.log('\n   🎉 ¡SIMULACIÓN + INTERCAMBIO COMPLETADOS! Empresa en etapa: ' + avance.etapaActual);
+        console.log(`   Etapa actual: ${avance.etapaActual}`);
+        console.log('\n ¡SIMULACIÓN + INTERCAMBIO COMPLETADOS! Empresa en etapa: ' + avance.etapaActual);
         return { success: true, etapa: avance.etapaActual, postIntercambio: true };
       }
 
-      // ✅ SEGUNDO: Verificar indicador de formulario de confirmación (simulación aprobada pendiente confirmar)
+      // [OK] SEGUNDO: Verificar indicador de formulario de confirmación (simulación aprobada pendiente confirmar)
       if (avance.simulacionAprobadaIndicador) {
-        console.log(`      ✅ Formulario de confirmación detectado`);
+        console.log(` [OK] Formulario de confirmación detectado`);
         
         // Confirmar automáticamente la simulación
         if (this.resultados.simulacion?.trackId) {
-          console.log(`\n   📝 Confirmando revisión de simulación (TrackId: ${this.resultados.simulacion.trackId})...`);
+          console.log(`\n Confirmando revisión de simulación (TrackId: ${this.resultados.simulacion.trackId})...`);
           
           const fecha = this._getFechaHoy();
           const confirmResult = await this.siiCert.declararAvance({
@@ -1368,7 +1546,7 @@ class CertRunner {
           });
           
           if (confirmResult.success) {
-            console.log('   ✅ Confirmación enviada exitosamente');
+            console.log(' [OK] Confirmación enviada exitosamente');
 
             // Revalidar contra SII para evitar falso positivo de confirmación
             const verificacion = await this.siiCert.verAvanceParsed();
@@ -1378,19 +1556,19 @@ class CertRunner {
             const simConforme = Boolean(estadoSim?.esConforme || estadoSim?.estado?.toUpperCase()?.includes('REVISADO CONFORME'));
 
             if (yaIntercambio || simConforme || !sigueFormulario) {
-              console.log('\n   🎉 ¡SIMULACIÓN CONFIRMADA! Certificación completa.');
+              console.log('\n ¡SIMULACIÓN CONFIRMADA! Certificación completa.');
               return { success: true, confirmada: true };
             }
 
-            console.log('   ⚠️ SII aún mantiene formulario de simulación pendiente; se reintentará...');
+            console.log(' [!] SII aún mantiene formulario de simulación pendiente; se reintentará...');
             await sleep(intervalo);
             continue;
           } else {
-            console.log(`   ⚠️ Error en confirmación: ${confirmResult.error}`);
+            console.log(` [!] Error en confirmación: ${confirmResult.error}`);
             // Continuar el loop para reintentar
           }
         } else {
-          console.log('\n   🎉 ¡SIMULACIÓN APROBADA! Lista para confirmar revisión.');
+          console.log('\n ¡SIMULACIÓN APROBADA! Lista para confirmar revisión.');
           return { success: true, pendienteConfirmar: true };
         }
       }
@@ -1411,28 +1589,28 @@ class CertRunner {
                            simEstado.estado?.toUpperCase().includes('REPARO');
         
         if (esAprobado) {
-          console.log(`      ✅ SIMULACIÓN: REVISADO CONFORME`);
-          console.log('\n   🎉 ¡SIMULACIÓN APROBADA! Certificación completa.');
+          console.log(` [OK] SIMULACIÓN: REVISADO CONFORME`);
+          console.log('\n ¡SIMULACIÓN APROBADA! Certificación completa.');
           return { success: true };
         } else if (esRechazado) {
-          console.log(`      ❌ SIMULACIÓN: ${simEstado.estado}`);
+          console.log(` [ERR] SIMULACIÓN: ${simEstado.estado}`);
           return { success: false, error: 'Simulación rechazada' };
         } else {
-          console.log(`      🔄 SIMULACIÓN: ${simEstado.estado || 'EN REVISION'}`);
+          console.log(` [...] SIMULACIÓN: ${simEstado.estado || 'EN REVISION'}`);
         }
       } else {
         // No hay estado de simulación, pero verificar etapa actual
         if (avance.etapaActual) {
-          console.log(`      📍 Etapa actual: ${avance.etapaActual}`);
+          console.log(`   Etapa actual: ${avance.etapaActual}`);
         } else {
-          console.log('      ⏳ Simulación aún no registrada...');
+          console.log(' [...] Simulación aún no registrada...');
         }
       }
 
       await sleep(intervalo);
     }
 
-    console.log('\n   ⚠️ Timeout esperando aprobación de simulación');
+    console.log('\n [!] Timeout esperando aprobación de simulación');
     return { success: false, error: 'Timeout esperando aprobación' };
   }
 
@@ -1463,7 +1641,7 @@ class CertRunner {
     fs.mkdirSync(intercambioDir, { recursive: true });
 
     console.log('\n' + '═'.repeat(60));
-    console.log('📬 FASE 7: INTERCAMBIO DE INFORMACIÓN');
+    console.log('FASE 7: INTERCAMBIO DE INFORMACIÓN');
     console.log('═'.repeat(60));
 
     // ── PASO 1: Obtener el SET XML ─────────────────────────────
@@ -1476,35 +1654,35 @@ class CertRunner {
     const setDownloadPath = path.join(intercambioDir, 'set-intercambio.xml');
 
     if (setInputPath && fs.existsSync(setInputPath)) {
-      console.log(`\n📂 Leyendo SET desde: ${setInputPath}`);
+      console.log(`\nLeyendo SET desde: ${setInputPath}`);
       setXml = fs.readFileSync(setInputPath, 'utf8');
-      console.log(`   ✓ ${setXml.length} bytes`);
+      console.log(` ✓ ${setXml.length} bytes`);
     } else if (fs.existsSync(setDownloadPath)) {
-      console.log(`\n📂 Leyendo SET guardado: ${setDownloadPath}`);
+      console.log(`\nLeyendo SET guardado: ${setDownloadPath}`);
       setXml = fs.readFileSync(setDownloadPath, 'utf8');
-      console.log(`   ✓ ${setXml.length} bytes`);
+      console.log(` ✓ ${setXml.length} bytes`);
     } else {
-      console.log('\n📡 Descargando SET desde www4.sii.cl/pfeInternet...');
+      console.log('\nDescargando SET desde www4.sii.cl/pfeInternet...');
       const dl = await this._descargarSetPfeInternet(intercambioDir);
       if (dl.success) {
         setXml = dl.xml;
         fs.writeFileSync(setDownloadPath, setXml, 'utf8');
-        console.log(`   ✅ SET descargado (${setXml.length} bytes) → ${setDownloadPath}`);
+        console.log(` [OK] SET descargado (${setXml.length} bytes) → ${setDownloadPath}`);
       } else {
-        console.log(`   ⚠️  No se pudo descargar: ${dl.error}`);
+        console.log(` [!] No se pudo descargar: ${dl.error}`);
         console.log('\n' + '─'.repeat(60));
-        console.log('📋 DESCARGA MANUAL REQUERIDA:');
-        console.log('   1. Si aparece error de sesiones: ingresa a https://www4.sii.cl/ → Cerrar Sesión');
-        console.log('   2. Ir a: https://www4.sii.cl/pfeInternet/ y descargar el SET XML');
-        console.log(`   3. Guardarlo en: ${setDownloadPath}`);
-        console.log('   4. Volver a ejecutar el runner');
+        console.log('DESCARGA MANUAL REQUERIDA:');
+        console.log(' 1. Si aparece error de sesiones: ingresa a https://www4.sii.cl/ → Cerrar Sesión');
+        console.log(' 2. Ir a: https://www4.sii.cl/pfeInternet/ y descargar el SET XML');
+        console.log(` 3. Guardarlo en: ${setDownloadPath}`);
+        console.log(' 4. Volver a ejecutar el runner');
         console.log('─'.repeat(60));
         return { success: false, error: 'SET no disponible - descarga manual requerida', requiresManual: true, manualPath: setInputPath };
       }
     }
 
     // ── PASO 2: Generar XMLs de respuesta ─────────────────────
-    console.log('\n📝 Generando respuestas firmadas...');
+    console.log('\nGenerando respuestas firmadas...');
     const intercambioCert = new IntercambioCert({
       certificado: this.certificado,
       emisor: {
@@ -1521,7 +1699,7 @@ class CertRunner {
     }
 
     // ── PASO 3: Subir respuestas ───────────────────────────────
-    console.log('\n📤 Subiendo respuestas a www4.sii.cl/pfeInternet...');
+    console.log('\nSubiendo respuestas a www4.sii.cl/pfeInternet...');
     const uploadResult = await this._subirRespuestasPfeInternet({
       recepcionXml:  fs.readFileSync(genResult.files.recepcion, 'utf8'),
       aprobacionXml: fs.readFileSync(genResult.files.aprobacion, 'utf8'),
@@ -1531,17 +1709,17 @@ class CertRunner {
 
     if (uploadResult.success) {
       console.log('\n' + '═'.repeat(60));
-      console.log('✅ INTERCAMBIO COMPLETADO');
+      console.log('[OK] INTERCAMBIO COMPLETADO');
       console.log('═'.repeat(60));
-      if (uploadResult.resultado) console.log(`   Resultado SII: ${uploadResult.resultado}`);
+      if (uploadResult.resultado) console.log(` Resultado SII: ${uploadResult.resultado}`);
     } else {
-      console.log(`   ⚠️  No se pudo subir automáticamente: ${uploadResult.error}`);
+      console.log(` [!] No se pudo subir automáticamente: ${uploadResult.error}`);
       console.log('\n' + '─'.repeat(60));
-      console.log('📋 SUBIDA MANUAL REQUERIDA:');
-      console.log('   1. Ir a: https://www4.sii.cl/pfeInternet/ → "Subir archivos"');
-      console.log(`   2. Subir: ${genResult.files.recepcion}`);
-      console.log(`   3. Subir: ${genResult.files.aprobacion}`);
-      console.log(`   4. Subir: ${genResult.files.recibos}`);
+      console.log('SUBIDA MANUAL REQUERIDA:');
+      console.log(' 1. Ir a: https://www4.sii.cl/pfeInternet/ → "Subir archivos"');
+      console.log(` 2. Subir: ${genResult.files.recepcion}`);
+      console.log(` 3. Subir: ${genResult.files.aprobacion}`);
+      console.log(` 4. Subir: ${genResult.files.recibos}`);
       console.log('─'.repeat(60));
     }
 
@@ -1563,7 +1741,7 @@ class CertRunner {
    */
   async _obtenerCookiesSII() {
     if (this._siiCookieJar) {
-      console.log('[SII Auth] ♻️  Reutilizando sesión SII en memoria');
+      console.log('[SII Auth] Reutilizando sesión SII en memoria');
       return this._siiCookieJar;
     }
     const SiiPortalAuth = require('../SiiPortalAuth');
@@ -1572,7 +1750,7 @@ class CertRunner {
     const siiAuth   = new SiiPortalAuth({ pfxBuffer, pfxPassword: password });
     this._siiCookieJar = await siiAuth.autenticar();
     const nSession = Object.keys(this._siiCookieJar).filter(k => k.startsWith('NETSCAPE')).length;
-    console.log(`[SII Auth] ✅ Sesión SII activa (cookies NETSCAPE: ${nSession})`);
+    console.log(`[SII Auth] [OK] Sesión SII activa (cookies NETSCAPE: ${nSession})`);
     return this._siiCookieJar;
   }
 
@@ -1671,7 +1849,7 @@ class CertRunner {
       const boundary = `----WebKitFormBoundary${Date.now()}`;
       const emptyMultipartBody = `--${boundary}--\r\n`;
 
-      console.log(`   → Descargando SET desde pfeInternet/downloadFile (RUT ${rutNum}-${dv})...`);
+      console.log(` → Descargando SET desde pfeInternet/downloadFile (RUT ${rutNum}-${dv})...`);
 
       const r = await makeReq(
         `https://www4.sii.cl/pfeInternet/downloadFile?re=${rutNum}&dve=${dv}`,
@@ -1695,12 +1873,12 @@ class CertRunner {
         r.body.includes('<SetDTE') ||
         r.body.includes('<?xml')
       )) {
-        console.log(`   ✓ SET descargado correctamente (${r.body.length} bytes)`);
+        console.log(` ✓ SET descargado correctamente (${r.body.length} bytes)`);
         return { success: true, xml: r.body };
       }
 
       const errMsg = `pfeInternet/downloadFile respondió HTTP ${r.status} sin XML válido`;
-      console.log(`   ✗ ${errMsg}`);
+      console.log(` [ERR] ${errMsg}`);
       fs.writeFileSync(path.join(debugDir, `pfe-download-error-${Date.now()}.html`), r.body, 'utf8');
       return { success: false, error: errMsg };
     } catch (err) {
@@ -1723,8 +1901,8 @@ class CertRunner {
     fs.mkdirSync(tmpDir, { recursive: true });
     // Los labels deben coincidir con el texto del portal GWT (Archivo N: ...)
     const archivos = [
-      { label: 'Respuesta de Intercambio',                         filename: 'respuesta-recepcion-envio.xml',     content: recepcionXml,  uploadN: 1 },
-      { label: 'Recibo de Mercaderias',                            filename: 'envio-recibos.xml',                  content: recibosXml,    uploadN: 2 },
+      { label: 'Respuesta de Intercambio', filename: 'respuesta-recepcion-envio.xml',     content: recepcionXml,  uploadN: 1 },
+      { label: 'Recibo de Mercaderias', filename: 'envio-recibos.xml',                  content: recibosXml,    uploadN: 2 },
       { label: 'Resultado Aprobaci\u00f3n Comercial de Documento', filename: 'respuesta-aprobacion-comercial.xml', content: aprobacionXml, uploadN: 3 },
     ];
     for (const a of archivos) {
@@ -1751,7 +1929,7 @@ class CertRunner {
       await page.setCookie(...puppeteerCookies);
 
       // Navegar al portal pfeInternet
-      console.log('   → Cargando portal pfeInternet...');
+      console.log(' → Cargando portal pfeInternet...');
       await page.goto('https://www4.sii.cl/pfeInternet/', {
         waitUntil: 'networkidle2',
         timeout: 60000,
@@ -1762,7 +1940,7 @@ class CertRunner {
 
       // Hacer click en el enlace "Subir archivos XML de respuesta de Intercambio"
       // El href es javascript:openForm('opt-ingresoEmpresaUp') — necesita click real para GWT
-      console.log('   → Clickeando "Subir archivos XML de respuesta de Intercambio"...');
+      console.log(' → Clickeando "Subir archivos XML de respuesta de Intercambio"...');
       const linkClicked = await page.click('a[href*="ingresoEmpresaUp"]').then(() => true).catch(() => false);
       if (!linkClicked) {
         // Fallback: evaluar click con dispatchEvent
@@ -1781,7 +1959,7 @@ class CertRunner {
       if (rutInput) {
         const [rutNum, dv] = this.config.emisor.rut.split('-');
         const rutConDv = `${rutNum}-${dv}`;
-        console.log(`   → Ingresando RUT empresa: ${rutConDv}`);
+        console.log(` → Ingresando RUT empresa: ${rutConDv}`);
         await rutInput.click({ clickCount: 3 }); // seleccionar todo
         await rutInput.type(rutConDv);
 
@@ -1792,7 +1970,7 @@ class CertRunner {
         });
         if (confirmBtn) {
           await confirmBtn.asElement().click();
-          console.log('   → Click "Confirmar Empresa", esperando formulario de upload...');
+          console.log(' → Click "Confirmar Empresa", esperando formulario de upload...');
           await page.waitForNetworkIdle({ timeout: 15000, idleTime: 1000 }).catch(() => {});
         }
       }
@@ -1810,7 +1988,7 @@ class CertRunner {
         }
         throw new Error('pfeInternet no mostró formulario de upload tras openForm — ver pfeInternet-error.png/.html');
       }
-      console.log('   → Formulario de upload listo');
+      console.log(' → Formulario de upload listo');
 
       // ── DEBUG: screenshot del formulario con los inputs listos ──
       if (debugDir) {
@@ -1846,11 +2024,11 @@ class CertRunner {
         }, archivo.label);
 
         if (yaProcessado) {
-          console.log(`   → ${archivo.filename}: ya procesado anteriormente, saltando...`);
+          console.log(` → ${archivo.filename}: ya procesado anteriormente, saltando...`);
           continue;
         }
 
-        console.log(`   → Subiendo ${archivo.filename}...`);
+        console.log(` → Subiendo ${archivo.filename}...`);
 
         // Cada archivo tiene su propio form con action uploadFile1/2/3
         // Usamos el selector específico para no confundir entre los 3 inputs que pueden
@@ -1869,7 +2047,7 @@ class CertRunner {
         // Esperar el diálogo GWT de confirmación
         await page.waitForSelector('.gwt-DialogBox .msgeDialogBox', { timeout: 30000 });
         const msgText = await page.$eval('.gwt-DialogBox .msgeDialogBox', el => el.textContent.trim());
-        console.log(`      ✓ ${msgText}`);
+        console.log(` ✓ ${msgText}`);
 
         if (debugDir) {
           fs.writeFileSync(
@@ -1965,16 +2143,16 @@ class CertRunner {
         const t = (document.body.textContent || '').toUpperCase();
         return t.includes('ESTADO DE LA REVISI') ||
                t.includes('POR REVISAR') || t.includes('APROBADO') ||
-               t.includes('EN REVISI')   || t.includes('RECHAZADO');
+               t.includes('EN REVISI') || t.includes('RECHAZADO');
       }, { timeout: 8000, polling: 500 }).catch(() => {});
 
       const estado = await page.evaluate(() => {
         const t = (document.body.textContent || '').toUpperCase();
-        if (t.includes('APROBADO'))        return 'APROBADO';
-        if (t.includes('POR REVISAR'))     return 'POR REVISAR';
-        if (t.includes('EN REVISI'))       return 'EN REVISIÓN';
-        if (t.includes('RECHAZADO'))       return 'RECHAZADO';
-        if (t.includes('ENVIADO AL SII'))  return 'ENVIADO AL SII';
+        if (t.includes('APROBADO')) return 'APROBADO';
+        if (t.includes('POR REVISAR')) return 'POR REVISAR';
+        if (t.includes('EN REVISI')) return 'EN REVISIÓN';
+        if (t.includes('RECHAZADO')) return 'RECHAZADO';
+        if (t.includes('ENVIADO AL SII')) return 'ENVIADO AL SII';
         return null;
       }).catch(() => null);
 
@@ -2005,7 +2183,7 @@ class CertRunner {
     if (!pdfPaths.length) throw new Error(`No se encontraron PDFs en: ${pdfDir}`);
 
     console.log('\n' + '═'.repeat(60));
-    console.log(`📄 FASE 8: MUESTRAS IMPRESAS (${pdfPaths.length} PDFs)`);
+    console.log(`FASE 8: MUESTRAS IMPRESAS (${pdfPaths.length} PDFs)`);
     console.log('═'.repeat(60));
 
     return this._subirMuestrasImpresasPortal({ pdfPaths, debugDir: pdfDir });
@@ -2046,7 +2224,7 @@ class CertRunner {
       await page.setCookie(...puppeteerCookies);
 
       // Navegar directamente a www4.sii.cl/pdfdteInternet/ con las cookies de sesión SII
-      console.log('   → Cargando portal pdfdteInternet...');
+      console.log(' → Cargando portal pdfdteInternet...');
       await page.goto('https://www4.sii.cl/pdfdteInternet/', {
         waitUntil: 'networkidle2', timeout: 60000,
       });
@@ -2063,7 +2241,7 @@ class CertRunner {
         }
         throw new Error('pdfdteInternet: no se encontraron campos de RUT (¿sesión expirada?)');
       }
-      console.log(`   → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
+      console.log(` → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
       await rutInputs[0].click({ clickCount: 3 }); await rutInputs[0].type(rutNum);
       await dvInputs[0].click({ clickCount: 3 });  await dvInputs[0].type(dvChar);
       await clickBoton(page, 'Rut');
@@ -2076,7 +2254,7 @@ class CertRunner {
         return !!(dlg && dlg.offsetParent !== null);
       });
       if (hayDialog) {
-        console.log('   → Diálogo de revisión existente → haciendo click en "Sí"');
+        console.log(' → Diálogo de revisión existente → haciendo click en "Sí"');
         const clicked = await page.evaluate(() => {
           const si = Array.from(document.querySelectorAll('button.x-btn-text'))
             .find(b => /^s[ií]$/i.test(b.textContent.trim()));
@@ -2097,7 +2275,7 @@ class CertRunner {
       const dvNow  = await page.$$('input[name="dv"]');
       const pRut = rutNow.length >= 2 ? rutNow[1] : rutNow[0];
       const pDv  = dvNow.length  >= 2 ? dvNow[1]  : dvNow[0];
-      console.log(`   → Ingresando RUT proveedor: ${rutNum}-${dvChar}`);
+      console.log(` → Ingresando RUT proveedor: ${rutNum}-${dvChar}`);
       await pRut.click({ clickCount: 3 }); await pRut.type(rutNum);
       await pDv.click({ clickCount: 3 });  await pDv.type(dvChar);
       await clickBoton(page, 'Consultar');
@@ -2107,20 +2285,20 @@ class CertRunner {
       // ── Re-ejecución: detectar estado terminal antes de proceder ──
       const _estadoYaSubido = await page.evaluate(() => {
         const t = (document.body.textContent || '').toUpperCase();
-        if (t.includes('APROBADO'))      return 'APROBADO';
-        if (t.includes('POR REVISAR'))   return 'POR REVISAR';
-        if (t.includes('EN REVISI'))     return 'EN REVISIÓN';
-        if (t.includes('RECHAZADO'))     return 'RECHAZADO';
+        if (t.includes('APROBADO')) return 'APROBADO';
+        if (t.includes('POR REVISAR')) return 'POR REVISAR';
+        if (t.includes('EN REVISI')) return 'EN REVISIÓN';
+        if (t.includes('RECHAZADO')) return 'RECHAZADO';
         if (t.includes('ENVIADO AL SII')) return 'ENVIADO AL SII';
         return null;
       }).catch(() => null);
       if (_estadoYaSubido) {
-        console.log(`   ✅ Portal ya muestra estado "${_estadoYaSubido}" — muestras subidas previamente. Proceso completado.`);
+        console.log(` [OK] Portal ya muestra estado "${_estadoYaSubido}" — muestras subidas previamente. Proceso completado.`);
         return { success: true, alreadyCompleted: true, estado: _estadoYaSubido };
       }
 
       // Paso 4: "Crear" → habilita el input de archivo
-      console.log('   → Click "Crear"...');
+      console.log(' → Click "Crear"...');
       await clickBoton(page, 'Crear');
       await new Promise(r => setTimeout(r, 2500));
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04-after-crear.png'), fullPage: true }).catch(() => {});
@@ -2180,7 +2358,7 @@ class CertRunner {
       //   drop → por cada file: submit form al iframe → respuesta → leeImpresoById → tick verde
       // Esto evita la re-navegación entre archivos y garantiza que la validación
       // (Timbre/CAF/TED) ocurra antes de salir de la página.
-      console.log(`   → Cargando ${pdfPaths.length} PDFs para drop en el portal...`);
+      console.log(` → Cargando ${pdfPaths.length} PDFs para drop en el portal...`);
       const _fileDataList = pdfPaths.map(p => ({
         name: path.basename(p),
         b64:  fs.readFileSync(p).toString('base64'),
@@ -2188,7 +2366,7 @@ class CertRunner {
 
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04b-antes-drop.png'), fullPage: true }).catch(() => {});
 
-      console.log(`   → Ejecutando drop de ${pdfPaths.length} PDFs sobre el portal...`);
+      console.log(` → Ejecutando drop de ${pdfPaths.length} PDFs sobre el portal...`);
       const _dropped = await page.evaluate((files) => {
         const dt = new DataTransfer();
         for (const f of files) {
@@ -2206,7 +2384,7 @@ class CertRunner {
       }, _fileDataList);
 
       if (_dropped === 0) throw new Error('pdfdteInternet: drop zone no encontrado (.dropFilesLabel)');
-      console.log(`   → Drop ejecutado (${_dropped} archivos). Esperando procesamiento...`);
+      console.log(` → Drop ejecutado (${_dropped} archivos). Esperando procesamiento...`);
 
       // ── Fase 1: esperar hasta 45s por primera señal de progreso o estado terminal ──
       // Si el portal ya está en "POR REVISAR" (re-ejecución), lo detectamos aquí inmediatamente.
@@ -2230,21 +2408,21 @@ class CertRunner {
         }
         const t = (document.body.textContent || '').toUpperCase();
         let estado = null;
-        if (t.includes('APROBADO'))         estado = 'APROBADO';
+        if (t.includes('APROBADO')) estado = 'APROBADO';
         else if (t.includes('POR REVISAR')) estado = 'POR REVISAR';
-        else if (t.includes('EN REVISI'))   estado = 'EN REVISIÓN';
-        else if (t.includes('RECHAZADO'))   estado = 'RECHAZADO';
+        else if (t.includes('EN REVISI')) estado = 'EN REVISIÓN';
+        else if (t.includes('RECHAZADO')) estado = 'RECHAZADO';
         return { procesados, estado };
       }).catch(() => ({ procesados: 0, estado: null }));
 
       if (_fase1.estado) {
-        console.log(`   ✅ Portal en estado "${_fase1.estado}" — muestras ya procesadas previamente.`);
+        console.log(` [OK] Portal en estado "${_fase1.estado}" — muestras ya procesadas previamente.`);
         return { success: true, alreadyCompleted: true, estado: _fase1.estado };
       }
 
       if (_fase1.procesados === 0) {
         // Sin progreso y sin estado terminal: el portal puede no estar procesando
-        console.warn('   ⚠ Sin progreso en 45s y sin estado terminal. Continuando al paso siguiente...');
+        console.warn(' [!] Sin progreso en 45s y sin estado terminal. Continuando al paso siguiente...');
       } else {
         // ── Fase 2: progreso iniciado — esperar al total ──
         await page.waitForFunction((total) => {
@@ -2261,7 +2439,7 @@ class CertRunner {
             }
             return 0;
           }).catch(() => 0);
-          console.warn(`   ⚠ Timeout: solo se procesaron ${procesados}/${pdfPaths.length} antes del timeout`);
+          console.warn(` [!] Timeout: solo se procesaron ${procesados}/${pdfPaths.length} antes del timeout`);
         });
       }
 
@@ -2272,7 +2450,7 @@ class CertRunner {
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-05-archivos-listos.png'), fullPage: true }).catch(() => {});
 
       // Paso 6: re-navegar al estado limpio y Enviar al SII
-      console.log('   → Re-navegando para "Enviar al SII"...');
+      console.log(' → Re-navegando para "Enviar al SII"...');
       await navegarAlFormulario();
 
       // Esperar a que el botón esté habilitado (aria-disabled="false")
@@ -2284,7 +2462,7 @@ class CertRunner {
 
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-05b-antes-enviar.png'), fullPage: true }).catch(() => {});
 
-      console.log('   → Click "Enviar al SII"...');
+      console.log(' → Click "Enviar al SII"...');
       const enviado = await clickBoton(page, 'Enviar al SII');
       if (!enviado) throw new Error('pdfdteInternet: botón "Enviar al SII" no disponible o deshabilitado');
 
@@ -2297,7 +2475,7 @@ class CertRunner {
 
       const pageText = await page.$eval('body', el => el.textContent).catch(() => '');
       const exitoso  = /revision.*creada|solicitud.*enviada|documentos.*enviados|fue.*enviado|[eé]xito/i.test(pageText);
-      console.log(`   → Resultado: ${exitoso ? '✅ enviado correctamente' : '⚠️ sin confirmación explícita'}`);
+      console.log(` → Resultado: ${exitoso ? '[OK] enviado correctamente' : '[!] sin confirmación explícita'}`);
       return { success: exitoso, pageText: pageText.substring(0, 800) };
 
     } catch (err) {
@@ -2340,9 +2518,9 @@ class CertRunner {
       });
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
-      page.on('dialog', async dlg => { console.log(`   → [dialog SET=1] ${dlg.message()}`); await dlg.accept(); });
+      page.on('dialog', async dlg => { console.log(` → [dialog SET=1] ${dlg.message()}`); await dlg.accept(); });
 
-      console.log('   → Cargando portal certBolElectDteInternet (SET=1)...');
+      console.log(' → Cargando portal certBolElectDteInternet (SET=1)...');
       await page.goto('https://www4.sii.cl/certBolElectDteInternet/?SET=1', {
         waitUntil: 'networkidle2', timeout: 60000,
       });
@@ -2352,7 +2530,7 @@ class CertRunner {
       const rutInput = await page.$('input[maxlength="8"]');
       const dvInput  = await page.$('input[maxlength="1"]');
       if (!rutInput) throw new Error('certBolElectDteInternet/?SET=1: no se encontró campo RUT');
-      console.log(`   → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
+      console.log(` → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
       await rutInput.click({ clickCount: 3 }); await rutInput.type(rutNum);
       await dvInput.click({ clickCount: 3 });  await dvInput.type(dvChar);
       await page.evaluate(() => {
@@ -2360,7 +2538,7 @@ class CertRunner {
           .find(b => /confirmar/i.test(b.textContent));
         if (btn) btn.click();
       });
-      console.log('   → Click "Confirmar Empresa"');
+      console.log(' → Click "Confirmar Empresa"');
 
       // Esperar checkboxes — GWT dispara ~8-10 POST /facade en paralelo
       await page.waitForNetworkIdle({ idleTime: 800, timeout: 40000 }).catch(() => {});
@@ -2375,7 +2553,7 @@ class CertRunner {
         cbs.forEach(cb => { if (!cb.checked) cb.click(); });
         return cbs.length;
       });
-      console.log(`   → ${nCbs} checkbox(es) marcados`);
+      console.log(` → ${nCbs} checkbox(es) marcados`);
       await new Promise(r => setTimeout(r, 300));
 
       // Paso 3: Rellenar correo proveedor
@@ -2390,9 +2568,9 @@ class CertRunner {
       if (emailInput) {
         await emailInput.click({ clickCount: 3 });
         await emailInput.type(correoSet);
-        console.log(`   → Correo proveedor: ${correoSet}`);
+        console.log(` → Correo proveedor: ${correoSet}`);
       } else {
-        console.log('   ⚠️  No se encontró campo de correo — continuando sin él');
+        console.log(' [!] No se encontró campo de correo — continuando sin él');
       }
 
       // Paso 4: Click "Bajar Nuevo Set" — esperar POST /facade (GWT RPC) y luego
@@ -2402,7 +2580,7 @@ class CertRunner {
       // donde rutRepre/dvRepre vienen de las cookies NETSCAPE_LIVEWIRE.rut / .dv
 
       const rutRepreNum = cookieJar['NETSCAPE_LIVEWIRE.rut'] || cookieJar['RUT_NS'] || '';
-      const dvRepreChar = cookieJar['NETSCAPE_LIVEWIRE.dv']  || cookieJar['DV_NS']  || '';
+      const dvRepreChar = cookieJar['NETSCAPE_LIVEWIRE.dv'] || cookieJar['DV_NS'] || '';
       if (!rutRepreNum) throw new Error('No se pudo obtener rutRepre de las cookies SII (NETSCAPE_LIVEWIRE.rut)');
 
       // Registrar listener de facade ANTES de hacer click
@@ -2411,7 +2589,7 @@ class CertRunner {
         { timeout: 20000 }
       ).catch(() => null);
 
-      console.log('   → Click "Bajar Nuevo Set" — esperando GWT facade...');
+      console.log(' → Click "Bajar Nuevo Set" — esperando GWT facade...');
       await page.evaluate(() => {
         const btn = Array.from(document.querySelectorAll('button'))
           .find(b => /bajar/i.test(b.textContent));
@@ -2430,7 +2608,7 @@ class CertRunner {
         `&rutRepre=${rutRepreNum}&dvRepre=${dvRepreChar}` +
         `&mailProvSw=${encodeURIComponent(correoSet)}`;
 
-      console.log(`   → Descargando set directamente: DownloadFileServlet?rutEmpresa=${rutNum}&dvEmpresa=${dvChar}&rutRepre=${rutRepreNum}&dvRepre=${dvRepreChar}&mailProvSw=${correoSet}`);
+      console.log(` → Descargando set directamente: DownloadFileServlet?rutEmpresa=${rutNum}&dvEmpresa=${dvChar}&rutRepre=${rutRepreNum}&dvRepre=${dvRepreChar}&mailProvSw=${correoSet}`);
 
       const setText = await new Promise((resolve, reject) => {
         const req = https.get(downloadUrl, {
@@ -2465,10 +2643,10 @@ class CertRunner {
         const nodePath = require('path');
         fs.mkdirSync(nodePath.dirname(setPath), { recursive: true });
         fs.writeFileSync(setPath, setText, 'utf-8');
-        console.log(`   ✓ Set guardado en: ${setPath}`);
+        console.log(` ✓ Set guardado en: ${setPath}`);
       }
 
-      console.log(`   ✓ Set de pruebas obtenido (${setText.length} chars)`);
+      console.log(` ✓ Set de pruebas obtenido (${setText.length} chars)`);
       return { success: true, setText };
     } catch (err) {
       return { success: false, error: err.message };
@@ -2506,9 +2684,9 @@ class CertRunner {
       });
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
-      page.on('dialog', async dlg => { console.log(`   → [dialog SET=2] ${dlg.message()}`); await dlg.accept(); });
+      page.on('dialog', async dlg => { console.log(` → [dialog SET=2] ${dlg.message()}`); await dlg.accept(); });
 
-      console.log('   → Cargando portal certBolElectDteInternet (SET=2)...');
+      console.log(' → Cargando portal certBolElectDteInternet (SET=2)...');
       await page.goto('https://www4.sii.cl/certBolElectDteInternet/?SET=2', {
         waitUntil: 'networkidle2', timeout: 60000,
       });
@@ -2518,7 +2696,7 @@ class CertRunner {
       const rutInput = await page.$('input[maxlength="8"]');
       const dvInput  = await page.$('input[maxlength="1"]');
       if (!rutInput) throw new Error('certBolElectDteInternet/?SET=2: no se encontró campo RUT');
-      console.log(`   → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
+      console.log(` → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
       await rutInput.click({ clickCount: 3 }); await rutInput.type(rutNum);
       await dvInput.click({ clickCount: 3 });  await dvInput.type(dvChar);
       await page.evaluate(() => {
@@ -2526,7 +2704,7 @@ class CertRunner {
           .find(b => /confirmar/i.test(b.textContent));
         if (btn) btn.click();
       });
-      console.log('   → Click "Confirmar Empresa"');
+      console.log(' → Click "Confirmar Empresa"');
 
       // Esperar que aparezca el campo "Identificador de Envio" — GWT dispara ~8-10 POST /facade en paralelo
       await page.waitForNetworkIdle({ idleTime: 800, timeout: 40000 }).catch(() => {});
@@ -2538,7 +2716,7 @@ class CertRunner {
       // Paso 2: Ingresar TrackId
       const trackInput = await page.$('input[maxlength="15"]');
       if (!trackInput) throw new Error('No se encontró campo "Identificador de Envio" en certBolElectDteInternet/?SET=2');
-      console.log(`   → Ingresando TrackId: ${trackId}`);
+      console.log(` → Ingresando TrackId: ${trackId}`);
       await trackInput.click({ clickCount: 3 });
       await trackInput.type(String(trackId));
 
@@ -2548,7 +2726,7 @@ class CertRunner {
           .find(b => /solicitar/i.test(b.textContent));
         if (btn) btn.click();
       });
-      console.log('   → Click "Solicitar validación" — esperando respuesta...');
+      console.log(' → Click "Solicitar validación" — esperando respuesta...');
 
       // Esperar respuesta del portal (puede ser confirmación o error)
       await page.waitForFunction(() => {
@@ -2558,7 +2736,7 @@ class CertRunner {
       }, { timeout: 15000, polling: 500 }).catch(() => {});
 
       const respuesta = await page.evaluate(() => (document.body.innerText || '').trim().substring(0, 500));
-      console.log(`   ✓ Validación solicitada. Respuesta: ${respuesta.substring(0, 120)}`);
+      console.log(` ✓ Validación solicitada. Respuesta: ${respuesta.substring(0, 120)}`);
 
       return { success: true, respuesta };
     } catch (err) {
@@ -2610,7 +2788,7 @@ class CertRunner {
       let dialogMsg = null;
       page.on('dialog', async dlg => {
         dialogMsg = dlg.message();
-        console.log(`   → [dialog] ${dialogMsg}`);
+        console.log(` → [dialog] ${dialogMsg}`);
         await dlg.accept();
       });
 
@@ -2623,7 +2801,7 @@ class CertRunner {
       for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
         dialogMsg = null; // resetear entre intentos
 
-        console.log(`   → Navegando a certBolElectDteInternet (declaración) [intento ${intento}/${MAX_INTENTOS}]...`);
+        console.log(` → Navegando a certBolElectDteInternet (declaración) [intento ${intento}/${MAX_INTENTOS}]...`);
         await page.goto('https://www4.sii.cl/certBolElectDteInternet/', {
           waitUntil: 'networkidle2', timeout: 60000,
         });
@@ -2633,7 +2811,7 @@ class CertRunner {
         const rutInput = await page.$('input[maxlength="8"]');
         const dvInput  = await page.$('input[maxlength="1"]');
         if (!rutInput) throw new Error('certBolElectDteInternet/: no se encontró campo RUT empresa');
-        console.log(`   → Ingresando RUT empresa: ${rutEmpresaRaw}`);
+        console.log(` → Ingresando RUT empresa: ${rutEmpresaRaw}`);
         await rutInput.click({ clickCount: 3 }); await rutInput.type(rutEmpNum);
         await dvInput.click({ clickCount: 3 });  await dvInput.type(rutEmpDv);
 
@@ -2642,7 +2820,7 @@ class CertRunner {
             .find(b => /confirmar empresa/i.test(b.textContent));
           if (btn) btn.click();
         });
-        console.log('   → Click "Confirmar Empresa"...');
+        console.log(' → Click "Confirmar Empresa"...');
 
         // GWT dispara ~8-10 POST /facade EN PARALELO al confirmar.
         // Esperar red inactiva y luego DOM con checkboxes.
@@ -2654,9 +2832,9 @@ class CertRunner {
         if (dialogMsg) {
           // Portal lanzó alert — puede ser transitorio. Guardar y reintentar.
           lastDialogMsg = dialogMsg;
-          console.log(`   ⚠️  Portal respondió con alerta en intento ${intento}: ${dialogMsg.substring(0, 100)}`);
+          console.log(` [!] Portal respondió con alerta en intento ${intento}: ${dialogMsg.substring(0, 100)}`);
           if (intento < MAX_INTENTOS) {
-            console.log('   → Recargando y reintentando en 3s...');
+            console.log(' → Recargando y reintentando en 3s...');
             await new Promise(r => setTimeout(r, 3000));
             continue;
           }
@@ -2669,7 +2847,7 @@ class CertRunner {
           break;
         }
 
-        console.log(`   ⚠️  Formulario no cargó en intento ${intento}${intento < MAX_INTENTOS ? ` — reintentando...` : ''}`);
+        console.log(` [!] Formulario no cargó en intento ${intento}${intento < MAX_INTENTOS ? ` — reintentando...` : ''}`);
         await new Promise(r => setTimeout(r, 2000));
       }
 
@@ -2682,7 +2860,7 @@ class CertRunner {
         todos.forEach(cb => { if (!cb.checked) cb.click(); });
         return todos.length;
       });
-      console.log(`   → ${totalCbs} checkbox(es) marcados`);
+      console.log(` → ${totalCbs} checkbox(es) marcados`);
       await new Promise(r => setTimeout(r, 500));
 
       // ── PASO 3: Rellenar campos proveedor software ────────────────
@@ -2753,7 +2931,7 @@ class CertRunner {
         return false;
       });
       if (!submitOk) throw new Error('No se encontró botón "Grabar Declaración" en certBolElectDteInternet/');
-      console.log('   → Click "Grabar Declaración"...');
+      console.log(' → Click "Grabar Declaración"...');
 
       // Esperar confirmación del SII
       await page.waitForFunction(() => {
@@ -2763,7 +2941,7 @@ class CertRunner {
       }, { timeout: 20000, polling: 1000 }).catch(() => {});
 
       const msgFinal = await page.evaluate(() => (document.body.textContent || '').trim().substring(0, 300));
-      console.log(`   ✓ Declaración completada. Respuesta: ${msgFinal.substring(0, 150)}`);
+      console.log(` ✓ Declaración completada. Respuesta: ${msgFinal.substring(0, 150)}`);
 
       if (this.config.debugDir) {
         await page.screenshot({ path: path.join(this.config.debugDir, 'boleta-declaracion-post-submit.png'), fullPage: true }).catch(() => {});

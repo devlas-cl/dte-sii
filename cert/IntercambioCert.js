@@ -361,57 +361,57 @@ class IntercambioCert {
     fs.mkdirSync(outDir, { recursive: true });
 
     console.log('\n' + '═'.repeat(60));
-    console.log('📬 INTERCAMBIO DE INFORMACIÓN DTE');
+    console.log('INTERCAMBIO DE INFORMACIÓN DTE');
     console.log('═'.repeat(60));
 
     // Parsear EnvioDTE
-    console.log('\n📋 Parseando EnvioDTE...');
+    console.log('\nParseando EnvioDTE...');
     const meta = this.parseEnvioDTE(envioDteXml);
     
     if (!meta?.items?.length) {
       throw new Error('No se encontraron DTEs en el EnvioDTE de entrada');
     }
 
-    console.log(`   ✓ ${meta.items.length} documentos encontrados`);
-    console.log(`   ✓ Emisor: ${meta.rutEmisor}`);
-    console.log(`   ✓ Receptor: ${meta.rutReceptor}`);
+    console.log(` ✓ ${meta.items.length} documentos encontrados`);
+    console.log(` ✓ Emisor: ${meta.rutEmisor}`);
+    console.log(` ✓ Receptor: ${meta.rutReceptor}`);
     
     meta.items.forEach((item, idx) => {
-      console.log(`      ${idx + 1}. Tipo ${item.tipoDTE} Folio ${item.folio} - $${item.mntTotal.toLocaleString('es-CL')}`);
+      console.log(` ${idx + 1}. Tipo ${item.tipoDTE} Folio ${item.folio} - $${item.mntTotal.toLocaleString('es-CL')}`);
     });
 
     // Generar respuestas
-    console.log('\n📝 Generando respuestas de intercambio...');
+    console.log('\nGenerando respuestas de intercambio...');
 
     // 1. Respuesta Recepción de Envío
-    console.log('   1. Respuesta Recepción de Envío...');
+    console.log(' 1. Respuesta Recepción de Envío...');
     const recepcionXml = this.generarRespuestaRecepcionEnvio(meta, options.envioNombre);
     const recepcionPath = path.join(outDir, 'respuesta-recepcion-envio.xml');
     fs.writeFileSync(recepcionPath, recepcionXml, 'utf8');
-    console.log(`      ✓ ${recepcionPath}`);
+    console.log(` ✓ ${recepcionPath}`);
 
     // 2. Respuesta Aprobación Comercial
-    console.log('   2. Respuesta Aprobación Comercial...');
+    console.log(' 2. Respuesta Aprobación Comercial...');
     const aprobacionXml = this.generarRespuestaAprobacionComercial(meta);
     const aprobacionPath = path.join(outDir, 'respuesta-aprobacion-comercial.xml');
     fs.writeFileSync(aprobacionPath, aprobacionXml, 'utf8');
-    console.log(`      ✓ ${aprobacionPath}`);
+    console.log(` ✓ ${aprobacionPath}`);
 
     // 3. Envío de Recibos
-    console.log('   3. Envío de Recibos (Mercaderías)...');
+    console.log(' 3. Envío de Recibos (Mercaderías)...');
     const recibosXml = this.generarEnvioRecibos(meta);
     const recibosPath = path.join(outDir, 'envio-recibos.xml');
     fs.writeFileSync(recibosPath, recibosXml, 'utf8');
-    console.log(`      ✓ ${recibosPath}`);
+    console.log(` ✓ ${recibosPath}`);
 
     console.log('\n' + '═'.repeat(60));
-    console.log('✅ INTERCAMBIO GENERADO');
+    console.log('[OK] INTERCAMBIO GENERADO');
     console.log('═'.repeat(60));
-    console.log(`   📂 Directorio: ${outDir}`);
-    console.log('   📄 Archivos generados:');
-    console.log('      - respuesta-recepcion-envio.xml');
-    console.log('      - respuesta-aprobacion-comercial.xml');
-    console.log('      - envio-recibos.xml');
+    console.log(` Directorio: ${outDir}`);
+    console.log(' Archivos generados:');
+    console.log(' - respuesta-recepcion-envio.xml');
+    console.log(' - respuesta-aprobacion-comercial.xml');
+    console.log(' - envio-recibos.xml');
 
     return {
       success: true,

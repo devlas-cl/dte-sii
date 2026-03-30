@@ -51,14 +51,14 @@ class Certificado {
     // Advertir si está próximo a expirar
     const daysUntilExpiry = getDaysUntilExpiry(pfxData.notAfter);
     if (daysUntilExpiry <= 30) {
-      log.warn(`⚠️ Certificado expira en ${daysUntilExpiry} días`);
+      log.warn(`[!] Certificado expira en ${daysUntilExpiry} días`);
     }
     
     // Usar datos extraídos por la utilidad centralizada
     this.rut = pfxData.rut;
     this.nombre = pfxData.cn;
     
-    log.log('📜 Subject fields:', Object.entries(pfxData.subject).map(([k, v]) => `${k}: ${v}`).join(', '));
+
   }
   
   getPrivateKeyPem() {

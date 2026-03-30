@@ -51,7 +51,7 @@ function loadConfig(options = {}) {
   const fch_resol = process.env.FECHA_RESOLUCION || new Date().toISOString().slice(0, 10);
   const nro_resol = parseInt(process.env.NRO_RESOLUCION || '0', 10);
 
-  console.log(`[ConfigLoader] ✅ Resolución: NroResol=${nro_resol} FchResol=${fch_resol} (AMBIENTE=${AMBIENTE})`);
+  console.log(`[ConfigLoader] Resolución: NroResol=${nro_resol} FchResol=${fch_resol} (AMBIENTE=${AMBIENTE})`);
 
   const EMISOR = {
     rut: process.env.EMISOR_RUT,

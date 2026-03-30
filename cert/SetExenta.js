@@ -69,21 +69,21 @@ class SetExenta extends SetBase {
     const dtes = [];
     
     // 1. Generar facturas exentas primero
-    this.logger.log('   📄 Generando facturas exentas...');
+    this.logger.log(' Generando facturas exentas...');
     for (const caso of casos.casosFactura || []) {
       const dte = await this._generarFacturaExenta(caso, cafs[34]);
       dtes.push(dte);
     }
     
     // 2. Generar notas de crédito
-    this.logger.log('   📄 Generando notas de crédito...');
+    this.logger.log(' Generando notas de crédito...');
     for (const caso of casos.casosNC || []) {
       const dte = await this._generarNotaCredito(caso, cafs[61]);
       dtes.push(dte);
     }
     
     // 3. Generar notas de débito
-    this.logger.log('   📄 Generando notas de débito...');
+    this.logger.log(' Generando notas de débito...');
     for (const caso of casos.casosND || []) {
       const dte = await this._generarNotaDebito(caso, cafs[56]);
       dtes.push(dte);
@@ -144,7 +144,7 @@ class SetExenta extends SetBase {
       items,
     };
     
-    this.logger.log(`      ✓ Factura Exenta caso ${caso.id}: folio ${folio}`);
+    this.logger.log(` ✓ Factura Exenta caso ${caso.id}: folio ${folio}`);
     return dte;
   }
 
@@ -212,7 +212,7 @@ class SetExenta extends SetBase {
       items,
     };
     
-    this.logger.log(`      ✓ NC Exenta caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
+    this.logger.log(` ✓ NC Exenta caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
     return dte;
   }
 
@@ -270,7 +270,7 @@ class SetExenta extends SetBase {
     const dte = new DTE(dteDatos);
     this._timbrarYFirmar(dte, caf);
     
-    this.logger.log(`      ✓ ND Exenta caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
+    this.logger.log(` ✓ ND Exenta caso ${caso.id}: folio ${folio} (ref: ${caso.referenciaCaso})`);
     return dte;
   }
 

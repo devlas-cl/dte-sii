@@ -302,11 +302,11 @@ class BoletaCert {
     const { DOMParser: XMLParser } = require('@xmldom/xmldom');
     
     console.log('\n' + '═'.repeat(60));
-    console.log('📊 REENVÍO RCOF (ConsumoFolio)');
+    console.log('REENVÍO RCOF (ConsumoFolio)');
     console.log('═'.repeat(60));
     
     // 1. Parsear el EnvioBOLETA existente para extraer info
-    console.log('\n📄 Leyendo EnvioBOLETA...');
+    console.log('\nLeyendo EnvioBOLETA...');
     const envioBOLETAXml = fs.readFileSync(options.envioBOLETAPath, 'utf-8');
     const parser = new XMLParser();
     const doc = parser.parseFromString(envioBOLETAXml, 'text/xml');
@@ -333,11 +333,11 @@ class BoletaCert {
           Totales: { MntNeto: mntNeto, MntExe: mntExe, IVA: iva, MntTotal: mntTotal }
         }
       });
-      console.log(`   - Folio ${folio}: Neto=${mntNeto}, Exento=${mntExe}, IVA=${iva}, Total=${mntTotal}`);
+      console.log(` - Folio ${folio}: Neto=${mntNeto}, Exento=${mntExe}, IVA=${iva}, Total=${mntTotal}`);
     }
     
     // 2. Crear RCOF
-    console.log(`\n📊 Generando RCOF con SecEnvio=${options.secEnvio}...`);
+    console.log(`\nGenerando RCOF con SecEnvio=${options.secEnvio}...`);
     const { ConsumoFolio } = this._lib();
     const consumoFolio = new ConsumoFolio(this.certificado);
     
@@ -354,26 +354,26 @@ class BoletaCert {
     });
     
     consumoFolio.generar();
-    console.log(`   ✓ XML generado: ${consumoFolio.xml.length} bytes`);
+    console.log(` ✓ XML generado: ${consumoFolio.xml.length} bytes`);
     
     // Guardar debug
     if (this.debugDir) {
       const debugPath = path.join(this.debugDir, 'boleta-cert');
       fs.mkdirSync(debugPath, { recursive: true });
       fs.writeFileSync(path.join(debugPath, `ConsumoFolio-sec${options.secEnvio}.xml`), consumoFolio.xml, 'utf-8');
-      console.log(`   📄 Guardado en: ${path.join(debugPath, `ConsumoFolio-sec${options.secEnvio}.xml`)}`);
+      console.log(` Guardado en: ${path.join(debugPath, `ConsumoFolio-sec${options.secEnvio}.xml`)}`);
     }
     
     // 3. Enviar RCOF
-    console.log('\n📤 Enviando RCOF al SII...');
+    console.log('\nEnviando RCOF al SII...');
     const enviador = new EnviadorSII(this.certificado, this.ambiente);
     const resultadoRCOF = await enviador.enviarConsumoFolios(consumoFolio);
     
     if (!resultadoRCOF.ok) {
-      console.log(`   ❌ Error: ${resultadoRCOF.error}`);
+      console.log(` [ERR] Error: ${resultadoRCOF.error}`);
       return { success: false, error: resultadoRCOF.error };
     }
-    console.log(`   ✅ Enviado - TrackId: ${resultadoRCOF.trackId}`);
+    console.log(` [OK] Enviado - TrackId: ${resultadoRCOF.trackId}`);
     
     return { success: true, trackIdRCOF: resultadoRCOF.trackId };
   }
@@ -390,71 +390,71 @@ class BoletaCert {
     const { EnviadorSII } = this._lib();
     
     console.log('\n' + '═'.repeat(60));
-    console.log('🎫 CERTIFICACIÓN BOLETAS ELECTRÓNICAS');
+    console.log('CERTIFICACIÓN BOLETAS ELECTRÓNICAS');
     console.log('═'.repeat(60));
     
     // 1. Parsear set de pruebas
-    console.log('\n📋 Parseando set de pruebas...');
+    console.log('\nParseando set de pruebas...');
     const casos = this.parseSetPruebas(options.setPath);
-    console.log(`   ✓ ${casos.length} casos encontrados`);
+    console.log(` ✓ ${casos.length} casos encontrados`);
     
     // 2. Generar boletas
-    console.log('\n📝 Generando boletas...');
+    console.log('\nGenerando boletas...');
     const { boletas, foliosUsados, folioInicial, folioFinal } = await this.generarBoletasSet(
       casos, 
       options.cafBoleta, 
       options.folioInicial
     );
-    console.log(`   ✓ ${boletas.length} boletas generadas (folios ${folioInicial}-${folioFinal})`);
+    console.log(` ✓ ${boletas.length} boletas generadas (folios ${folioInicial}-${folioFinal})`);
     
     for (const b of boletas) {
       const monto = b.dte.montoTotal || 0;
-      console.log(`      - CASO-${b.caso}: Folio ${b.folio} - $${monto.toLocaleString('es-CL')}`);
+      console.log(` - CASO-${b.caso}: Folio ${b.folio} - $${monto.toLocaleString('es-CL')}`);
     }
     
     // 3. Generar EnvioBOLETA
-    console.log('\n📦 Generando EnvioBOLETA...');
+    console.log('\nGenerando EnvioBOLETA...');
     const envioBoleta = this.generarEnvioBoleta(boletas);
-    console.log(`   ✓ XML generado: ${envioBoleta.xml.length} bytes`);
+    console.log(` ✓ XML generado: ${envioBoleta.xml.length} bytes`);
     
     // Guardar debug
     if (this.debugDir) {
       const debugPath = path.join(this.debugDir, 'boleta-cert');
       fs.mkdirSync(debugPath, { recursive: true });
       fs.writeFileSync(path.join(debugPath, 'EnvioBOLETA.xml'), envioBoleta.xml, 'utf-8');
-      console.log(`   📄 Guardado en: ${path.join(debugPath, 'EnvioBOLETA.xml')}`);
+      console.log(` Guardado en: ${path.join(debugPath, 'EnvioBOLETA.xml')}`);
     }
     
     // 4. Enviar EnvioBOLETA
-    console.log('\n📤 Enviando EnvioBOLETA al SII...');
+    console.log('\nEnviando EnvioBOLETA al SII...');
     const enviador = new EnviadorSII(this.certificado, this.ambiente);
     const resultadoBoleta = await enviador.enviarBoletaSoap(envioBoleta);
     
     if (!resultadoBoleta.ok) {
-      console.log(`   ❌ Error: ${resultadoBoleta.error}`);
+      console.log(` [ERR] Error: ${resultadoBoleta.error}`);
       return { success: false, error: resultadoBoleta.error, fase: 'EnvioBOLETA' };
     }
-    console.log(`   ✅ Enviado - TrackId: ${resultadoBoleta.trackId}`);
+    console.log(` [OK] Enviado - TrackId: ${resultadoBoleta.trackId}`);
     
     // 5. Generar RCOF
-    console.log('\n📊 Generando RCOF (ConsumoFolio)...');
+    console.log('\nGenerando RCOF (ConsumoFolio)...');
     const consumoFolio = this.generarConsumoFolio(envioBoleta);
     consumoFolio.generar(); // generar() ya incluye firmar() internamente
-    console.log(`   ✓ XML generado: ${consumoFolio.xml.length} bytes`);
+    console.log(` ✓ XML generado: ${consumoFolio.xml.length} bytes`);
     
     // Guardar debug
     if (this.debugDir) {
       const debugPath = path.join(this.debugDir, 'boleta-cert');
       fs.writeFileSync(path.join(debugPath, 'ConsumoFolio.xml'), consumoFolio.xml, 'utf-8');
-      console.log(`   📄 Guardado en: ${path.join(debugPath, 'ConsumoFolio.xml')}`);
+      console.log(` Guardado en: ${path.join(debugPath, 'ConsumoFolio.xml')}`);
     }
     
     // 6. Enviar RCOF
-    console.log('\n📤 Enviando RCOF al SII...');
+    console.log('\nEnviando RCOF al SII...');
     const resultadoRCOF = await enviador.enviarConsumoFolios(consumoFolio);
     
     if (!resultadoRCOF.ok) {
-      console.log(`   ❌ Error: ${resultadoRCOF.error}`);
+      console.log(` [ERR] Error: ${resultadoRCOF.error}`);
       return { 
         success: false, 
         error: resultadoRCOF.error, 
@@ -462,16 +462,16 @@ class BoletaCert {
         trackIdBoleta: resultadoBoleta.trackId 
       };
     }
-    console.log(`   ✅ Enviado - TrackId: ${resultadoRCOF.trackId}`);
+    console.log(` [OK] Enviado - TrackId: ${resultadoRCOF.trackId}`);
     
     // Resumen
     console.log('\n' + '═'.repeat(60));
-    console.log('✅ CERTIFICACIÓN BOLETAS COMPLETADA');
+    console.log('[OK] CERTIFICACIÓN BOLETAS COMPLETADA');
     console.log('═'.repeat(60));
-    console.log(`   📄 EnvioBOLETA: ${resultadoBoleta.trackId}`);
-    console.log(`   📊 RCOF: ${resultadoRCOF.trackId}`);
-    console.log(`   📦 Boletas: ${boletas.length}`);
-    console.log(`   📑 Folios: ${folioInicial} - ${folioFinal}`);
+    console.log(` EnvioBOLETA: ${resultadoBoleta.trackId}`);
+    console.log(` RCOF: ${resultadoRCOF.trackId}`);
+    console.log(` Boletas: ${boletas.length}`);
+    console.log(` Folios: ${folioInicial} - ${folioFinal}`);
     
     return {
       success: true,
@@ -494,9 +494,9 @@ class BoletaCert {
     const forge = require('node-forge');
     
     console.log('\n' + '═'.repeat(60));
-    console.log('📋 DECLARAR AVANCE BOLETAS');
+    console.log('DECLARAR AVANCE BOLETAS');
     console.log('═'.repeat(60));
-    console.log(`   TrackId: ${trackId}`);
+    console.log(` TrackId: ${trackId}`);
     
     const host = this.ambiente === 'produccion' ? 'palena.sii.cl' : 'maullin.sii.cl';
     const endpoint = '/cgi_dte/UPL/DTEauth?3';
@@ -548,7 +548,7 @@ class BoletaCert {
       req.end();
     });
     
-    console.log(`   🔗 URL: ${url}`);
+    console.log(` URL: ${url}`);
     
     try {
       const response = await requestWithCert({
@@ -561,7 +561,7 @@ class BoletaCert {
         },
       }, body);
       
-      console.log(`   📥 Status: ${response.status}`);
+      console.log(` Status: ${response.status}`);
       
       // Guardar respuesta para debug
       if (this.debugDir) {
@@ -583,24 +583,24 @@ class BoletaCert {
       const enRevision = /EN REVISION|PROCESANDO/i.test(html);
       
       if (esAprobado) {
-        console.log('   ✅ BOLETAS APROBADAS');
+        console.log(' [OK] BOLETAS APROBADAS');
         return { success: true, estado: 'APROBADO', html };
       } else if (esRechazado) {
-        console.log('   ❌ BOLETAS RECHAZADAS');
+        console.log(' [ERR] BOLETAS RECHAZADAS');
         // Extraer mensaje de error si existe
         const errorMatch = html.match(/<font[^>]*color[^>]*red[^>]*>([^<]+)</i);
         const errorMsg = errorMatch ? errorMatch[1].trim() : 'Error desconocido';
         return { success: false, estado: 'RECHAZADO', error: errorMsg, html };
       } else if (enRevision) {
-        console.log('   🔄 EN REVISIÓN');
+        console.log(' [...] EN REVISIÓN');
         return { success: true, estado: 'EN_REVISION', html };
       } else {
-        console.log('   📋 Respuesta recibida (verificar manualmente)');
+        console.log(' Respuesta recibida (verificar manualmente)');
         return { success: true, estado: 'DESCONOCIDO', html };
       }
       
     } catch (error) {
-      console.error(`   ❌ Error: ${error.message}`);
+      console.error(` [ERR] Error: ${error.message}`);
       return { success: false, error: error.message };
     }
   }
@@ -614,8 +614,8 @@ class BoletaCert {
     const https = require('https');
     const forge = require('node-forge');
     
-    console.log(`\n   Consultando estado del set...`);
-    console.log(`   TrackId: ${trackId}`);
+    console.log(`\n Consultando estado del set...`);
+    console.log(` TrackId: ${trackId}`);
     
     const host = this.ambiente === 'produccion' ? 'www4.sii.cl' : 'www4.sii.cl';
     
@@ -718,7 +718,7 @@ class BoletaCert {
       }
       
     } catch (error) {
-      console.error(`   ⚠️  Error consultando estado: ${error.message}`);
+      console.error(` [!] Error consultando estado: ${error.message}`);
       return { 
         success: true, 
         estado: 'DESCONOCIDO', 
