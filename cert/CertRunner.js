@@ -354,7 +354,7 @@ class CertRunner {
    * @param {Object} [options] - { maxIntentos, intervalo, label }
    */
   async _declararConReintentos(sets, debugPrefix, options = {}) {
-    const { maxIntentos = 10, intervalo = 5000, label = 'avance' } = options;
+    const { maxIntentos = 10, intervalo = 5000, label = 'avance', retryOnAllRejected = false } = options;
 
     console.log(` Esperando 10s para que SII procese los envios...`);
     await sleep(10000);
@@ -400,9 +400,14 @@ class CertRunner {
         console.log(` [...] SII aún procesando, reintentando en ${intervalo / 1000}s...`);
         await sleep(intervalo);
       } else if (result.allRejected) {
-        // SII rechazó todos los sets/libros — período incorrecto, no tiene sentido reintentar
-        console.log(` [ERR] SII rechazó todos los envíos (campos vacíos en portal) — período incorrecto. Corregir período y reenviar.`);
-        break;
+        // SII rechazó todos los sets/libros — puede ser período incorrecto (libros) o TrackID no procesado aún (simulación)
+        if (retryOnAllRejected && intento < maxIntentos) {
+          console.log(` [!] S21 — SII aún procesando TrackID, reintentando en ${intervalo / 1000}s...`);
+          await sleep(intervalo);
+        } else {
+          console.log(` [ERR] SII rechazó todos los envíos (campos vacíos en portal) — período incorrecto. Corregir período y reenviar.`);
+          break;
+        }
       } else if (result.verificado === false && intento < maxIntentos) {
         // Verificación post-declaración falló: los campos quedaron vacíos en el portal
         console.log(` [!] Verificación fallida: ${result.error}`);
@@ -1476,7 +1481,7 @@ class CertRunner {
       },
     };
 
-    const result = await this._declararConReintentos(sets, 'declaracion-simulacion-response', { maxIntentos, intervalo, label: 'simulación' });
+    const result = await this._declararConReintentos(sets, 'declaracion-simulacion-response', { maxIntentos, intervalo, label: 'simulación', retryOnAllRejected: true });
     if (result?.success) console.log(' [OK] Simulación declarada exitosamente');
     return result;
   }
@@ -2208,6 +2213,7 @@ class CertRunner {
       browser = await puppeteer.launch({
         headless: true,
         ignoreHTTPSErrors: true,
+        protocolTimeout: 300000, // 5 min — DOM.setFileInputFiles con 256 archivos supera el default de 30s
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
       });
       const page = await browser.newPage();
@@ -2239,12 +2245,26 @@ class CertRunner {
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-02-after-rut.png'), fullPage: true }).catch(() => {});
 
       // Paso 2: Diálogo "ya existe revisión" → click "Sí"
+      // nuevaRevisionCreada=true cuando el usuario acepta crear una nueva revisión;
+      // en ese caso NO se hace el early-exit por estado previo (el texto "EN REVISIÓN"
+      // que queda visible corresponde a la revisión antigua, no a la nueva vacía).
+      let nuevaRevisionCreada = false;
       const hayDialog = await page.evaluate(() => {
         const dlg = document.querySelector('.x-window');
         return !!(dlg && dlg.offsetParent !== null);
       });
       if (hayDialog) {
-        console.log(' → Diálogo de revisión existente → haciendo click en "Sí"');
+        console.log(' → Diálogo "Ya existe revisión" detectado → click "Sí"');
+        if (debugDir) {
+          await page.screenshot({ path: path.join(debugDir, 'pdfte-dialog-ya-existe.png'), fullPage: true }).catch(() => {});
+          fs.writeFileSync(path.join(debugDir, 'pdfte-dialog-ya-existe.html'), await page.content().catch(() => ''), 'utf8');
+          // Log texto del diálogo para debug
+          const dlgText = await page.evaluate(() => {
+            const dlg = document.querySelector('.x-window');
+            return dlg ? dlg.textContent.trim().replace(/\s+/g, ' ') : '';
+          }).catch(() => '');
+          console.log(` [DEBUG] Texto del diálogo: "${dlgText}"`);
+        }
         const clicked = await page.evaluate(() => {
           const si = Array.from(document.querySelectorAll('button.x-btn-text'))
             .find(b => /^s[ií]$/i.test(b.textContent.trim()));
@@ -2253,6 +2273,8 @@ class CertRunner {
         });
         if (!clicked) await page.evaluate(() => { const b = document.querySelector('.x-window button'); if (b) b.click(); });
         await new Promise(r => setTimeout(r, 2500));
+        if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-dialog-despues-si.png'), fullPage: true }).catch(() => {});
+        nuevaRevisionCreada = true;
       }
 
       // Paso 3: RUT Proveedor (mismo RUT empresa)
@@ -2273,7 +2295,10 @@ class CertRunner {
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-03-after-consultar.png'), fullPage: true }).catch(() => {});
 
       // ── Re-ejecución: detectar estado terminal antes de proceder ──
-      const _estadoYaSubido = await page.evaluate(() => {
+      // Solo aplicable cuando NO se creó una nueva revisión.
+      // Si se creó una nueva (nuevaRevisionCreada=true), el texto "EN REVISIÓN"
+      // que aparece pertenece a la revisión anterior y no es válido como early-exit.
+      const _estadoYaSubido = nuevaRevisionCreada ? null : await page.evaluate(() => {
         const t = (document.body.textContent || '').toUpperCase();
         if (t.includes('APROBADO')) return 'APROBADO';
         if (t.includes('POR REVISAR')) return 'POR REVISAR';
@@ -2343,38 +2368,27 @@ class CertRunner {
         if (!_hayInp) { await clickBoton(page, 'Crear'); await new Promise(r => setTimeout(r, 2500)); }
       };
 
-      // Cargar todos los PDFs como base64 en Node.js y soltarlos en el drop zone de GWT
-      // de una sola vez via DataTransfer. GWT los procesa en secuencia internamente:
-      //   drop → por cada file: submit form al iframe → respuesta → leeImpresoById → tick verde
-      // Esto evita la re-navegación entre archivos y garantiza que la validación
-      // (Timbre/CAF/TED) ocurra antes de salir de la página.
-      console.log(` → Cargando ${pdfPaths.length} PDFs para drop en el portal...`);
-      const _fileDataList = pdfPaths.map(p => ({
-        name: path.basename(p),
-        b64:  fs.readFileSync(p).toString('base64'),
-      }));
+      // Cargar todos los PDFs a la vez en el input de archivo.
+      // GWT no tiene atributo "multiple" por defecto — se fuerza vía DOM.
+      // Puppeteer dispara el evento "change" internamente tras uploadFile(),
+      // lo que dispara el handler GWT que encola todos los archivos para
+      // procesarlos en batch (una POST por archivo vía iframe, sin re-navegación).
+      console.log(` → Cargando ${pdfPaths.length} PDFs de una vez en el input...`);
+      const fileInput = await page.$('input.gwt-FileUpload');
+      if (!fileInput) throw new Error('pdfdteInternet: input.gwt-FileUpload no encontrado');
 
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04b-antes-drop.png'), fullPage: true }).catch(() => {});
+      // Forzar múltiple selección y quitar restrict de accept (solo .PDF uppercase falla en algunos OS)
+      await fileInput.evaluate(el => {
+        el.setAttribute('multiple', '');
+        el.removeAttribute('accept');
+      });
 
-      console.log(` → Ejecutando drop de ${pdfPaths.length} PDFs sobre el portal...`);
-      const _dropped = await page.evaluate((files) => {
-        const dt = new DataTransfer();
-        for (const f of files) {
-          const bin = atob(f.b64);
-          const arr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-          dt.items.add(new File([arr], f.name, { type: 'application/pdf' }));
-        }
-        const dz = document.querySelector('.dropFilesLabel');
-        if (!dz) return 0;
-        dz.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true, cancelable: true }));
-        dz.dispatchEvent(new DragEvent('dragover',  { dataTransfer: dt, bubbles: true, cancelable: true }));
-        dz.dispatchEvent(new DragEvent('drop',      { dataTransfer: dt, bubbles: true, cancelable: true }));
-        return dt.files.length;
-      }, _fileDataList);
+      await fileInput.uploadFile(...pdfPaths);
+      console.log(` → ${pdfPaths.length} PDFs seleccionados, esperando que GWT encole los uploads...`);
 
-      if (_dropped === 0) throw new Error('pdfdteInternet: drop zone no encontrado (.dropFilesLabel)');
-      console.log(` → Drop ejecutado (${_dropped} archivos). Esperando procesamiento...`);
+      // GWT necesita un pequeño tick antes de comenzar a procesar la cola
+      await new Promise(r => setTimeout(r, 1500));
+      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04b-despues-upload-file.png'), fullPage: true }).catch(() => {});
 
       // ── Fase 1: esperar hasta 45s por primera señal de progreso o estado terminal ──
       // Si el portal ya está en "POR REVISAR" (re-ejecución), lo detectamos aquí inmediatamente.
