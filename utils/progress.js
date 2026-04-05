@@ -35,6 +35,7 @@ const STEPS = {
   BOOK_ERROR:         'BOOK_ERROR',       // data: { book, error }
   BOOKS_DECLARING:    'BOOKS_DECLARING',
   BOOKS_DONE:         'BOOKS_DONE',
+  BOOK_PERIOD_RETRY:  'BOOK_PERIOD_RETRY', // data: { periodo, intento }
   // Avance (Fase 5)
   ADVANCE_WAITING:    'ADVANCE_WAITING',
   ADVANCE_DONE:       'ADVANCE_DONE',

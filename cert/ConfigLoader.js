@@ -54,7 +54,7 @@ function loadConfig(options = {}) {
   console.log(`[ConfigLoader] Resolución: NroResol=${nro_resol} FchResol=${fch_resol} (AMBIENTE=${AMBIENTE})`);
 
   const EMISOR = {
-    rut: process.env.EMISOR_RUT,
+    rut: process.env.EMISOR_RUT || process.env.EMISOR_RUT_EMPRESA,
     razon_social: process.env.EMISOR_RAZON_SOCIAL,
     giro: process.env.EMISOR_GIRO || 'ACTIVIDADES DE PROGRAMACION INFORMATICA',
     acteco: process.env.EMISOR_ACTECO || '620200',
