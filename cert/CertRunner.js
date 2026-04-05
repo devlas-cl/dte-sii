@@ -782,6 +782,7 @@ class CertRunner {
           this._decrementarPeriodoLibros();
           const _nuevoPeriodo = this._getPeriodoLibros();
           console.log(`\n[!] Período rechazado por SII. Reintentando con ${_nuevoPeriodo} (${_pRetry + 1}/${MAX_PERIOD_RETRIES})...`);
+          emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
           await _reenviarLibros(_nuevoPeriodo);
           declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
           resultados.declaracion = declaracion;
@@ -806,6 +807,7 @@ class CertRunner {
             const _nuevoPeriodo = this._getPeriodoLibros();
             const _s21Nombres = _s21Keys.map(k => _KEY_A_SII_NOMBRE[k]).filter(Boolean);
             console.log(`\n[!] ${_s21Nombres.join(', ')} bloqueados en S21. Reintentando con período ${_nuevoPeriodo} (${_pRetry + 1}/${MAX_PERIOD_RETRIES})...`);
+            emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
 
             await _reenviarLibros(_nuevoPeriodo, new Set(_s21Keys));
             declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
@@ -1550,9 +1552,16 @@ class CertRunner {
             const yaIntercambio = Boolean(verificacion?.etapaActual?.includes('INTERCAMBIO'));
             const simConforme = Boolean(estadoSim?.esConforme || estadoSim?.estado?.toUpperCase()?.includes('REVISADO CONFORME'));
 
-            if (yaIntercambio || simConforme || !sigueFormulario) {
-              console.log('\n ¡SIMULACIÓN CONFIRMADA! Certificación completa.');
-              return { success: true, confirmada: true };
+            if (yaIntercambio) {
+              console.log('\n ¡SIMULACIÓN CONFIRMADA! Empresa ya en etapa INTERCAMBIO.');
+              return { success: true, confirmada: true, etapa: 'INTERCAMBIO' };
+            }
+
+            if (simConforme || !sigueFormulario) {
+              // La empresa pasó a la siguiente etapa automáticamente (INTERCAMBIO → DOCUMENTOS IMPRESOS → DECLARAR CUMPLIMIENTO)
+              const etapaActual = verificacion?.etapaActual || 'INTERCAMBIO';
+              console.log(`\n ¡SIMULACIÓN APROBADA! Etapa actual: ${etapaActual}`);
+              return { success: true, confirmada: true, etapa: etapaActual };
             }
 
             console.log(' [!] SII aún mantiene formulario de simulación pendiente; se reintentará...');
@@ -1585,8 +1594,11 @@ class CertRunner {
         
         if (esAprobado) {
           console.log(` [OK] SIMULACIÓN: REVISADO CONFORME`);
-          console.log('\n ¡SIMULACIÓN APROBADA! Certificación completa.');
-          return { success: true };
+          // Consultar etapa actual (INTERCAMBIO es el siguiente paso tras simulación)
+          const postSimAvance = await this.siiCert.verAvanceParsed().catch(() => null);
+          const etapaActual = postSimAvance?.etapaActual || 'INTERCAMBIO';
+          console.log(`\n ¡SIMULACIÓN APROBADA! Etapa actual: ${etapaActual}`);
+          return { success: true, etapa: etapaActual };
         } else if (esRechazado) {
           console.log(` [ERR] SIMULACIÓN: ${simEstado.estado}`);
           return { success: false, error: 'Simulación rechazada' };
@@ -2227,6 +2239,26 @@ class CertRunner {
       await new Promise(r => setTimeout(r, 3000));
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-01-loaded.png'), fullPage: true }).catch(() => {});
 
+      // Hookear SWFUpload para capturar post_params.id cuando GWT inicialice el uploader
+      await page.evaluate(() => {
+        if (window.SWFUpload) {
+          const _Orig = window.SWFUpload;
+          window.SWFUpload = function(settings) {
+            const pp = (settings && settings.post_params) || {};
+            if (pp.id) window.__swfCapturedRevId = String(pp.id);
+            const inst = new _Orig(settings);
+            // Copiar propiedades estáticas
+            Object.assign(window.SWFUpload, _Orig);
+            return inst;
+          };
+          window.SWFUpload.prototype = _Orig.prototype;
+          // Copiar constantes estáticas del prototipo original
+          for (const k of Object.getOwnPropertyNames(_Orig)) {
+            try { window.SWFUpload[k] = _Orig[k]; } catch { }
+          }
+        }
+      }).catch(() => {});
+
       // Paso 1: RUT Empresa
       const rutInputs = await page.$$('input[name="rut"]');
       const dvInputs  = await page.$$('input[name="dv"]');
@@ -2290,21 +2322,50 @@ class CertRunner {
       console.log(` → Ingresando RUT proveedor: ${rutNum}-${dvChar}`);
       await pRut.click({ clickCount: 3 }); await pRut.type(rutNum);
       await pDv.click({ clickCount: 3 });  await pDv.type(dvChar);
+
+      // Interceptar respuestas del portal durante "Consultar" para capturar el ID de revisión
+      let _capturedRevId = null;
+      const _onPortalResponse = async (resp) => {
+        const url = resp.url();
+        if (!url.includes('sii.cl/pdfdteInternet')) return;
+        try {
+          const body = await resp.text();
+          const matches = body.match(/\b(\d{5,7})\b/g);
+          if (matches) {
+            for (const m of matches) {
+              const n = +m;
+              if (n > 10000 && n < 9999999 && !_capturedRevId) {
+                _capturedRevId = m;
+                console.log(` [DEBUG] Posible nroRevision capturado de red: ${m} (url: ${url.split('?')[0]})`);
+              }
+            }
+          }
+        } catch { /* skip */ }
+      };
+      page.on('response', _onPortalResponse);
       await clickBoton(page, 'Consultar');
       await new Promise(r => setTimeout(r, 2500));
+      page.off('response', _onPortalResponse);
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-03-after-consultar.png'), fullPage: true }).catch(() => {});
 
       // ── Re-ejecución: detectar estado terminal antes de proceder ──
       // Solo aplicable cuando NO se creó una nueva revisión.
-      // Si se creó una nueva (nuevaRevisionCreada=true), el texto "EN REVISIÓN"
-      // que aparece pertenece a la revisión anterior y no es válido como early-exit.
+      // NOTA: el tab de navegación "Muestras Impresas en revisión" siempre contiene
+      // el texto "en revisión", por lo que NO se puede usar textContent global para
+      // detectar ese estado. Solo hacer early-exit si el formulario de upload
+      // (input.gwt-FileUpload o botón "Crear") NO está visible, lo que indica que
+      // la revisión está en un estado terminal irreversible.
       const _estadoYaSubido = nuevaRevisionCreada ? null : await page.evaluate(() => {
+        // Si el formulario de carga está presente, proceder siempre con el upload
+        const tieneFormulario = !!document.querySelector('input.gwt-FileUpload') ||
+          Array.from(document.querySelectorAll('button.x-btn-text'))
+            .some(b => ['Crear', 'Limpiar', 'Eliminar'].includes(b.textContent.trim()) && !b.disabled);
+        if (tieneFormulario) return null;
+        // Solo si NO hay formulario, verificar estado terminal
         const t = (document.body.textContent || '').toUpperCase();
         if (t.includes('APROBADO')) return 'APROBADO';
-        if (t.includes('POR REVISAR')) return 'POR REVISAR';
-        if (t.includes('EN REVISI')) return 'EN REVISIÓN';
-        if (t.includes('RECHAZADO')) return 'RECHAZADO';
         if (t.includes('ENVIADO AL SII')) return 'ENVIADO AL SII';
+        if (t.includes('RECHAZADO')) return 'RECHAZADO';
         return null;
       }).catch(() => null);
       if (_estadoYaSubido) {
@@ -2368,86 +2429,121 @@ class CertRunner {
         if (!_hayInp) { await clickBoton(page, 'Crear'); await new Promise(r => setTimeout(r, 2500)); }
       };
 
-      // Cargar todos los PDFs a la vez en el input de archivo.
-      // GWT no tiene atributo "multiple" por defecto — se fuerza vía DOM.
-      // Puppeteer dispara el evento "change" internamente tras uploadFile(),
-      // lo que dispara el handler GWT que encola todos los archivos para
-      // procesarlos en batch (una POST por archivo vía iframe, sin re-navegación).
-      console.log(` → Cargando ${pdfPaths.length} PDFs de una vez en el input...`);
       const fileInput = await page.$('input.gwt-FileUpload');
       if (!fileInput) throw new Error('pdfdteInternet: input.gwt-FileUpload no encontrado');
 
-      // Forzar múltiple selección y quitar restrict de accept (solo .PDF uppercase falla en algunos OS)
-      await fileInput.evaluate(el => {
-        el.setAttribute('multiple', '');
-        el.removeAttribute('accept');
-      });
+      // ── Obtener nroRevision y subir todos los archivos vía fetch() ──────────────────
+      // ── Primer upload para obtener nroRevision ─────────────────────────────────────
+      // Puppeteer 22+ usa waitForFileChooser() para file uploads.
+      // Triggear el input via click + page.waitForFileChooser() es el API nativo.
+      // GWT procesa el onChange, somete el FormPanel a /upload con id de revisión.
+      // Capturamos nroRevision desde la respuesta del servidor.
+      // ────────────────────────────────────────────────────────────────────────────
 
-      await fileInput.uploadFile(...pdfPaths);
-      console.log(` → ${pdfPaths.length} PDFs seleccionados, esperando que GWT encole los uploads...`);
+      let nroRevision = null;
 
-      // GWT necesita un pequeño tick antes de comenzar a procesar la cola
-      await new Promise(r => setTimeout(r, 1500));
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04b-despues-upload-file.png'), fullPage: true }).catch(() => {});
-
-      // ── Fase 1: esperar hasta 45s por primera señal de progreso o estado terminal ──
-      // Si el portal ya está en "POR REVISAR" (re-ejecución), lo detectamos aquí inmediatamente.
-      // Si el drop inició normalmente, "Procesados 1" aparece en pocos segundos.
-      await page.waitForFunction(() => {
-        for (const el of document.querySelectorAll('.x-progress-text')) {
-          const m = el.textContent.match(/Procesados\s+(\d+)/);
-          if (m && +m[1] > 0) return true;
-        }
-        const t = (document.body.textContent || '').toUpperCase();
-        if (t.includes('APROBADO') || t.includes('POR REVISAR') || t.includes('EN REVISI') || t.includes('RECHAZADO')) return true;
-        return false;
-      }, { timeout: 45000, polling: 1000 }).catch(() => {});
-
-      // Leer estado real tras la fase 1
-      const _fase1 = await page.evaluate(() => {
-        let procesados = 0;
-        for (const el of document.querySelectorAll('.x-progress-text')) {
-          const m = el.textContent.match(/Procesados\s+(\d+)/);
-          if (m) { procesados = +m[1]; break; }
-        }
-        const t = (document.body.textContent || '').toUpperCase();
-        let estado = null;
-        if (t.includes('APROBADO')) estado = 'APROBADO';
-        else if (t.includes('POR REVISAR')) estado = 'POR REVISAR';
-        else if (t.includes('EN REVISI')) estado = 'EN REVISIÓN';
-        else if (t.includes('RECHAZADO')) estado = 'RECHAZADO';
-        return { procesados, estado };
-      }).catch(() => ({ procesados: 0, estado: null }));
-
-      if (_fase1.estado) {
-        console.log(` [OK] Portal en estado "${_fase1.estado}" — muestras ya procesadas previamente.`);
-        return { success: true, alreadyCompleted: true, estado: _fase1.estado };
-      }
-
-      if (_fase1.procesados === 0) {
-        // Sin progreso y sin estado terminal: el portal puede no estar procesando
-        console.warn(' [!] Sin progreso en 45s y sin estado terminal. Continuando al paso siguiente...');
-      } else {
-        // ── Fase 2: progreso iniciado — esperar al total ──
-        await page.waitForFunction((total) => {
-          for (const el of document.querySelectorAll('.x-progress-text')) {
-            const m = el.textContent.match(/Procesados\s+(\d+)/);
-            if (m && +m[1] >= total) return true;
+      // Listener de respuesta para capturar nroRevision del primer upload GWT
+      const _onFirstUploadResp = async (resp) => {
+        if (resp.url().includes('/pdfdteInternet/upload')) {
+          const txt = await resp.text().catch(() => '');
+          const m = txt.trim().match(/^(\d+),(\d+)$/);
+          if (m && !nroRevision) {
+            nroRevision = m[2];
+            console.log(` ✓ ID de revisión obtenido: ${nroRevision} (1/${pdfPaths.length} subido)`);
           }
-          return false;
-        }, { timeout: pdfPaths.length * 15000, polling: 1000 }, pdfPaths.length).catch(async () => {
-          const procesados = await page.evaluate(() => {
-            for (const el of document.querySelectorAll('.x-progress-text')) {
-              const m = el.textContent.match(/Procesados\s+(\d+)/);
-              if (m) return +m[1];
-            }
-            return 0;
-          }).catch(() => 0);
-          console.warn(` [!] Timeout: solo se procesaron ${procesados}/${pdfPaths.length} antes del timeout`);
+        }
+      };
+      page.on('response', _onFirstUploadResp);
+
+      console.log(` → Disparando primer upload vía fileChooser para obtener ID de revisión...`);
+      try {
+        const _chooserPromise = page.waitForFileChooser({ timeout: 15000 });
+        // Triggear el file input: click en el wrapper visible O directamente en el input
+        await page.evaluate(() => {
+          // a) intentar click en el botón visible (wrapper div con overflow: hidden)
+          const wrapper = document.querySelector('div[style*="position: relative"][style*="overflow: hidden"] div.gwt-Label');
+          if (wrapper) { wrapper.click(); return; }
+          // b) click directo en el input oculto (funciona en headless Chrome)
+          const inp = document.querySelector('input.gwt-FileUpload');
+          if (inp) inp.click();
         });
+        const _chooser = await _chooserPromise;
+        await _chooser.accept([path.resolve(pdfPaths[0])]);
+        console.log(` [DEBUG] fileChooser.accept → OK (${path.basename(pdfPaths[0])})`);
+      } catch (e) {
+        console.warn(` [!] waitForFileChooser falló (${e.message}), intentando CDP DOM.setFileInputFiles...`);
+        // Fallback: CDP DOM.setFileInputFiles
+        const _cdp = await page.createCDPSession();
+        try {
+          const { root }   = await _cdp.send('DOM.getDocument', { depth: 0 });
+          const { nodeId } = await _cdp.send('DOM.querySelector', {
+            nodeId: root.nodeId, selector: 'input.gwt-FileUpload',
+          });
+          if (nodeId) {
+            await _cdp.send('DOM.setFileInputFiles', { files: [path.resolve(pdfPaths[0])], nodeId });
+            console.log(` [DEBUG] CDP setFileInputFiles → OK`);
+          }
+        } catch (cdpErr) {
+          console.warn(` [!] CDP también falló: ${cdpErr.message}`);
+        } finally {
+          await _cdp.detach().catch(() => {});
+        }
       }
 
-      // Esperar que todos los requests de leeImpresoById (validación) terminen
+      // Esperar hasta 60s para que el FormPanel iframe complete el upload
+      const _t0 = Date.now();
+      while (!nroRevision && Date.now() - _t0 < 60000) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+      page.off('response', _onFirstUploadResp);
+
+      if (!nroRevision) {
+        if (debugDir) {
+          await page.screenshot({ path: path.join(debugDir, 'pdfte-error-no-revid.png'), fullPage: true }).catch(() => {});
+          fs.writeFileSync(path.join(debugDir, 'pdfte-error-no-revid.html'), await page.content(), 'utf8');
+        }
+        throw new Error('pdfdteInternet: no se pudo obtener ID de revisión. El file chooser o CDP no disparó el handler GWT o el servidor rechazó la petición.');
+      }
+
+      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04b-primer-upload.png'), fullPage: true }).catch(() => {});
+
+      // ── Subir archivos restantes en paralelo vía fetch directo ──
+      const CONCURRENCIA = 5;
+      const _remaining = pdfPaths.slice(1);
+      let _procesados = 1;
+
+      for (let i = 0; i < _remaining.length; i += CONCURRENCIA) {
+        const _chunk = _remaining.slice(i, i + CONCURRENCIA);
+        const _fileData = _chunk.map(p => ({
+          name: path.basename(p),
+          b64: fs.readFileSync(p).toString('base64'),
+        }));
+        const _responses = await page.evaluate(async (files, revId) => {
+          return Promise.all(files.map(async ({ name, b64 }) => {
+            const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+            const blob = new Blob([bytes], { type: 'application/pdf' });
+            const fd = new FormData();
+            fd.append('Filedata', blob, name);
+            fd.append('id', String(revId));
+            fd.append('ambiente', 'false');
+            const resp = await fetch('/pdfdteInternet/upload', { method: 'POST', body: fd });
+            const text = await resp.text();
+            return { name, ok: resp.ok, status: resp.status, text };
+          }));
+        }, _fileData, nroRevision);
+
+        _procesados += _chunk.length;
+        console.log(` → Procesados ${_procesados}/${pdfPaths.length}`);
+        for (const r of _responses) {
+          if (!r.ok || !r.text.match(/^\d+,\d+$/)) {
+            console.warn(`   [!] ${r.name}: HTTP ${r.status} → ${r.text.substring(0, 120)}`);
+          }
+        }
+      }
+
+      console.log(` ✓ ${pdfPaths.length} PDFs subidos al portal`);
+
+      // Esperar que las validaciones del portal (leeImpresoById) terminen
       await page.waitForNetworkIdle({ timeout: 60000, idleTime: 2000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 2000));
 
@@ -2466,9 +2562,53 @@ class CertRunner {
 
       if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-05b-antes-enviar.png'), fullPage: true }).catch(() => {});
 
+      // Debug: listar todos los botones visibles y sus estados
+      const _btnsDebug = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('button.x-btn-text')).map(b => ({
+          text: b.textContent.trim(),
+          disabled: b.disabled,
+          aria: b.getAttribute('aria-disabled'),
+          visible: b.offsetParent !== null,
+        }))
+      ).catch(() => []);
+      console.log(` [DEBUG] Botones en página: ${JSON.stringify(_btnsDebug.filter(b => b.text))}`);
+
       console.log(' → Click "Enviar al SII"...');
-      const enviado = await clickBoton(page, 'Enviar al SII');
-      if (!enviado) throw new Error('pdfdteInternet: botón "Enviar al SII" no disponible o deshabilitado');
+
+      // Intentar click en el botón directo (ignorar aria-disabled en esta etapa)
+      const _clickedEnviar = await page.evaluate(() => {
+        // a) Buscar button.x-btn-text exacto
+        for (const btn of document.querySelectorAll('button.x-btn-text')) {
+          if (btn.textContent.trim() === 'Enviar al SII') {
+            btn.click();
+            return 'direct';
+          }
+        }
+        // b) Abrir overflow ">" y buscar en el menú desplegable
+        const overflow = document.querySelector('td.x-toolbar-overflow-region, .x-toolbar-more-icon, button[class*="overflow"]');
+        if (overflow) {
+          overflow.click();
+          return 'overflow-click';
+        }
+        return false;
+      });
+
+      if (_clickedEnviar === 'overflow-click') {
+        // Esperar que aparezca el menú y hacer click en "Enviar al SII"
+        await new Promise(r => setTimeout(r, 500));
+        const _menuClicked = await page.evaluate(() => {
+          for (const el of document.querySelectorAll('.x-menu-item-text')) {
+            if (el.textContent.trim() === 'Enviar al SII') {
+              el.click();
+              return true;
+            }
+          }
+          return false;
+        });
+        if (!_menuClicked) throw new Error('pdfdteInternet: botón "Enviar al SII" no encontrado en overflow menu');
+      } else if (!_clickedEnviar) {
+        throw new Error('pdfdteInternet: botón "Enviar al SII" no disponible o deshabilitado');
+      }
 
       await page.waitForNetworkIdle({ timeout: 30000, idleTime: 1000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 3000));
