@@ -1926,11 +1926,7 @@ class CertRunner {
 
     let browser;
     try {
-      browser = await puppeteer.launch({
-        headless: true,
-        ignoreHTTPSErrors: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
-      });
+      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
 
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
@@ -2114,11 +2110,7 @@ class CertRunner {
     const [rutNum, dvChar] = this.config.emisor.rut.split('-');
     let browser;
     try {
-      browser = await puppeteer.launch({
-        headless: true,
-        ignoreHTTPSErrors: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
-      });
+      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
       await page.goto('https://www4.sii.cl/pdfdteInternet/', { waitUntil: 'networkidle2', timeout: 60000 });
@@ -2137,23 +2129,32 @@ class CertRunner {
         if (btn) btn.click();
       }, 'Rut');
 
-      // Descartar diálogo "ya existe revisión" si aparece
-      await new Promise(r => setTimeout(r, 1500));
-      await page.evaluate(() => {
-        const si = Array.from(document.querySelectorAll('button.x-btn-text'))
-          .find(b => /^s[ií]$/i.test(b.textContent.trim()));
-        if (si) si.click();
-      }).catch(() => {});
+      // IMPORTANTE: NO hacer click en "Sí" del diálogo "ya existe revisión".
+      // Hacerlo crea una revisión nueva vacía y borra el estado "POR REVISAR" del DOM.
+      // El estado de la revisión existente es visible en el body aunque el diálogo esté abierto.
+      await new Promise(r => setTimeout(r, 3000));
 
-      // Esperar hasta 8s a que aparezca el estado en el DOM
+      // Esperar hasta 10s a que aparezca el estado en el DOM (detrás del diálogo si aplica)
       await page.waitForFunction(() => {
         const t = (document.body.textContent || '').toUpperCase();
-        return t.includes('ESTADO DE LA REVISI') ||
-               t.includes('POR REVISAR') || t.includes('APROBADO') ||
-               t.includes('EN REVISI') || t.includes('RECHAZADO');
-      }, { timeout: 8000, polling: 500 }).catch(() => {});
+        return t.includes('POR REVISAR') || t.includes('APROBADO') ||
+               t.includes('EN REVISI') || t.includes('RECHAZADO') ||
+               t.includes('ENVIADO AL SII');
+      }, { timeout: 10000, polling: 500 }).catch(() => {});
 
+      // Leer estado directamente del label del formulario en el DOM
       const estado = await page.evaluate(() => {
+        // Primero intentar leer el label específico de estado (más preciso)
+        const labels = Array.from(document.querySelectorAll('.x-form-label'));
+        for (const lbl of labels) {
+          const txt = (lbl.textContent || '').trim().toUpperCase();
+          if (txt === 'POR REVISAR') return 'POR REVISAR';
+          if (txt === 'APROBADO') return 'APROBADO';
+          if (txt.startsWith('EN REVISI')) return 'EN REVISIÓN';
+          if (txt === 'RECHAZADO') return 'RECHAZADO';
+          if (txt.includes('ENVIADO AL SII')) return 'ENVIADO AL SII';
+        }
+        // Fallback: buscar en todo el body
         const t = (document.body.textContent || '').toUpperCase();
         if (t.includes('APROBADO')) return 'APROBADO';
         if (t.includes('POR REVISAR')) return 'POR REVISAR';
@@ -2167,7 +2168,13 @@ class CertRunner {
     } catch (err) {
       return { estado: null, error: err.message };
     } finally {
-      if (browser) await browser.close().catch(() => {});
+      if (browser) {
+        await Promise.race([
+          browser.close().catch(() => {}),
+          new Promise(r => setTimeout(r, 8000)),
+        ]);
+        try { browser.process()?.kill('SIGKILL'); } catch { /* ignorar */ }
+      }
     }
   }
 
@@ -2222,12 +2229,7 @@ class CertRunner {
 
     let browser;
     try {
-      browser = await puppeteer.launch({
-        headless: true,
-        ignoreHTTPSErrors: true,
-        protocolTimeout: 300000, // 5 min — DOM.setFileInputFiles con 256 archivos supera el default de 30s
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
-      });
+      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions([], { protocolTimeout: 300000 }));
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
 
@@ -2618,14 +2620,26 @@ class CertRunner {
       }
 
       const pageText = await page.$eval('body', el => el.textContent).catch(() => '');
-      const exitoso  = /revision.*creada|solicitud.*enviada|documentos.*enviados|fue.*enviado|[eé]xito/i.test(pageText);
+      const exitoso  = /revision.*creada|solicitud.*enviada|documentos.*enviados|fue.*enviado|[eé]xito|por revisar/i.test(pageText);
       console.log(` → Resultado: ${exitoso ? '[OK] enviado correctamente' : '[!] sin confirmación explícita'}`);
+      // Imprimir el marcador de éxito ANTES de cerrar el browser para que quede en stdout
+      // aunque browser.close() cuelgue y el proceso sea forzado a terminar.
+      if (exitoso) process.stdout.write('\nMUESTRAS SUBIDAS EXITOSAMENTE\n');
       return { success: exitoso, pageText: pageText.substring(0, 800) };
 
     } catch (err) {
       return { success: false, error: err.message };
     } finally {
-      if (browser) await browser.close().catch(() => {});
+      if (browser) {
+        // browser.close() puede colgarse indefinidamente si Chromium no responde.
+        // Limitar a 8 segundos; si no cierra, matar el proceso del browser directamente.
+        await Promise.race([
+          browser.close().catch(() => {}),
+          new Promise(r => setTimeout(r, 8000)),
+        ]);
+        // Forzar cierre del proceso de Chromium si quedó colgado
+        try { browser.process()?.kill('SIGKILL'); } catch { /* ignorar */ }
+      }
     }
   }
 
@@ -2655,25 +2669,37 @@ class CertRunner {
 
     let browser;
     try {
-      browser = await puppeteer.launch({
-        headless: true,
-        ignoreHTTPSErrors: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
-      });
+      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
       page.on('dialog', async dlg => { console.log(` → [dialog SET=1] ${dlg.message()}`); await dlg.accept(); });
+
+      // Helper debug: guarda screenshot + HTML con timestamp
+      const dbgDirSet1 = this.config.debugDir ? path.join(this.config.debugDir, 'boleta-set1') : null;
+      if (dbgDirSet1) fs.mkdirSync(dbgDirSet1, { recursive: true });
+      const saveDebugSet1 = async (label) => {
+        if (!dbgDirSet1) return;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const base = path.join(dbgDirSet1, `${label}-${ts}`);
+        try { await page.screenshot({ path: `${base}.png`, fullPage: true }); } catch {}
+        try { fs.writeFileSync(`${base}.html`, await page.content(), 'utf-8'); } catch {}
+        console.log(` [debug] Captura guardada: ${base}.png`);
+      };
 
       console.log(' → Cargando portal certBolElectDteInternet (SET=1)...');
       await page.goto('https://www4.sii.cl/certBolElectDteInternet/?SET=1', {
         waitUntil: 'networkidle2', timeout: 60000,
       });
       await new Promise(r => setTimeout(r, 2000));
+      await saveDebugSet1('01-carga');
 
       // Paso 1: RUT empresa → "Confirmar Empresa"
-      const rutInput = await page.$('input[maxlength="8"]');
-      const dvInput  = await page.$('input[maxlength="1"]');
-      if (!rutInput) throw new Error('certBolElectDteInternet/?SET=1: no se encontró campo RUT');
+      const rutInput = await page.waitForSelector('input[maxlength="8"]', { timeout: 15000 }).catch(() => null);
+      const dvInput  = await page.waitForSelector('input[maxlength="1"]', { timeout: 5000 }).catch(() => null);
+      if (!rutInput) {
+        await saveDebugSet1('ERROR-norut');
+        throw new Error('certBolElectDteInternet/?SET=1: no se encontró campo RUT');
+      }
       console.log(` → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
       await rutInput.click({ clickCount: 3 }); await rutInput.type(rutNum);
       await dvInput.click({ clickCount: 3 });  await dvInput.type(dvChar);
@@ -2690,6 +2716,7 @@ class CertRunner {
         return document.querySelector('input[type="checkbox"]') !== null;
       }, { timeout: 40000, polling: 500 }).catch(() => {});
       await new Promise(r => setTimeout(r, 500));
+      await saveDebugSet1('02-post-confirm');
 
       // Paso 2: Marcar todos los checkboxes
       const nCbs = await page.evaluate(() => {
@@ -2776,9 +2803,9 @@ class CertRunner {
       });
 
       if (!setText || setText.trim().length < 10) {
-        if (this.config.debugDir) {
-          fs.mkdirSync(this.config.debugDir, { recursive: true });
-          fs.writeFileSync(path.join(this.config.debugDir, 'boleta-set-debug.txt'), setText || '', 'utf-8');
+        if (dbgDirSet1) {
+          fs.writeFileSync(path.join(dbgDirSet1, 'boleta-set-contenido-vacio.txt'), setText || '', 'utf-8');
+          await saveDebugSet1('ERROR-descarga-vacia');
         }
         throw new Error(`DownloadFileServlet devolvió contenido vacío (${setText?.length ?? 0} chars). Verificar cookies.`);
       }
@@ -2793,6 +2820,15 @@ class CertRunner {
       console.log(` ✓ Set de pruebas obtenido (${setText.length} chars)`);
       return { success: true, setText };
     } catch (err) {
+      try {
+        if (dbgDirSet1) {
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const base = path.join(dbgDirSet1, `ERROR-catch-${ts}`);
+          await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
+          fs.writeFileSync(`${base}.html`, await page.content().catch(() => ''), 'utf-8');
+          console.log(` [debug] Captura de error guardada: ${base}.png`);
+        }
+      } catch {}
       return { success: false, error: err.message };
     } finally {
       if (browser) await browser.close().catch(() => {});
@@ -2821,20 +2857,27 @@ class CertRunner {
 
     let browser;
     try {
-      browser = await puppeteer.launch({
-        headless: true,
-        ignoreHTTPSErrors: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
-      });
+      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
       page.on('dialog', async dlg => { console.log(` → [dialog SET=2] ${dlg.message()}`); await dlg.accept(); });
+
+      const debugSet2Dir = this.config.debugDir ? require('path').join(this.config.debugDir, 'boleta-set2') : null;
+      if (debugSet2Dir) require('fs').mkdirSync(debugSet2Dir, { recursive: true });
+      const snapSet2 = async (nombre) => {
+        if (!debugSet2Dir) return;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const p = require('path').join(debugSet2Dir, `${nombre}-${ts}.png`);
+        await page.screenshot({ path: p, fullPage: true }).catch(() => {});
+        console.log(` [debug] Captura guardada: ${p}`);
+      };
 
       console.log(' → Cargando portal certBolElectDteInternet (SET=2)...');
       await page.goto('https://www4.sii.cl/certBolElectDteInternet/?SET=2', {
         waitUntil: 'networkidle2', timeout: 60000,
       });
       await new Promise(r => setTimeout(r, 2000));
+      await snapSet2('01-carga');
 
       // Paso 1: RUT empresa → "Confirmar Empresa"
       const rutInput = await page.$('input[maxlength="8"]');
@@ -2856,10 +2899,15 @@ class CertRunner {
         return document.querySelector('input[maxlength="15"]') !== null;
       }, { timeout: 40000, polling: 500 }).catch(() => {});
       await new Promise(r => setTimeout(r, 500));
+      await snapSet2('02-post-confirm');
 
       // Paso 2: Ingresar TrackId
       const trackInput = await page.$('input[maxlength="15"]');
-      if (!trackInput) throw new Error('No se encontró campo "Identificador de Envio" en certBolElectDteInternet/?SET=2');
+      if (!trackInput) {
+        const pageText = await page.evaluate(() => (document.body.innerText || '').trim().substring(0, 600));
+        console.log(` [!] Texto del portal al fallar:\n${pageText}`);
+        throw new Error('No se encontró campo "Identificador de Envio" en certBolElectDteInternet/?SET=2');
+      }
       console.log(` → Ingresando TrackId: ${trackId}`);
       await trackInput.click({ clickCount: 3 });
       await trackInput.type(String(trackId));
@@ -2878,6 +2926,7 @@ class CertRunner {
         return t.includes('ENVI') || t.includes('CORREO') || t.includes('ERROR') ||
                t.includes('VALIDACI') || t.includes('SOLICITUD');
       }, { timeout: 15000, polling: 500 }).catch(() => {});
+      await snapSet2('03-respuesta');
 
       const respuesta = await page.evaluate(() => (document.body.innerText || '').trim().substring(0, 500));
       console.log(` ✓ Validación solicitada. Respuesta: ${respuesta.substring(0, 120)}`);
@@ -2920,11 +2969,7 @@ class CertRunner {
 
     let browser;
     try {
-      browser = await puppeteer.launch({
-        headless: true,
-        ignoreHTTPSErrors: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
-      });
+      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
       const page = await browser.newPage();
       await page.setCookie(...puppeteerCookies);
 
@@ -2935,6 +2980,18 @@ class CertRunner {
         console.log(` → [dialog] ${dialogMsg}`);
         await dlg.accept();
       });
+
+      // Helper debug: guarda screenshot + HTML con timestamp
+      const dbgDirDecl = this.config.debugDir ? path.join(this.config.debugDir, 'boleta-declaracion') : null;
+      if (dbgDirDecl) fs.mkdirSync(dbgDirDecl, { recursive: true });
+      const saveDebugDecl = async (label) => {
+        if (!dbgDirDecl) return;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const base = path.join(dbgDirDecl, `${label}-${ts}`);
+        try { await page.screenshot({ path: `${base}.png`, fullPage: true }); } catch {}
+        try { fs.writeFileSync(`${base}.html`, await page.content(), 'utf-8'); } catch {}
+        console.log(` [debug] Captura guardada: ${base}.png`);
+      };
 
       // ── PASOS 1+2: Confirmar Empresa → esperar formulario (con retry) ──
       // El portal GWT a veces responde con error transitorio ("empresa no autorizada")
@@ -2950,11 +3007,15 @@ class CertRunner {
           waitUntil: 'networkidle2', timeout: 60000,
         });
         await new Promise(r => setTimeout(r, 2500));
+        await saveDebugDecl(`intento${intento}-01-carga`);
 
         // GWT requiere eventos de teclado reales — NO funciona con .value = ...
-        const rutInput = await page.$('input[maxlength="8"]');
-        const dvInput  = await page.$('input[maxlength="1"]');
-        if (!rutInput) throw new Error('certBolElectDteInternet/: no se encontró campo RUT empresa');
+        const rutInput = await page.waitForSelector('input[maxlength="8"]', { timeout: 15000 }).catch(() => null);
+        const dvInput  = await page.waitForSelector('input[maxlength="1"]', { timeout: 5000 }).catch(() => null);
+        if (!rutInput) {
+          await saveDebugDecl(`intento${intento}-ERROR-norut`);
+          throw new Error('certBolElectDteInternet/: no se encontró campo RUT empresa');
+        }
         console.log(` → Ingresando RUT empresa: ${rutEmpresaRaw}`);
         await rutInput.click({ clickCount: 3 }); await rutInput.type(rutEmpNum);
         await dvInput.click({ clickCount: 3 });  await dvInput.type(rutEmpDv);
@@ -2972,10 +3033,12 @@ class CertRunner {
         await page.waitForFunction(() => {
           return document.querySelector('input[type="checkbox"]') !== null;
         }, { timeout: 40000, polling: 500 }).catch(() => {});
+        await saveDebugDecl(`intento${intento}-02-post-confirm`);
 
         if (dialogMsg) {
           // Portal lanzó alert — puede ser transitorio. Guardar y reintentar.
           lastDialogMsg = dialogMsg;
+          await saveDebugDecl(`intento${intento}-DIALOG`);
           console.log(` [!] Portal respondió con alerta en intento ${intento}: ${dialogMsg.substring(0, 100)}`);
           if (intento < MAX_INTENTOS) {
             console.log(' → Recargando y reintentando en 3s...');
@@ -2983,6 +3046,7 @@ class CertRunner {
             continue;
           }
           // Agotados los intentos con alerta — el SII puede requerir esperar SOK
+          await saveDebugDecl('PENDINGSOK-final');
           return { success: false, pendingSok: true, error: lastDialogMsg };
         }
 
@@ -3063,9 +3127,7 @@ class CertRunner {
       await fillByLabel('Correo electrónico Proveedor', correoProveedor);
 
       // Captura pre-submit
-      if (this.config.debugDir) {
-        await page.screenshot({ path: path.join(this.config.debugDir, 'boleta-declaracion-pre-submit.png'), fullPage: true }).catch(() => {});
-      }
+      await saveDebugDecl('03-pre-submit');
 
       // ── PASO 4: Click "Grabar Declaración" ───────────────────────
       const submitOk = await page.evaluate(() => {
@@ -3074,7 +3136,10 @@ class CertRunner {
         if (btn) { btn.click(); return true; }
         return false;
       });
-      if (!submitOk) throw new Error('No se encontró botón "Grabar Declaración" en certBolElectDteInternet/');
+      if (!submitOk) {
+        await saveDebugDecl('ERROR-no-boton-grabar');
+        throw new Error('No se encontró botón "Grabar Declaración" en certBolElectDteInternet/');
+      }
       console.log(' → Click "Grabar Declaración"...');
 
       // Esperar confirmación del SII
@@ -3086,22 +3151,153 @@ class CertRunner {
 
       const msgFinal = await page.evaluate(() => (document.body.textContent || '').trim().substring(0, 300));
       console.log(` ✓ Declaración completada. Respuesta: ${msgFinal.substring(0, 150)}`);
-
-      if (this.config.debugDir) {
-        await page.screenshot({ path: path.join(this.config.debugDir, 'boleta-declaracion-post-submit.png'), fullPage: true }).catch(() => {});
-      }
+      await saveDebugDecl('04-post-submit-OK');
 
       return { success: true, mensaje: msgFinal };
     } catch (err) {
+      // Guardar captura del estado de error si page sigue abierta
+      try {
+        if (dbgDirDecl) {
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const base = path.join(dbgDirDecl, `ERROR-catch-${ts}`);
+          await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
+          fs.writeFileSync(`${base}.html`, await page.content().catch(() => ''), 'utf-8');
+          console.log(` [debug] Captura de error guardada: ${base}.png`);
+        }
+      } catch {}
       return { success: false, error: err.message };
     } finally {
       if (browser) await browser.close().catch(() => {});
     }
   }
 
+  /**
+   * Verifica si la empresa ya está autorizada para emitir Boletas Electrónicas tipo 39
+   * en PRODUCCIÓN (palena.sii.cl). Si el tipo 39 aparece en el select de
+   * of_solicita_folios_dcto significa que el SII ya certificó la empresa.
+   *
+   * También consulta el avance en certificación (maullin) como dato adicional.
+   *
+   * @returns {Promise<{
+   *   autorizadaProduccion: boolean,
+   *   autorizadaCertificacion: boolean,
+   *   mensaje: string,
+   *   tiposDisponiblesProduccion: number[],
+   *   estadoCertificacion: string|null
+   * }>}
+   */
+  async verificarAutorizacionBoleta() {
+    const https     = require('https');
+    const cookieJar = await this._obtenerCookiesSII();
+    const cookieStr = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
+
+    const fetchHtml = (url) => new Promise((resolve, reject) => {
+      const req = https.get(url, {
+        headers: {
+          'Cookie': cookieStr,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'Accept': 'text/html,*/*',
+        },
+        rejectUnauthorized: false,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+      });
+      req.on('error', reject);
+      req.setTimeout(20000, () => { req.destroy(); reject(new Error('Timeout')); });
+    });
+
+    const result = {
+      autorizadaProduccion:       false,
+      autorizadaCertificacion:    false,
+      mensaje:                    '',
+      tiposDisponiblesProduccion: [],
+      estadoCertificacion:        null,
+    };
+
+    // ── 1. Verificar producción: of_solicita_folios_dcto en palena ─────────
+    try {
+      const htmlProd = await fetchHtml('https://palena.sii.cl/cvc_cgi/dte/of_solicita_folios_dcto');
+      if (this.config.debugDir) {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        fs.writeFileSync(
+          path.join(this.config.debugDir, `verificar-boleta-produccion-${ts}.html`),
+          htmlProd, 'utf-8'
+        );
+      }
+      const matches = [...htmlProd.matchAll(/<option[^>]+value="(\d+)"[^>]*>/gi)];
+      result.tiposDisponiblesProduccion = matches.map(m => parseInt(m[1], 10)).filter(n => n > 0);
+      result.autorizadaProduccion = result.tiposDisponiblesProduccion.includes(39);
+      console.log(` ✓ Producción — tipos disponibles: [${result.tiposDisponiblesProduccion.join(', ')}] | Boleta 39: ${result.autorizadaProduccion ? '✅ SÍ' : '❌ NO'}`);
+    } catch (e) {
+      console.log(` [!] No se pudo verificar producción: ${e.message}`);
+    }
+
+    // ── 2. Verificar certificación: pe_avance6 en maullin ─────────────────
+    try {
+      const htmlCert = await fetchHtml('https://maullin.sii.cl/cvc_cgi/dte/pe_avance6');
+      if (this.config.debugDir) {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        fs.writeFileSync(
+          path.join(this.config.debugDir, `verificar-boleta-certificacion-${ts}.html`),
+          htmlCert, 'utf-8'
+        );
+      }
+      // Buscar fila de boleta en tabla de avance
+      const boletaRow = htmlCert.match(/BOLETA[^<]*<\/[^>]+>\s*<[^>]+><b>([^<]+)<\/b>/i);
+      if (boletaRow) {
+        result.estadoCertificacion = boletaRow[1].trim();
+        result.autorizadaCertificacion = /conform|aprobad|autoriz/i.test(result.estadoCertificacion);
+      }
+      if (!result.estadoCertificacion && /autorizada.*boleta|boleta.*autorizada/i.test(htmlCert)) {
+        result.autorizadaCertificacion = true;
+        result.estadoCertificacion = 'AUTORIZADA';
+      }
+      console.log(` ✓ Certificación — estado boleta: ${result.estadoCertificacion || '(no encontrado)'} | Autorizada: ${result.autorizadaCertificacion ? '✅ SÍ' : '❌ NO'}`);
+    } catch (e) {
+      console.log(` [!] No se pudo verificar certificación: ${e.message}`);
+    }
+
+    result.mensaje = result.autorizadaProduccion
+      ? '✅ Empresa autorizada para emitir Boleta Electrónica (tipo 39) en producción'
+      : result.autorizadaCertificacion
+        ? '⏳ Boleta certificada en SII pero aún no disponible en producción'
+        : '❌ Boleta NO autorizada — certificación incompleta';
+
+    return result;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // Helpers privados
   // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Opciones base para puppeteer.launch.
+   * Usa Chrome del sistema (executablePath) para evitar crashes del Chromium
+   * bundled en Windows (0xC0000409). Respeta this.config.puppeteerHeadless.
+   */
+  _getPuppeteerLaunchOptions(extraArgs = [], extraOpts = {}) {
+    const fs = require('fs');
+    const chromePaths = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      process.env.LOCALAPPDATA ? process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe' : null,
+    ].filter(Boolean);
+    const systemChrome = chromePaths.find(p => fs.existsSync(p));
+
+    const opts = {
+      headless: this.config.puppeteerHeadless !== false,
+      ignoreHTTPSErrors: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors', ...extraArgs],
+      ...extraOpts,
+    };
+    if (systemChrome) {
+      opts.executablePath = systemChrome;
+      console.log(` [browser] Usando Chrome del sistema: ${systemChrome}`);
+    }
+    return opts;
+  }
 
   _getFechaHoy() {
     const now = new Date();

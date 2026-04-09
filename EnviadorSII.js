@@ -1132,7 +1132,9 @@ class EnviadorSII {
     body += xml;
     body += `\r\n--${boundary}--\r\n`;
 
-    return await this._enviarMultipart(url, body, boundary, xml, 'RCOF');
+    // SII DTEUpload requiere ISO-8859-1 (igual que EnvioBOLETA y EnvioDTE SOAP)
+    const bodyBuffer = Buffer.from(body, 'latin1');
+    return await this._enviarMultipart(url, bodyBuffer, boundary, xml, 'RCOF');
   }
 
   /**
@@ -1337,8 +1339,29 @@ class EnviadorSII {
       3: 'Error en XML',
       4: 'Error de firma',
       5: 'Error de sistema',
+      7: 'Envío duplicado — el SII ya recibió este set anteriormente',
       99: 'Error desconocido',
     };
+
+    // STATUS 7 = Envío duplicado (para EnvioBOLETA/EnvioDTE).
+    // EXCEPCIÓN: CHR-00001 en <DETAIL> = error de charset, NO es duplicado.
+    if (status === 7) {
+      const detailMatch = responseText.match(/<ERROR>([^<]*)<\/ERROR>/i);
+      const detailMsg = detailMatch ? detailMatch[1] : '';
+      if (detailMsg.includes('CHR-00001')) {
+        return {
+          ok: false,
+          status,
+          error: `Error de charset en XML enviado (${detailMsg}). Verifique encoding="ISO-8859-1" en la declaración XML.`,
+          respuesta: responseText,
+          duplicado: false,
+        };
+      }
+      if (trackId) {
+        return { ok: true, status, trackId, archivo: fileName, mensaje: `[DUPLICADO] TrackID recuperado: ${trackId}`, respuesta: responseText };
+      }
+      return { ok: false, status, error: errorMessages[7], respuesta: responseText, duplicado: true };
+    }
 
     return {
       ok: false,
