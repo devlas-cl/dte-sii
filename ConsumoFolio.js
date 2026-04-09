@@ -223,8 +223,9 @@ class ConsumoFolio {
     }
 
     // Construir XML SIN indentación para C14N consistente
+    // NOTA: SII DTEUpload requiere ISO-8859-1 (endpoint SOAP/CGI antiguo)
     const schemaLoc = 'http://www.sii.cl/SiiDte ConsumoFolio_v10.xsd';
-    const xmlSinFirma = `<?xml version="1.0" encoding="UTF-8"?>
+    const xmlSinFirma = `<?xml version="1.0" encoding="ISO-8859-1"?>
 <ConsumoFolios xmlns="http://www.sii.cl/SiiDte" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="${schemaLoc}" version="1.0"><DocumentoConsumoFolios ID="${this.id}"><Caratula version="1.0"><RutEmisor>${this.caratula.RutEmisor}</RutEmisor><RutEnvia>${this.caratula.RutEnvia}</RutEnvia><FchResol>${this.caratula.FchResol}</FchResol><NroResol>${this.caratula.NroResol}</NroResol><FchInicio>${this.caratula.FchInicio}</FchInicio><FchFinal>${this.caratula.FchFinal}</FchFinal><SecEnvio>${this.caratula.SecEnvio}</SecEnvio><TmstFirmaEnv>${this.caratula.TmstFirmaEnv}</TmstFirmaEnv></Caratula>${resumenXml}</DocumentoConsumoFolios></ConsumoFolios>`;
 
     // Firmar el documento

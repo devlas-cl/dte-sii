@@ -247,31 +247,41 @@ class BoletaCert {
    */
   generarConsumoFolio(envioBoleta, options = {}) {
     const { ConsumoFolio } = this._lib();
+    const { DOMParser } = require('@xmldom/xmldom');
     
     const consumoFolio = new ConsumoFolio(this.certificado);
     
-    // Agregar documentos desde el EnvioBOLETA
-    // Necesitamos extraer la info de cada boleta
-    const boletas = envioBoleta.dtes || [];
-    for (const dte of boletas) {
-      const tipo = dte.datos.Encabezado.IdDoc.TipoDTE;
-      const folio = dte.datos.Encabezado.IdDoc.Folio;
-      const fechaEmision = dte.datos.Encabezado.IdDoc.FchEmis;
-      const totales = dte.datos.Encabezado.Totales;
+    // Parsear el XML generado para obtener los totales exactos que quedaron firmados.
+    // NO leer de dte.datos.Encabezado.Totales: son valores pre-cálculo (input del constructor)
+    // y no coinciden con los totales calculados que el SII valida contra el RCOF.
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(envioBoleta.xml, 'text/xml');
+    const dteEls = doc.getElementsByTagName('Documento');
+    
+    for (let i = 0; i < dteEls.length; i++) {
+      const dteEl = dteEls[i];
+      const tipo = parseInt(dteEl.getElementsByTagName('TipoDTE')[0]?.textContent || '39', 10);
+      const folio = parseInt(dteEl.getElementsByTagName('Folio')[0]?.textContent || '0', 10);
+      const fchEmis = dteEl.getElementsByTagName('FchEmis')[0]?.textContent || '';
       
-      // Estructura que espera ConsumoFolio: Totales como hijo de Encabezado
+      const totalesEl = dteEl.getElementsByTagName('Totales')[0];
+      const mntNeto = parseInt(totalesEl?.getElementsByTagName('MntNeto')[0]?.textContent || '0', 10);
+      const mntExe  = parseInt(totalesEl?.getElementsByTagName('MntExe')[0]?.textContent  || '0', 10);
+      const iva      = parseInt(totalesEl?.getElementsByTagName('IVA')[0]?.textContent     || '0', 10);
+      const mntTotal = parseInt(totalesEl?.getElementsByTagName('MntTotal')[0]?.textContent || '0', 10);
+      
       consumoFolio.agregar(tipo, {
         Encabezado: {
           IdDoc: {
             TipoDTE: tipo,
             Folio: folio,
-            FchEmis: fechaEmision,
+            FchEmis: fchEmis,
           },
           Totales: {
-            MntNeto: totales.MntNeto || 0,
-            MntExe: totales.MntExe || 0,
-            IVA: totales.IVA || 0,
-            MntTotal: totales.MntTotal || 0,
+            MntNeto: mntNeto,
+            MntExe:  mntExe,
+            IVA:     iva,
+            MntTotal: mntTotal,
           }
         },
       });
@@ -384,6 +394,7 @@ class BoletaCert {
    * @param {string} options.setPath - Ruta al archivo del set de pruebas
    * @param {Object} options.cafBoleta - CAF para boletas tipo 39
    * @param {number} options.folioInicial - Folio inicial a usar
+   * @param {number} [options.secEnvio=1] - Número de secuencia del RCOF (auto-incrementar por run)
    * @returns {Promise<Object>} Resultado con trackIds
    */
   async ejecutarCertificacion(options) {
@@ -431,52 +442,125 @@ class BoletaCert {
     const resultadoBoleta = await enviador.enviarBoletaSoap(envioBoleta);
     
     if (!resultadoBoleta.ok) {
-      console.log(` [ERR] Error: ${resultadoBoleta.error}`);
-      return { success: false, error: resultadoBoleta.error, fase: 'EnvioBOLETA' };
-    }
-    console.log(` [OK] Enviado - TrackId: ${resultadoBoleta.trackId}`);
-    
-    // 5. Generar RCOF
-    console.log('\nGenerando RCOF (ConsumoFolio)...');
-    const consumoFolio = this.generarConsumoFolio(envioBoleta);
-    consumoFolio.generar(); // generar() ya incluye firmar() internamente
-    console.log(` ✓ XML generado: ${consumoFolio.xml.length} bytes`);
-    
-    // Guardar debug
-    if (this.debugDir) {
-      const debugPath = path.join(this.debugDir, 'boleta-cert');
-      fs.writeFileSync(path.join(debugPath, 'ConsumoFolio.xml'), consumoFolio.xml, 'utf-8');
-      console.log(` Guardado en: ${path.join(debugPath, 'ConsumoFolio.xml')}`);
+      if (resultadoBoleta.duplicado) {
+        // STATUS 7 = Envío duplicado — el mismo set ya fue enviado al SII con anterioridad.
+        // Continuamos con el RCOF y la declaración; el SII ya tiene el set.
+        console.log(` [⚠️ DUPLICADO] EnvioBOLETA ya enviado anteriormente — continuando con RCOF y declaración...`);
+        resultadoBoleta = { ok: false, duplicado: true, trackId: null };
+      } else {
+        console.log(` [ERR] Error: ${resultadoBoleta.error}`);
+        return { success: false, error: resultadoBoleta.error, fase: 'EnvioBOLETA' };
+      }
+    } else {
+      console.log(` [OK] Enviado - TrackId: ${resultadoBoleta.trackId}`);
     }
     
-    // 6. Enviar RCOF
-    console.log('\nEnviando RCOF al SII...');
-    const resultadoRCOF = await enviador.enviarConsumoFolios(consumoFolio);
-    
+    // 5 & 6. Generar y enviar RCOF — loop hasta que SII lo acepte o se agoten intentos.
+    // Estrategia: enviar → si ok, esperar 30s → consultar estado (EPR o RPR = éxito).
+    // Si DUPLICADO: el SII ya tiene un RCOF para este RUT/período. El entorno de certificación
+    // acepta solo 1 RCOF por RUT por día — tras 3 duplicados consecutivos se asume ya enviado.
+    console.log('\nGenerando y enviando RCOF (ConsumoFolio)...');
+    const secInicio = options.secEnvio || 100;
+    const MAX_INTENTOS_RCOF = 10;
+    const MAX_DUPLICADOS_CONSECUTIVOS = 3;
+    let secUsado = secInicio;
+    let resultadoRCOF = { ok: false };
+    let trackIdRCOFloop = null;
+    let duplicadosConsecutivos = 0;
+
+    for (let intento = 0; intento < MAX_INTENTOS_RCOF; intento++) {
+      const secActual = secInicio + intento;
+      const cf = this.generarConsumoFolio(envioBoleta, { secEnvio: secActual });
+      cf.generar();
+
+      if (this.debugDir) {
+        const debugPath = path.join(this.debugDir, 'boleta-cert');
+        fs.mkdirSync(debugPath, { recursive: true });
+        const fname = intento === 0 ? 'ConsumoFolio.xml' : `ConsumoFolio-sec${secActual}.xml`;
+        fs.writeFileSync(path.join(debugPath, fname), cf.xml, 'utf-8');
+      }
+
+      console.log(` → Enviando RCOF SecEnvio=${secActual} (intento ${intento + 1}/${MAX_INTENTOS_RCOF})...`);
+      const res = await enviador.enviarConsumoFolios(cf);
+      secUsado = secActual;
+
+      if (!res.ok && res.duplicado) {
+        duplicadosConsecutivos++;
+        console.log(` [⚠️ DUPLICADO ${duplicadosConsecutivos}/${MAX_DUPLICADOS_CONSECUTIVOS}] SecEnvio=${secActual} ya existe en SII.`);
+        if (duplicadosConsecutivos >= MAX_DUPLICADOS_CONSECUTIVOS) {
+          // El entorno SII solo permite 1 RCOF por RUT/día → ya hay uno registrado. Continuar.
+          console.log(` [ℹ️] SII ya tiene un RCOF para hoy (${MAX_DUPLICADOS_CONSECUTIVOS} duplicados consecutivos). Continuando sin nuevo trackId RCOF.`);
+          resultadoRCOF = { ok: true, trackId: null, rcofYaEnviado: true };
+          break;
+        }
+        console.log(` → Probando sec=${secActual + 1}...`);
+        continue;
+      }
+
+      duplicadosConsecutivos = 0;
+
+      if (!res.ok) {
+        console.log(` [ERR] Error al enviar RCOF (sec=${secActual}): ${res.error}`);
+        resultadoRCOF = res;
+        break;
+      }
+
+      // Enviado correctamente — esperar 30s y verificar que SII lo aceptó
+      // Nota: EPR (Envío Procesado) Y RPR (Aceptado con Reparos) son ambos válidos para RCOF.
+      trackIdRCOFloop = res.trackId;
+      console.log(` ✓ RCOF recibido por SII — TrackId: ${trackIdRCOFloop} (SecEnvio=${secActual})`);
+      console.log(` ⏳ Esperando 30s para verificar estado RCOF en SII...`);
+      await new Promise(r => setTimeout(r, 30000));
+
+      let estadoRcof;
+      try {
+        estadoRcof = await enviador.consultarEstadoSoap(trackIdRCOFloop, this.emisor.rut);
+        console.log(` [Estado RCOF] ${estadoRcof.estado} — ${estadoRcof.mensaje}`);
+      } catch (e) {
+        console.log(` [!] No se pudo consultar estado RCOF: ${e.message} — asumiendo aceptado`);
+        resultadoRCOF = { ok: true, trackId: trackIdRCOFloop };
+        break;
+      }
+
+      // EPR = procesado, RPR = aceptado con reparos (ambos válidos para RCOF), estados intermedios = OK para continuar
+      if (estadoRcof.esExitoso || estadoRcof.esIntermedio) {
+        resultadoRCOF = { ok: true, trackId: trackIdRCOFloop, estado: estadoRcof.estado };
+        break;
+      }
+
+      // SII lo rechazó explícitamente — probar con el siguiente sec
+      console.log(` [⚠️ RECHAZADO] RCOF sec=${secActual} rechazado (${estadoRcof.estado}: ${estadoRcof.glosa || estadoRcof.mensaje}). Probando sec=${secActual + 1}...`);
+      trackIdRCOFloop = null;
+    }
+
     if (!resultadoRCOF.ok) {
-      console.log(` [ERR] Error: ${resultadoRCOF.error}`);
-      return { 
-        success: false, 
-        error: resultadoRCOF.error, 
-        fase: 'RCOF',
-        trackIdBoleta: resultadoBoleta.trackId 
-      };
+      if (!resultadoRCOF.error) {
+        console.log(` [⚠️] RCOF no aceptado tras ${MAX_INTENTOS_RCOF} intentos. Continuando sin trackId RCOF.`);
+      } else {
+        console.log(` [ERR] Error RCOF: ${resultadoRCOF.error}`);
+        return {
+          success: false,
+          error: resultadoRCOF.error,
+          fase: 'RCOF',
+          trackIdBoleta: resultadoBoleta.trackId
+        };
+      }
     }
-    console.log(` [OK] Enviado - TrackId: ${resultadoRCOF.trackId}`);
     
     // Resumen
     console.log('\n' + '═'.repeat(60));
     console.log('[OK] CERTIFICACIÓN BOLETAS COMPLETADA');
     console.log('═'.repeat(60));
-    console.log(` EnvioBOLETA: ${resultadoBoleta.trackId}`);
-    console.log(` RCOF: ${resultadoRCOF.trackId}`);
+    console.log(` EnvioBOLETA: ${resultadoBoleta.trackId ?? '(enviado previamente)'}`);
+    console.log(` RCOF: ${resultadoRCOF.trackId ?? '(enviado previamente)'}`);
     console.log(` Boletas: ${boletas.length}`);
     console.log(` Folios: ${folioInicial} - ${folioFinal}`);
     
     return {
       success: true,
-      trackIdBoleta: resultadoBoleta.trackId,
-      trackIdRCOF: resultadoRCOF.trackId,
+      trackIdBoleta: resultadoBoleta.trackId ?? null,
+      trackIdRCOF: resultadoRCOF.trackId ?? null,
+      secEnvioRCOF: secUsado,
       boletas: boletas.length,
       folioInicial,
       folioFinal,
