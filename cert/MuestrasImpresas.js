@@ -20,7 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const { XMLParser, XMLBuilder } = require('fast-xml-parser');
 const bwipjs = require('bwip-js');
-const puppeteer = require('puppeteer');
+const { launchBrowser } = require('../utils/browser');
 
 // Usar constantes del core
 const {
@@ -485,7 +485,7 @@ class MuestrasImpresas {
   }
 
   /**
-   * Genera PDF desde HTML
+   * Genera PDF desde HTML y lo escribe a disco.
    * @private
    */
   async _generarPdf({ html, outputPath, browser }) {
@@ -499,6 +499,34 @@ class MuestrasImpresas {
       margin: { top: '5mm', right: '5mm', bottom: '5mm', left: '5mm' },
     });
     await page.close();
+  }
+
+  /**
+   * Genera un PDF desde HTML y devuelve el contenido como Buffer (sin escribir a disco).
+   * Útil para servir el PDF directamente desde una respuesta HTTP.
+   *
+   * @param {string} html - HTML a convertir a PDF
+   * @param {object} [opts]
+   * @param {string} [opts.width='215mm']
+   * @param {string} [opts.height='280mm']
+   * @returns {Promise<Buffer>}
+   */
+  async generarPdfBuffer(html, opts = {}) {
+    const browser = await launchBrowser();
+    try {
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: 'networkidle0' });
+      const pdfBuffer = await page.pdf({
+        printBackground: true,
+        width: opts.width ?? '215mm',
+        height: opts.height ?? '280mm',
+        margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' },
+      });
+      await page.close();
+      return Buffer.from(pdfBuffer);
+    } finally {
+      await browser.close();
+    }
   }
 
   /**
@@ -524,7 +552,7 @@ class MuestrasImpresas {
     console.log(` SET-PRUEBAS: ${pruebasDir}`);
     console.log(` SET-SIMULACION: ${simulacionDir}`);
 
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await launchBrowser();
     const resultado = {
       success: true,
       totalDocs: 0,
