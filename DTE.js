@@ -71,8 +71,9 @@ class DTE {
   
   _convertirDatosSimplificados(d) {
     const esExenta = d.tipo === 41;
-    const { detalle, mntBruto, mntExento } = this._procesarItems(d.items, esExenta);
-    const totales = this._calcularTotales(mntBruto, mntExento, esExenta);
+    const precioConIva = d.precioConIva === true;
+    const { detalle, mntNeto, mntExento } = this._procesarItems(d.items, esExenta, precioConIva);
+    const totales = this._calcularTotales(mntNeto, mntExento, esExenta);
     
     const resultado = {
       Encabezado: {
@@ -86,6 +87,7 @@ class DTE {
         Receptor: {
           RUTRecep: d.receptor?.RUTRecep ?? '66666666-6',
           RznSocRecep: sanitizeSiiText(d.receptor?.RznSocRecep ?? 'Consumidor Final'),
+          ...(d.receptor?.GiroRecep ? { GiroRecep: d.receptor.GiroRecep } : {}),
           DirRecep: sanitizeSiiText(d.receptor?.DirRecep ?? 'Sin Direccion'),
           CmnaRecep: d.receptor?.CmnaRecep ?? 'Santiago',
         },
@@ -105,24 +107,29 @@ class DTE {
     return resultado;
   }
   
-  _procesarItems(items, esExenta) {
-    let mntBruto = 0;
+  _procesarItems(items, esExenta, precioConIva = false) {
+    let mntNeto = 0;
     let mntExento = 0;
     
     const detalle = items.map((item, idx) => {
       const qty = item.QtyItem || 1;
-      const prc = item.PrcItem;
+      const esItemExento = esExenta || item.IndExe === 1;
+      // Si precioConIva=true y el ítem no es exento, el PrcItem viene con IVA incluido
+      // (precio al consumidor del POS) → convertir a neto dividiendo por 1+TASA_IVA.
+      const prc = (precioConIva && !esItemExento)
+        ? Math.round(item.PrcItem / (1 + TASA_IVA / 100))
+        : item.PrcItem;
       const montoItem = Math.round(qty * prc);
       
-      if (esExenta || item.IndExe === 1) {
+      if (esItemExento) {
         mntExento += montoItem;
       } else {
-        mntBruto += montoItem;
+        mntNeto += montoItem;
       }
       
       const det = {
         NroLinDet: idx + 1,
-        ...(esExenta || item.IndExe ? { IndExe: 1 } : {}),
+        ...(esItemExento ? { IndExe: 1 } : {}),
         NmbItem: sanitizeSiiText(item.NmbItem),
         QtyItem: qty,
         ...(item.UnmdItem ? { UnmdItem: item.UnmdItem } : {}),
@@ -133,18 +140,21 @@ class DTE {
       return det;
     });
     
-    return { detalle, mntBruto, mntExento };
+    return { detalle, mntNeto, mntExento };
   }
   
-  _calcularTotales(mntBruto, mntExento, esExenta) {
-    const mntNeto = esExenta ? 0 : Math.round(mntBruto / (1 + (TASA_IVA / 100)));
-    const iva = esExenta ? 0 : (mntBruto - mntNeto);
-    const mntTotal = mntNeto + iva + mntExento;
+  // PrcItem = precio neto unitario (o precio con IVA si se usa precioConIva:true).
+  // IVA = mntNeto * TasaIVA.
+  _calcularTotales(mntNeto, mntExento, esExenta) {
+    const neto = esExenta ? 0 : mntNeto;
+    const iva  = esExenta ? 0 : Math.round(neto * TASA_IVA / 100);
+    const mntTotal = neto + iva + mntExento;
     
     const totales = {};
-    if (mntNeto > 0) totales.MntNeto = mntNeto;
+    if (neto > 0) totales.MntNeto = neto;
+    if (neto > 0) totales.TasaIVA = TASA_IVA;  // requerido en facturas
     if (mntExento > 0) totales.MntExe = mntExento;
-    if (mntNeto > 0) totales.IVA = iva;
+    if (neto > 0) totales.IVA = iva;
     totales.MntTotal = mntTotal;
     
     return totales;

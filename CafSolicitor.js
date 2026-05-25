@@ -200,6 +200,11 @@ class CafSolicitor {
         return { success: false, error: 'El SII devolvió página de autenticación' };
       }
 
+      // Detectar error de límite diario del SII
+      if (response.body && response.body.includes('menor o igual al m')) {
+        return { success: false, error: 'Límite diario de folios SII agotado (MAX_AUTOR). Reintenta mañana.' };
+      }
+
       return { success: false, error: 'No se obtuvo CAF en la respuesta' };
 
     } catch (err) {
@@ -233,11 +238,15 @@ class CafSolicitor {
       // Selección de tipo de documento
       if (currentHtml.includes('COD_DOCTO')) {
         const selectInputs = SiiSession.extractInputValues(currentHtml);
+        // Respetar MAX_AUTOR que el SII informa en el formulario.
+        const maxAutorSelect = parseInt(selectInputs.MAX_AUTOR || '999', 10);
+        const cantSelect = Math.min(cantidad, maxAutorSelect);
         const selectFields = {
           ...selectInputs,
           RUT_EMP: rut,
           DV_EMP: dv,
           COD_DOCTO: tipoDte,
+          CANT_DOCTOS: cantSelect,
         };
 
         response = await this.session.submitForm('/cvc_cgi/dte/of_solicita_folios_dcto', selectFields);
@@ -262,12 +271,15 @@ class CafSolicitor {
     const formAction3 = SiiSession.extractFormAction(currentHtml) || '/cvc_cgi/dte/of_confirma_folio';
     const inputs3 = SiiSession.extractInputValues(currentHtml);
     
+    // Respetar MAX_AUTOR si viene en este paso también
+    const maxAutorStep3 = parseInt(inputs3.MAX_AUTOR || '999', 10);
+    const cantStep3 = Math.min(cantidad, maxAutorStep3);
     const step3Fields = {
       ...inputs3,
       RUT_EMP: rut,
       DV_EMP: dv,
       COD_DOCTO: tipoDte,
-      CANT_DOCTOS: cantidad,
+      CANT_DOCTOS: cantStep3,
       ACEPTAR: 'Solicitar Numeración',
     };
 
@@ -321,9 +333,17 @@ class CafSolicitor {
     
     const formAction = SiiSession.extractFormAction(currentHtml) || '/cvc_cgi/dte/of_genera_folio';
     const inputs = SiiSession.extractInputValues(currentHtml);
-    
+
+    // Respetar el máximo autorizado por el SII (puede ser menor a lo solicitado)
+    const maxAutor = parseInt(inputs.MAX_AUTOR || '999', 10);
+    const folioIni = parseInt(inputs.FOLIO_INI || '1', 10);
+    const cantOriginal = parseInt(inputs.CANT_DOCTOS || '1', 10);
+    const cantReal = Math.min(cantOriginal, maxAutor);
+
     const fields = {
       ...inputs,
+      CANT_DOCTOS: String(cantReal),
+      FOLIO_FIN: String(folioIni + cantReal - 1),
       ACEPTAR: 'Obtener Folios',
     };
 
