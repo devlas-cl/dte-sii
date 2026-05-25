@@ -121,7 +121,9 @@ class SiiPortalAuth {
       if (cookieStr) options.headers['Cookie'] = cookieStr;
 
       if (body) {
-        options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        if (!options.headers['Content-Type']) {
+          options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        }
         options.headers['Content-Length'] = Buffer.byteLength(body);
       }
 
@@ -492,6 +494,117 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
       nro_resol:         nroResol !== null ? parseInt(nroResol, 10) : null,
       fecha_autorizacion: datos['Fecha Autorización'] || null,
     };
+  }
+
+  // ─── Consemitidos (www4.sii.cl/consemitidosinternetui) ───────────────────────
+
+  /**
+   * Navega a consemitidosinternetui para obtener el TOKEN de sesión.
+   * El TOKEN es el mismo valor que CSESSIONID y va como conversationId en el body.
+   * @private
+   */
+  async _obtenerTokenConsemitidos(cookieJar) {
+    await this._request('https://www4.sii.cl/consemitidosinternetui/', { cookieJar });
+    const token = cookieJar['TOKEN'] || cookieJar['CSESSIONID'];
+    if (!token) {
+      throw new Error('SiiPortalAuth: no se pudo obtener TOKEN de sesión de consemitidosinternetui');
+    }
+    return token;
+  }
+
+  /**
+   * Llama a un endpoint JSON de la API consemitidosinternetui.
+   * @private
+   */
+  async _callConsemitidos(method, data, token, cookieJar) {
+    const body = JSON.stringify({
+      metaData: {
+        namespace:      `cl.sii.sdi.lob.diii.consemitidos.data.api.interfaces.FacadeService/${method}`,
+        conversationId: token,
+        transactionId:  crypto.randomUUID(),
+        page:           null,
+      },
+      data,
+    });
+    const res = await this._request(
+      `https://www4.sii.cl/consemitidosinternetui/services/data/facadeService/${method}`,
+      {
+        method:  'POST',
+        body,
+        cookieJar,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept':       'application/json, text/plain, */*',
+          'Origin':       'https://www4.sii.cl',
+          'Referer':      'https://www4.sii.cl/consemitidosinternetui/',
+        },
+      }
+    );
+    try {
+      return JSON.parse(res.body);
+    } catch {
+      throw new Error(`SiiPortalAuth: respuesta no-JSON de ${method}: ${res.body.slice(0, 300)}`);
+    }
+  }
+
+  /**
+   * Obtiene el detalle de DTEs emitidos o recibidos desde www4.sii.cl.
+   *
+   * @param {string} rut       - RUT sin DV (ej: "78206276")
+   * @param {string} dv        - DV (ej: "K")
+   * @param {string} periodo   - Período YYYY-MM (ej: "2026-05")
+   * @param {number} operacion - 1 = compras / recibidos, 2 = ventas / emitidos
+   * @param {Object} [cookieJar] - Sesión ya autenticada (opcional)
+   * @returns {Promise<{ resumen: Array, detalles: Array }>}
+   */
+  async obtenerDetalleDtes(rut, dv, periodo, operacion = 2, cookieJar = null) {
+    const jar   = cookieJar || await this.autenticar();
+    const token = await this._obtenerTokenConsemitidos(jar);
+
+    // Mapeo de convención interna → convención SII:
+    //   interno: 1 = compras/recibidos,  2 = ventas/emitidos
+    //   SII:     1 = emitidos,            2 = recibidos
+    const siiOperacion = operacion === 2 ? 1 : 2;
+    const esEmitidos   = siiOperacion === 1;
+
+    // 1. Resumen mensual — saber qué tipos de DTE hay en el período
+    const resumenResp = await this._callConsemitidos('getResumen', {
+      periodo,
+      rutContribuyente: rut,
+      dvContribuyente:  dv,
+      operacion: siiOperacion,
+    }, token, jar);
+
+    const resumen = resumenResp.data?.resumenDte ?? [];
+    if (resumen.length === 0) return { resumen: [], detalles: [] };
+
+    // 2. Detalle por cada tipo DTE encontrado en el resumen
+    const detallesArr = await Promise.all(
+      resumen.map(async (t) => {
+        // Para emitidos tipo 33/34, el SII expone un método específico
+        const metodo = esEmitidos && (t.tipoDoc === 33 || t.tipoDoc === 34)
+          ? 'getDetalleEmitidos3334'
+          : 'getDetalleRecibidos';
+        const resp = await this._callConsemitidos(metodo, {
+          tipoDoc:    String(t.tipoDoc),
+          rut,
+          dv,
+          periodo,
+          operacion:  siiOperacion,
+          derrCodigo: String(t.tipoDoc),
+          refNCD:     '0',
+        }, token, jar);
+        const items = resp.dataResp?.detalles ?? [];
+        // Completar tipoDoc y tipoDocDesc desde el resumen si no vienen en el detalle
+        return items.map((d) => ({
+          ...d,
+          tipoDoc:     t.tipoDoc,
+          tipoDocDesc: d.descTipoDoc || t.tipoDocDesc,
+        }));
+      })
+    );
+
+    return { resumen, detalles: detallesArr.flat() };
   }
 }
 

@@ -35,6 +35,9 @@ const LibroGuia = require('./LibroGuia');
 // Helpers para certificación
 const CertFolioHelper = require('./cert/CertFolioHelper');
 
+// WS Aceptación/Reclamo DTE (v2.9.0)
+const WsReclamo = require('./WsReclamo');
+
 const utils = require('./utils');
 
 // Re-exports de utilidades para compatibilidad
@@ -239,6 +242,11 @@ module.exports = {
   // Helpers para certificación
   // ─────────────────────────────────────────
   CertFolioHelper,
+
+  // ─────────────────────────────────────────
+  // WS Aceptación/Reclamo DTE (v2.9.0)
+  // ─────────────────────────────────────────
+  WsReclamo,
 
   // ─────────────────────────────────────────
   // UTILIDADES (todo el namespace)

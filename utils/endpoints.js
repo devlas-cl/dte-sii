@@ -52,6 +52,89 @@ const SOAP_ENDPOINTS = {
 };
 
 /**
+ * Web Service SOAP oficial — Aceptación/Reclamo de DTE recibido
+ * Fuente: "WS Consulta y Registro de Aceptación/Reclamo a DTE recibido" v1.2, 07/08/2017, SII
+ *
+ * Métodos disponibles:
+ *   ingresarAceptacionReclamoDoc(rutEmisor, dvEmisor, tipoDoc, folio, accionDoc)
+ *     accionDoc: ACD | ERM | RCD | RFP | RFT
+ *   listarEventosHistDoc(rutEmisor, dvEmisor, tipoDoc, folio)
+ *   consultarDocDteCedible(rutEmisor, dvEmisor, tipoDoc, folio)
+ *   consultarFechaRecepcionSii(rutEmisor, dvEmisor, tipoDoc, folio)
+ *
+ * Autenticación: token SII vía cookie `TOKEN=...` (mismo flujo seed/token de SOAP_ENDPOINTS,
+ * NO usa cookies NETSCAPE_LIVEWIRE del portal). Ver SiiSession.js getToken().
+ *
+ * Respuestas:
+ *   ingresarAceptacionReclamoDoc → { codResp: number, descResp: string }
+ *   listarEventosHistDoc         → { codResp, descResp, listaEventosDoc: [{ codEvento, descEvento,
+ *                                    rutResponsable, dvResponsable, fechaEvento }] }
+ *                                    codEvento extra (solo en lista): NCA | ENC
+ *   consultarDocDteCedible       → { codResp: number, descResp: string }
+ *   consultarFechaRecepcionSii   → string VARCHAR(100), ej: '21-02-2017 19:02:03'
+ */
+const WSRECLAMO_ENDPOINTS = {
+  certificacion: 'https://ws2.sii.cl/WSREGISTRORECLAMODTECERT/registroreclamodteservice?wsdl',
+  produccion:    'https://ws1.sii.cl/WSREGISTRORECLAMODTE/registroreclamodteservice?wsdl',
+};
+
+/**
+ * Acciones válidas para ingresarAceptacionReclamoDoc
+ */
+const WSRECLAMO_ACCIONES = {
+  ACD: 'Acepta Contenido del Documento',
+  ERM: 'Otorga Recibo de Mercaderías o Servicios',
+  RCD: 'Reclamo al Contenido del Documento',
+  RFP: 'Reclamo por Falta Parcial de Mercaderías',
+  RFT: 'Reclamo por Falta Total de Mercaderías',
+};
+
+/**
+ * Códigos de respuesta compartidos (ingresarAceptacionReclamoDoc + listarEventosHistDoc)
+ * Fuente: WS v1.2, 07/08/2017, tablas de parámetros de salida
+ */
+const WSRECLAMO_CODIGOS = {
+  0:  'Acción Completada OK',
+  1:  'Rut Emisor Erróneo',
+  2:  'Número de Folio Erróneo',
+  3:  'Tipo de documento no corresponde (distinto de 33, 34, 43)',
+  4:  'Acción inválida',
+  5:  'DTE ya está reclamado por XXX (RFP, RFT o RCD)',
+  6:  'No se puede acusar recibo de mercadería de DTE previamente reclamado por XXX (RFP, RFT, RCD)',
+  7:  'Evento registrado previamente',
+  8:  'Pasados 8 días después de la recepción no es posible registrar reclamos o eventos',
+  9:  'No existen registros de acuerdo a los parámetros ingresados',
+  10: 'Documento no emitido y/o recibido en el SII desde el 14 de enero de 2017 en adelante',
+  11: 'No se puede reclamar DTE previamente aceptado',
+  12: 'No se puede dar por aceptado DTE previamente rechazado por XXX (RFP, RFT, RCD)',
+  13: 'No se puede reclamar DTE previamente registrado como acuso recibo mercadería',
+  14: 'Acción autorizada sólo para empresa receptora o emisora',
+  15: 'Listado de eventos del documento',
+  16: 'Documento no presenta eventos de reclamos o acuse de recibo',
+  17: 'Acción autorizada solo para empresa receptora',
+  18: 'Documento no ha sido recibido',
+  19: 'Reclamo de mercaderías ya realizado',
+  '-1': 'Error Interno — Rut Receptor debe reintentar más tarde',
+};
+
+/**
+ * Códigos de respuesta exclusivos de consultarDocDteCedible
+ * Fuente: WS v1.2, tabla parámetros de salida consultarDocDteCedible
+ */
+const WSRECLAMO_CODIGOS_CEDIBLE = {
+  1:  'Rut Emisor Erróneo',
+  2:  'Número de Folio Erróneo',
+  10: 'Documento no emitido y/o recibido en el SII desde el 14 de enero de 2017 en adelante',
+  18: 'Documento no ha sido recibido',
+  20: 'Tipo de documento no es cedible',
+  21: 'DTE No cedible — referenciado por nota de crédito de anulación del emisor dentro de los primeros 8 días',
+  22: 'No existe registro de reclamo o de recepción de mercadería o servicios',
+  23: 'DTE Cedible, sin reclamos',
+  24: 'DTE No Cedible — reclamado por el receptor',
+  25: 'DTE Cedible — habiendo pasado 8 días se entiende dado acuse de recibo',
+};
+
+/**
  * Endpoints REST para Boletas Electrónicas
  */
 const REST_ENDPOINTS = {
@@ -213,6 +296,10 @@ module.exports = {
   SOAP_ENDPOINTS,
   REST_ENDPOINTS,
   CERT_ENDPOINTS,
+  WSRECLAMO_ENDPOINTS,
+  WSRECLAMO_ACCIONES,
+  WSRECLAMO_CODIGOS,
+  WSRECLAMO_CODIGOS_CEDIBLE,
   
   // Funciones
   getHost,
