@@ -265,6 +265,76 @@ class SiiSession {
   }
 
   /**
+   * Cierra la sesión activa en el SII para liberar el cupo de sesiones.
+   * Es seguro llamar aunque no haya sesión activa.
+   */
+  async logout() {
+    if (!this.cookieJar) return;
+    // El SII usa estos endpoints según el tipo de autenticación.
+    // Intentamos ambos; ignoramos errores.
+    const logoutUrls = [
+      `https://${this.baseHost}/cgi_AUT2000/autLogout.cgi`,
+      'https://www.sii.cl/AUT2000/autLogout.cgi',
+      'https://herculesr.sii.cl/cgi_AUT2000/autLogout.cgi',
+    ];
+    for (const url of logoutUrls) {
+      try {
+        await this.request(url, { method: 'GET' });
+      } catch (_) {}
+    }
+    this.cookieJar = '';
+  }
+
+  /**
+   * Detecta la página de "demasiadas sesiones" y, si el SII ofrece un form
+   * para cerrar las sesiones anteriores, lo envía automáticamente.
+   * Devuelve true si se envió el form de cierre (hay que reintentar la sesión).
+   * @private
+   */
+  async _tryForceCloseSessions(body) {
+    if (!body || !body.includes('superado el m')) return false;
+
+    // Guardar HTML para diagnóstico
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const dbgDir = path.resolve(__dirname, '..', 'devlas-cloud-api-node', 'debug', 'sii-sessions');
+      fs.mkdirSync(dbgDir, { recursive: true });
+      fs.writeFileSync(path.join(dbgDir, `demasiadas-sesiones-${Date.now()}.html`), body, 'utf-8');
+    } catch (_) {}
+
+    // El SII a veces incluye un form o link para cerrar sesiones anteriores
+    // Buscamos: action con "CierraAnt", "cerrar", "logout" o "Anular"
+    const formActionMatch = body.match(/<form[^>]+action=["']([^"']*(?:CierraAnt|cerrar|Logout|anular)[^"']*)/i);
+    if (formActionMatch) {
+      const closeUrl = formActionMatch[1];
+      const inputs = SiiSession.extractInputValues(body);
+      console.warn(`[SiiSession] Detectadas demasiadas sesiones — cerrando sesiones anteriores en ${closeUrl}...`);
+      try {
+        await this.submitForm(closeUrl, { ...inputs, ACEPTAR: 'Aceptar' });
+        return true;
+      } catch (e) {
+        console.warn(`[SiiSession] No se pudo cerrar sesiones anteriores: ${e.message}`);
+      }
+    }
+
+    // Alternativa: link directo (href) a CierraAnt o similar
+    const linkMatch = body.match(/href=["']([^"']*CierraAnt[^"']*)/i);
+    if (linkMatch) {
+      const closeUrl = new URL(linkMatch[1], `https://${this.baseHost}`).toString();
+      console.warn(`[SiiSession] Cerrando sesiones anteriores via GET ${closeUrl}...`);
+      try {
+        await this.request(closeUrl, { method: 'GET' });
+        return true;
+      } catch (e) {
+        console.warn(`[SiiSession] No se pudo cerrar sesiones anteriores: ${e.message}`);
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * Asegura una sesión autenticada para acceder a una página
    * @param {string} targetPath - Ruta del recurso
    * @returns {Promise<Object>}
@@ -278,9 +348,25 @@ class SiiSession {
 
     // Detectar bloqueo por demasiadas sesiones
     if (response.body && response.body.includes('superado el m')) {
-      const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
-      console.error(`\n[ERR] ${errorMsg}\n`);
-      throw new Error(errorMsg);
+      // Intentar cerrar sesiones anteriores automáticamente si el SII lo ofrece
+      const closed = await this._tryForceCloseSessions(response.body);
+      if (closed) {
+        // Reintentar la sesión después de cerrar las anteriores
+        console.warn('[SiiSession] Sesiones anteriores cerradas — reintentando autenticación...');
+        response = await this.request(targetUrl, { method: 'GET' });
+        const redirected2 = await this.followRedirects(response);
+        response = redirected2.response;
+        // Si sigue con demasiadas sesiones, lanzar error
+        if (response.body && response.body.includes('superado el m')) {
+          const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
+          console.error(`\n[ERR] ${errorMsg}\n`);
+          throw new Error(errorMsg);
+        }
+      } else {
+        const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
+        console.error(`\n[ERR] ${errorMsg}\n`);
+        throw new Error(errorMsg);
+      }
     }
 
     // Si requiere autenticación
@@ -291,9 +377,23 @@ class SiiSession {
         
         // Verificar si el login resultó en bloqueo por sesiones
         if (response.body && response.body.includes('superado el m')) {
-          const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
-          console.error(`\n[ERR] ${errorMsg}\n`);
-          throw new Error(errorMsg);
+          // Intentar cerrar sesiones anteriores automáticamente
+          const closed = await this._tryForceCloseSessions(response.body);
+          if (closed) {
+            console.warn('[SiiSession] Sesiones anteriores cerradas post-login — reintentando...');
+            const retry = await this.request(targetUrl, { method: 'GET' });
+            const redirected3 = await this.followRedirects(retry);
+            response = redirected3.response;
+            if (response.body && response.body.includes('superado el m')) {
+              const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
+              console.error(`\n[ERR] ${errorMsg}\n`);
+              throw new Error(errorMsg);
+            }
+          } else {
+            const errorMsg = 'SII: Demasiadas sesiones abiertas. Espera ~30 min o cierra sesión manualmente en el portal SII.';
+            console.error(`\n[ERR] ${errorMsg}\n`);
+            throw new Error(errorMsg);
+          }
         }
       }
     }

@@ -18,6 +18,15 @@ const SiiSession = require('./SiiSession');
 const { splitRut } = require('./utils/rut');
 
 /**
+ * Registro global de sesiones SII (singleton por ambiente+rut).
+ * Permite reutilizar la misma sesión HTTP entre múltiples llamadas a CafSolicitor
+ * sin abrir una nueva sesión en el portal del SII cada vez.
+ * Clave: `${ambiente}::${rutEmisor}`
+ * @type {Map<string, SiiSession>}
+ */
+const _sessionRegistry = new Map();
+
+/**
  * Clase para solicitar CAFs al SII
  */
 class CafSolicitor {
@@ -28,7 +37,6 @@ class CafSolicitor {
    * @param {string} options.pfxPath - Ruta absoluta al certificado PFX
    * @param {string} options.pfxPassword - Contraseña del certificado
    * @param {string} [options.baseDir] - Directorio base para guardar archivos
-   * @param {string} [options.sessionPath] - Ruta al archivo de sesión compartida
    * @param {string} [options.runStamp] - Timestamp de la ejecución
    */
   constructor(options = {}) {
@@ -48,22 +56,22 @@ class CafSolicitor {
     this.ambiente = options.ambiente.toLowerCase();
     this.rutEmisor = options.rutEmisor;
     this.baseDir = options.baseDir || path.resolve(__dirname, '..', '..');
-    this.sessionPath = options.sessionPath || null;
     this.runStamp = options.runStamp || new Date().toISOString().replace(/[:.]/g, '-');
 
-    // Crear SiiSession para manejar HTTP y cookies
-    this.session = new SiiSession({
-      ambiente: this.ambiente,
-      pfxPath: options.pfxPath,
-      pfxPassword: options.pfxPassword,
-    });
-
-    // Cargar sesión compartida si existe
-    if (this.sessionPath) {
-      const loaded = this.session.loadSession(this.sessionPath);
-      if (loaded) {
-        console.log('[CafSolicitor] ✓ Usando sesión compartida');
-      }
+    // Reutilizar sesión SII global si ya existe para este ambiente+rut.
+    // Esto evita abrir múltiples sesiones en el portal del SII.
+    const sessionKey = `${this.ambiente}::${this.rutEmisor}`;
+    if (_sessionRegistry.has(sessionKey)) {
+      this.session = _sessionRegistry.get(sessionKey);
+      console.log('[CafSolicitor] ♻️ Reutilizando sesión SII en memoria');
+    } else {
+      this.session = new SiiSession({
+        ambiente: this.ambiente,
+        pfxPath: options.pfxPath,
+        pfxPassword: options.pfxPassword,
+      });
+      _sessionRegistry.set(sessionKey, this.session);
+      console.log('[CafSolicitor] 🔑 Nueva sesión SII registrada para', sessionKey);
     }
   }
 
@@ -193,16 +201,73 @@ class CafSolicitor {
       // Verificar si obtuvimos el CAF
       if (response.body && response.body.includes('<AUTORIZACION')) {
         const cafPath = this._saveCafOrganized(response.body, tipoDte);
-        return { success: true, cafPath, xml: response.body };
+        return { success: true, cafPath, xml: response.body, maxAutor: this._lastMaxAutor ?? cantidad };
       }
 
       if (response.body && response.body.includes('Autenticaci')) {
         return { success: false, error: 'El SII devolvió página de autenticación' };
       }
 
-      // Detectar error de límite diario del SII
+      // Detectar error de MAX_AUTOR: "La cantidad de documentos a timbrar debe ser menor o igual al máximo autorizado"
+      // Puede ocurrir cuando el MAX_AUTOR efectivo del SII es menor al mostrado en el formulario
+      // (ej: ya hay un timbraje del mismo día que consume parte del cupo diario).
+      // Solución: reintentar con cantidad=1 para garantizar obtener al menos 1 folio.
       if (response.body && response.body.includes('menor o igual al m')) {
-        return { success: false, error: 'Límite diario de folios SII agotado (MAX_AUTOR). Reintenta mañana.' };
+        if (cantidad > 1) {
+          console.warn(`[CafSolicitor] MAX_AUTOR excedido para ${cantidad} folios — reintentando con 1 folio...`);
+          // No limpiar cookieJar: el error es del formulario, no de la sesión.
+          // Reutilizar la sesión activa evita abrir una nueva y acumular sesiones en el SII.
+          this.runStamp = new Date().toISOString().replace(/[:.]/g, '-');
+          return this.solicitar({ tipoDte, cantidad: 1 });
+        }
+        return { success: false, error: 'Cantidad de folios excede el máximo que SII autoriza por solicitud para este tipo de documento (MAX_AUTOR). Verifica el estado de timbraje de tu empresa en el portal SII.' };
+      }
+
+      // Detectar rango ya autorizado — el CAF existe en SII pero no fue capturado
+      // (ocurre cuando una solicitud previa tuvo éxito en SII pero falló en la red al devolver el XML,
+      // o cuando of_genera_archivo devolvió DTE-OFGA y el SII registró el rango igualmente)
+      const finalBody = response.body || '';
+      if (finalBody.includes('ya fue autorizado el rango desde') || finalBody.includes('ya fue autorizado')) {
+        const m = finalBody.match(/ya fue autorizado el rango desde\s+(\d+)\s+hasta\s+(\d+)/i);
+        const desde = m ? parseInt(m[1]) : null;
+        const hasta  = m ? parseInt(m[2]) : null;
+
+        // Intentar recuperar el XML directamente enviando los datos del rango a of_genera_archivo.
+        // El SII tiene el CAF autorizado en su sistema; si enviamos los campos correctos
+        // puede devolver el XML aunque la sesión de timbraje original ya terminó.
+        if (desde != null && hasta != null) {
+          console.warn(`[CafSolicitor] Rango ${desde}-${hasta} ya autorizado — intentando recuperar XML desde of_genera_archivo...`);
+          const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+          const recoveryFields = {
+            RUT_EMP: rut,
+            DV_EMP: dv,
+            COD_DOCTO: String(tipoDte),
+            FOLIO_INI: String(desde),
+            FOLIO_FIN: String(hasta),
+            FECHA: today,
+            ACEPTAR: 'AQUI',
+          };
+          try {
+            const recoveryResponse = await this.session.submitForm('/cvc_cgi/dte/of_genera_archivo', recoveryFields);
+            const recoveryBody = recoveryResponse.body || '';
+            this._saveDebug(debugDir, 'recovery.xml', recoveryBody);
+            if (recoveryBody.includes('<AUTORIZACION')) {
+              console.log(`[CafSolicitor] ✅ CAF recuperado exitosamente para rango ${desde}-${hasta}`);
+              const cafPath = this._saveCafOrganized(recoveryBody, tipoDte);
+              return { success: true, cafPath, xml: recoveryBody, maxAutor: hasta - desde + 1 };
+            }
+            console.warn(`[CafSolicitor] Recuperación de rango ${desde}-${hasta} no devolvió XML (${recoveryBody.substring(0, 80).replace(/\s+/g, ' ')})`);
+          } catch (recoveryErr) {
+            console.warn(`[CafSolicitor] Error al intentar recuperar rango: ${recoveryErr.message}`);
+          }
+        }
+
+        const rangoStr = desde != null && hasta != null ? ` ${desde}-${hasta}` : '';
+        return {
+          success: false,
+          rangoYaAutorizado: desde != null && hasta != null ? { folioDesde: desde, folioHasta: hasta } : null,
+          error: `SII: Ya existe CAF autorizado para el rango${rangoStr}. El XML fue aprobado por SII en una solicitud previa pero no se pudo recuperar automáticamente. Descárgalo manualmente desde el portal SII (Factura Electrónica → Solicitud de Timbraje).`,
+        };
       }
 
       return { success: false, error: 'No se obtuvo CAF en la respuesta' };
@@ -238,15 +303,16 @@ class CafSolicitor {
       // Selección de tipo de documento
       if (currentHtml.includes('COD_DOCTO')) {
         const selectInputs = SiiSession.extractInputValues(currentHtml);
-        // Respetar MAX_AUTOR que el SII informa en el formulario.
-        const maxAutorSelect = parseInt(selectInputs.MAX_AUTOR || '999', 10);
-        const cantSelect = Math.min(cantidad, maxAutorSelect);
+        // NO enviar CANT_DOCTOS aquí — el browser tampoco lo envía en este paso.
+        // Si se envía un número, el SII no incluye MAX_AUTOR ni CONTROL="S" en la
+        // respuesta, lo que causa rechazo silencioso en of_genera_folio más adelante.
+        // El SII fija CANT_DOCTOS automáticamente según MAX_AUTOR al responder.
         const selectFields = {
           ...selectInputs,
           RUT_EMP: rut,
           DV_EMP: dv,
           COD_DOCTO: tipoDte,
-          CANT_DOCTOS: cantSelect,
+          CANT_DOCTOS: '',
         };
 
         response = await this.session.submitForm('/cvc_cgi/dte/of_solicita_folios_dcto', selectFields);
@@ -270,16 +336,19 @@ class CafSolicitor {
     
     const formAction3 = SiiSession.extractFormAction(currentHtml) || '/cvc_cgi/dte/of_confirma_folio';
     const inputs3 = SiiSession.extractInputValues(currentHtml);
-    
-    // Respetar MAX_AUTOR si viene en este paso también
-    const maxAutorStep3 = parseInt(inputs3.MAX_AUTOR || '999', 10);
-    const cantStep3 = Math.min(cantidad, maxAutorStep3);
+
+    // CANT_DOCTOS debe enviarse con un valor <= MAX_AUTOR.
+    // Si se omite o excede MAX_AUTOR, el SII rechaza devolviendo la página de inicio (rechazo silencioso).
+    const maxAutor = parseInt(inputs3.MAX_AUTOR || String(cantidad), 10);
+    const cantReal = Math.min(cantidad, maxAutor);
+    this._lastMaxAutor = maxAutor; // guardado para retornarlo desde solicitar()
+
     const step3Fields = {
       ...inputs3,
       RUT_EMP: rut,
       DV_EMP: dv,
       COD_DOCTO: tipoDte,
-      CANT_DOCTOS: cantStep3,
+      CANT_DOCTOS: String(cantReal),
       ACEPTAR: 'Solicitar Numeración',
     };
 
@@ -351,9 +420,20 @@ class CafSolicitor {
     currentHtml = response.body || '';
     this._saveDebug(debugDir, 'genera.html', currentHtml);
 
+    // El SII rechaza el request si ese rango ya fue autorizado en una solicitud previa
+    // (ocurre en reintentos cuando la primera solicitud llegó a SII pero falló la red al devolver el XML)
+    if (currentHtml.includes('ya fue autorizado')) {
+      const m = currentHtml.match(/ya fue autorizado el rango desde\s+(\d+)\s+hasta\s+(\d+)/i);
+      console.warn(`[CafSolicitor] of_genera_folio: rango ya autorizado${m ? ' ' + m[1] + '-' + m[2] : ''} — el XML existe en SII pero no se obtuvo`);
+      return response;
+    }
+
     // Paso final: of_genera_archivo
     if (!currentHtml.includes('<AUTORIZACION') && currentHtml.includes('of_genera_archivo')) {
-      response = await this._processGeneraArchivo(response, debugDir);
+      // Guardar los inputs del genera.html para poder reintentar of_genera_archivo si falla con DTE-OFGA
+      const generaInputs = SiiSession.extractInputValues(currentHtml);
+      const generaFormAction = SiiSession.extractFormAction(currentHtml) || '/cvc_cgi/dte/of_genera_archivo';
+      response = await this._processGeneraArchivo(response, debugDir, generaInputs, generaFormAction);
     }
 
     return response;
@@ -362,8 +442,12 @@ class CafSolicitor {
   /**
    * Procesa generación de archivo CAF
    * @private
+   * @param {Object} response - Respuesta previa
+   * @param {string} debugDir - Directorio de debug
+   * @param {Object} [retryInputs] - Inputs de genera.html para retry si falla con DTE-OFGA
+   * @param {string} [retryFormAction] - URL de of_genera_archivo para retry
    */
-  async _processGeneraArchivo(response, debugDir) {
+  async _processGeneraArchivo(response, debugDir, retryInputs, retryFormAction) {
     let currentHtml = response.body || '';
     
     const formAction = SiiSession.extractFormAction(currentHtml) || '/cvc_cgi/dte/of_genera_archivo';
@@ -377,6 +461,32 @@ class CafSolicitor {
     response = await this.session.submitForm(formAction, fields);
     currentHtml = response.body || '';
     this._saveDebug(debugDir, 'archivo.xml', currentHtml);
+
+    // El SII a veces devuelve error interno DTE-OFGA (servidor sobrecargado o fallo transitorio).
+    // En ese caso el rango ya fue registrado en SII pero el XML no se generó.
+    // Reintentar el mismo POST hasta 3 veces con delay de 3s antes de rendirse.
+    if (!currentHtml.includes('<AUTORIZACION') && currentHtml.includes('DTE-OFGA')) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const delaySecs = attempt * 3;
+        console.warn(`[CafSolicitor] Error DTE-OFGA en of_genera_archivo — reintentando en ${delaySecs}s (intento ${attempt}/3)...`);
+        await new Promise(r => setTimeout(r, delaySecs * 1000));
+        // Reintentar con los inputs originales del genera.html si están disponibles,
+        // ya que los del archivo.xml (página de error) no tienen los campos necesarios.
+        const retryFields = retryInputs ? { ...retryInputs, ACEPTAR: 'AQUI' } : fields;
+        const retryAction = retryFormAction || formAction;
+        response = await this.session.submitForm(retryAction, retryFields);
+        currentHtml = response.body || '';
+        this._saveDebug(debugDir, `archivo-retry${attempt}.xml`, currentHtml);
+        if (currentHtml.includes('<AUTORIZACION')) {
+          console.log(`[CafSolicitor] ✅ CAF obtenido en retry ${attempt} de of_genera_archivo`);
+          return response;
+        }
+        if (!currentHtml.includes('DTE-OFGA')) {
+          // Error diferente (ya fue autorizado, etc.) — salir del loop
+          break;
+        }
+      }
+    }
 
     // A veces hay un paso extra
     if (!currentHtml.includes('<AUTORIZACION') && currentHtml.includes('of_genera_archivo')) {

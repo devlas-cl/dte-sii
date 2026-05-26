@@ -437,7 +437,7 @@ class EnviadorSII {
     formData.append('rutCompany', rutCompany.toString());
     formData.append('dvCompany', dvCompany.toUpperCase());
     
-    const xmlBuffer = Buffer.from(xml, 'utf-8');
+    const xmlBuffer = Buffer.from(xml, 'latin1');
     formData.append('archivo', xmlBuffer, {
       filename: 'EnvioBOLETA.xml',
       contentType: 'application/xml',
@@ -703,13 +703,20 @@ class EnviadorSII {
       else if (estado === 'RCH') mensaje = `[ERR] Rechazado: ${json.glosa || json.descripcion || 'Sin detalle'}`;
       else mensaje = `Estado: ${estado}`;
       
+      const esExitoso    = ['EPR', 'RPR', 'RLV'].includes(estado);
+      const esRechazado  = ['RPT', 'RFR', 'VOF', 'RCT', 'RCH', 'RSC'].includes(estado);
+      const esIntermedio = !esExitoso && !esRechazado;
+
       return {
         ok: true,
-        trackId: trackId,
-        estado: estado,
+        ...json,
+        trackId,
+        estado,
         descripcion: json.descripcion || json.glosa,
         mensaje,
-        ...json,
+        esExitoso,
+        esRechazado,
+        esIntermedio,
       };
     } catch (e) {
       return {
@@ -1343,24 +1350,34 @@ class EnviadorSII {
       99: 'Error desconocido',
     };
 
-    // STATUS 7 = Envío duplicado (para EnvioBOLETA/EnvioDTE).
-    // EXCEPCIÓN: CHR-00001 en <DETAIL> = error de charset, NO es duplicado.
+    // STATUS 7 = puede ser duplicado real, o error de schema/charset (NO duplicado).
     if (status === 7) {
       const detailMatch = responseText.match(/<ERROR>([^<]*)<\/ERROR>/i);
       const detailMsg = detailMatch ? detailMatch[1] : '';
+
+      // CHR-00001: error de charset en el XML (encoding incorrecto)
       if (detailMsg.includes('CHR-00001')) {
         return {
-          ok: false,
-          status,
+          ok: false, status,
           error: `Error de charset en XML enviado (${detailMsg}). Verifique encoding="ISO-8859-1" en la declaración XML.`,
-          respuesta: responseText,
-          duplicado: false,
+          respuesta: responseText, duplicado: false,
         };
       }
+
+      // SCH-00001: XML no cumple el esquema (ej: campo undefined, fecha inválida, esquema incorrecto)
+      if (detailMsg.includes('SCH-00001')) {
+        return {
+          ok: false, status,
+          error: `XML rechazado por SII: esquema inválido (${detailMsg}). El XML contiene campos malformados o la referencia de esquema no es reconocida.`,
+          respuesta: responseText, duplicado: false,
+        };
+      }
+
+      // Duplicado real: SII ya recibió este SetDTE ID
       if (trackId) {
         return { ok: true, status, trackId, archivo: fileName, mensaje: `[DUPLICADO] TrackID recuperado: ${trackId}`, respuesta: responseText };
       }
-      return { ok: false, status, error: errorMessages[7], respuesta: responseText, duplicado: true };
+      return { ok: false, status, error: `${errorMessages[7]}. Detail: ${detailMsg || 'sin detalle'}`, respuesta: responseText, duplicado: true };
     }
 
     return {
