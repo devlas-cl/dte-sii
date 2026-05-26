@@ -71,9 +71,14 @@ class DTE {
   
   _convertirDatosSimplificados(d) {
     const esExenta = d.tipo === 41;
+    const esBoleta = TIPOS_BOLETA.includes(d.tipo);
     const precioConIva = d.precioConIva === true;
-    const { detalle, mntNeto, mntExento } = this._procesarItems(d.items, esExenta, precioConIva);
-    const totales = this._calcularTotales(mntNeto, mntExento, esExenta);
+    // Boletas afectas: reportar precios al consumidor (bruto con IVA) en <Detalle>.
+    // El SII valida MntTotal = suma(MontoItem), por lo que MontoItem debe ser precio con IVA.
+    // Para facturas: convertir a neto (precio sin IVA) como de costumbre.
+    const convertirANeto = precioConIva && !esBoleta;
+    const { detalle, mntNeto, mntExento } = this._procesarItems(d.items, esExenta, convertirANeto);
+    const totales = this._calcularTotales(mntNeto, mntExento, esExenta, esBoleta, esBoleta && precioConIva);
     
     const resultado = {
       Encabezado: {
@@ -145,14 +150,28 @@ class DTE {
   
   // PrcItem = precio neto unitario (o precio con IVA si se usa precioConIva:true).
   // IVA = mntNeto * TasaIVA.
-  _calcularTotales(mntNeto, mntExento, esExenta) {
+  _calcularTotales(mntNeto, mntExento, esExenta, esBoleta = false, esBruto = false) {
+    // Boleta afecta con precios al consumidor (brutos): mntNeto contiene el total bruto (con IVA).
+    // MntNeto y IVA se derivan del bruto; MntTotal = bruto + exento = suma(MontoItem).
+    if (esBoleta && esBruto && !esExenta && mntNeto > 0) {
+      const bruto = mntNeto;
+      const neto  = Math.round(bruto / (1 + TASA_IVA / 100));
+      const iva   = bruto - neto;
+      const mntTotal = bruto + mntExento;
+      const totales = { MntNeto: neto };
+      if (mntExento > 0) totales.MntExe = mntExento;
+      totales.IVA      = iva;
+      totales.MntTotal = mntTotal;
+      return totales;
+    }
+
     const neto = esExenta ? 0 : mntNeto;
     const iva  = esExenta ? 0 : Math.round(neto * TASA_IVA / 100);
     const mntTotal = neto + iva + mntExento;
     
     const totales = {};
     if (neto > 0) totales.MntNeto = neto;
-    if (neto > 0) totales.TasaIVA = TASA_IVA;  // requerido en facturas
+    if (neto > 0 && !esBoleta) totales.TasaIVA = TASA_IVA;  // requerido en facturas, NO en boletas (EnvioBOLETA_v11.xsd no lo admite)
     if (mntExento > 0) totales.MntExe = mntExento;
     if (neto > 0) totales.IVA = iva;
     totales.MntTotal = mntTotal;

@@ -249,9 +249,13 @@ class FolioService {
     const debugDir = path.join(this.debugDir, 'auto-caf', 'anulacion', debugStamp);
     fs.mkdirSync(debugDir, { recursive: true });
 
-    // Asegurar sesión
-    this.session.reset();
+    // Asegurar sesión — sin reset() para reutilizar cookieJar cargado del caché
     const page = await this.session.ensureSession('/cvc_cgi/dte/af_anular1');
+
+    // Persistir sesión para reutilizar en llamadas posteriores (evita abrir sesiones SII extra)
+    if (this.sessionPath) {
+      try { this.session.saveSession(this.sessionPath); } catch (_) {}
+    }
 
     if (!page.body || !page.body.includes('ANULACION DE FOLIOS')) {
       fs.writeFileSync(path.join(debugDir, 'error.html'), page.body || '', 'utf8');
@@ -264,17 +268,21 @@ class FolioService {
       ...hiddenInputs,
       RUT_EMP: rut,
       DV_EMP: dv,
+      PAGINA: '1',
       COD_DOCTO: String(tipoDte),
       ACEPTAR: 'Consultar',
     };
 
-    const consulta = await this.session.submitForm(
-      '/cvc_cgi/dte/af_anular2',
-      fields,
-      `https://${this.session.getBaseHost()}/cvc_cgi/dte/af_anular1`
+    const consulta = await this._withRetry('af_anular2', () =>
+      this.session.submitForm(
+        '/cvc_cgi/dte/af_anular2',
+        fields,
+        `https://${this.session.getBaseHost()}/cvc_cgi/dte/af_anular1`
+      )
     );
 
     let currentHtml = consulta.body || '';
+    try { fs.writeFileSync(path.join(debugDir, 'page-1.html'), currentHtml, 'utf8'); } catch (_) {}
     let info = this._parseAnulacionTable(currentHtml);
     let action = SiiSession.extractFormActionByName(currentHtml, 'frm') || '/cvc_cgi/dte/af_anular2';
     let hiddenInputsConsulta = SiiSession.extractInputValues(currentHtml);
@@ -291,10 +299,12 @@ class FolioService {
         nextFields.PAGINA = String(nextButton.page);
       }
       
-      const nextRes = await this.session.submitForm(
-        action,
-        nextFields,
-        `https://${this.session.getBaseHost()}/cvc_cgi/dte/af_anular2`
+      const nextRes = await this._withRetry(`af_anular2 pág ${nextButton.page || safety + 2}`, () =>
+        this.session.submitForm(
+          action,
+          nextFields,
+          `https://${this.session.getBaseHost()}/cvc_cgi/dte/af_anular2`
+        )
       );
 
       currentHtml = nextRes.body || '';
@@ -318,6 +328,7 @@ class FolioService {
       safety += 1;
     }
 
+    console.log(`[FolioService] consultarFolios tipoDte=${tipoDte}: ${info.ranges.length} rango(s) encontrado(s)`);
     return {
       ok: true,
       tipoDte,
@@ -330,110 +341,179 @@ class FolioService {
   }
 
   /**
-   * Anula folios en el SII
-   * @param {Object} params - Parámetros
-   * @returns {Promise<Object>}
+   * Anula folios en el SII usando el flujo bulk: af_anular3 → af_anular.
+   * Un request por rango CAF en lugar de un request por folio individual.
+   *
+   * @param {Object} params
+   * @param {number} params.tipoDte
+   * @param {number|null} [params.folioDesde]  - Si se omite, anula todos los rangos pendientes
+   * @param {number|null} [params.folioHasta]
+   * @param {string} [params.motivo]
+   * @returns {Promise<{ok:boolean, anulados:Array, rechazados:Array, totalAnulados:number, totalRechazados:number}>}
    */
   async anularFolios({ tipoDte, folioDesde = null, folioHasta = null, motivo = 'Folios no utilizados' }) {
-    const consulta = await this.consultarFolios({ tipoDte });
-    const anulados = [];
+    const debugStampA = new Date().toISOString().replace(/[:.]/g, '-');
+    const debugDirA = path.join(this.debugDir, 'auto-caf', 'anulacion', debugStampA);
+    fs.mkdirSync(debugDirA, { recursive: true });
+
+    const { rut, dv } = SiiSession.parseRut(this.rutEmisor);
+    const anulados   = [];
     const rechazados = [];
+    const vistos     = new Set(); // claves "folioDesde-folioHasta" ya procesadas en esta ejecución
 
-    // Calcular total de folios a anular para mostrar progreso
-    let totalFolios = 0;
-    if (Number.isFinite(folioDesde) && Number.isFinite(folioHasta)) {
-      totalFolios = folioHasta - folioDesde + 1;
-    } else {
-      for (const range of consulta.ranges) {
-        totalFolios += (range.folioHasta - range.folioDesde + 1);
-      }
-    }
-    let foliosAnulados = 0;
+    const maxPasadas = 4;
 
-    const anularFolioIndividual = async (folio) => {
-      let currentHtml = consulta.html;
+    for (let pasada = 0; pasada < maxPasadas; pasada++) {
+      const consulta = await this.consultarFolios({ tipoDte });
 
-      const range = consulta.ranges.find((r) => folio >= r.folioDesde && folio <= r.folioHasta);
-      
-      if (range && range.formFields && Object.keys(range.formFields).length) {
-        const selectRes = await this.session.submitForm(
-          range.formAction || consulta.action,
-          range.formFields,
-          `https://${this.session.getBaseHost()}/cvc_cgi/dte/af_anular1`
-        );
-        currentHtml = selectRes.body || currentHtml;
-      } else if (range && range.selection) {
-        const selectFields = {
-          ...consulta.hiddenInputs,
-          [range.selection.name]: range.selection.value || '',
-        };
-        const selectRes = await this.session.submitForm(
-          consulta.action,
-          selectFields,
-          `https://${this.session.getBaseHost()}/cvc_cgi/dte/af_anular1`
-        );
-        currentHtml = selectRes.body || currentHtml;
-      }
-
-      const action = SiiSession.extractFormAction(currentHtml) || consulta.action;
-      const fields = SiiSession.extractInputValues(currentHtml);
-      this._setFolioFields(fields, folio, folio);
-      this._setMotivoField(fields, motivo);
-
-      const resultRes = await this.session.submitForm(
-        action,
-        fields,
-        `https://${this.session.getBaseHost()}/cvc_cgi/dte/af_anular2`
-      );
-
-      // Guardar resultado para debug
-      try {
-        const debugDir = path.join(this.debugDir, 'auto-caf', 'anulacion', 'resultados');
-        fs.mkdirSync(debugDir, { recursive: true });
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        fs.writeFileSync(path.join(debugDir, `sii-anulacion-result-${folio}-${stamp}.html`), resultRes.body || '', 'utf8');
-      } catch (_) {
-        // ignore
-      }
-
-      // Log de progreso
-      foliosAnulados += 1;
-      const pct = Math.round((foliosAnulados / totalFolios) * 100);
-      process.stdout.write(`\r Anulando folio ${folio} (${foliosAnulados}/${totalFolios} - ${pct}%)`);
-
-      return { folio, ...this._parseAnulacionResult(resultRes.body || '') };
-    };
-
-    // Anular rango específico o todos
-    if (Number.isFinite(folioDesde) && Number.isFinite(folioHasta)) {
-      for (let folio = folioDesde; folio <= folioHasta; folio += 1) {
-        const result = await anularFolioIndividual(folio);
-        if (result.ok) {
-          anulados.push(result);
-        } else if (result.ok === false) {
-          rechazados.push(result);
+      // Filtrar rangos dentro del rango solicitado y que no hayamos intentado aún
+      let rangos = consulta.ranges.filter(r => {
+        if (Number.isFinite(folioDesde) && Number.isFinite(folioHasta)) {
+          if (r.folioDesde > folioHasta || r.folioHasta < folioDesde) return false;
         }
+        return !vistos.has(`${r.folioDesde}-${r.folioHasta}`);
+      });
+
+      if (rangos.length === 0) {
+        console.log(`[FolioService] Pasada ${pasada + 1}: sin rangos nuevos, finalizando`);
+        break;
       }
-    } else {
-      // Anular todos los rangos
-      for (const range of consulta.ranges) {
-        for (let folio = range.folioDesde; folio <= range.folioHasta; folio += 1) {
-          const result = await anularFolioIndividual(folio);
-          if (result.ok) {
-            anulados.push(result);
-          } else if (result.ok === false) {
-            rechazados.push(result);
+
+      console.log(`[FolioService] Pasada ${pasada + 1}: ${rangos.length} rango(s) a procesar`);
+      const host = this.session.getBaseHost();
+
+      for (const range of rangos) {
+        vistos.add(`${range.folioDesde}-${range.folioHasta}`);
+        const iniA = folioDesde != null ? Math.max(range.folioDesde, folioDesde) : range.folioDesde;
+        const finA = folioHasta != null ? Math.min(range.folioHasta, folioHasta) : range.folioHasta;
+        const count = finA - iniA + 1;
+        const { dia, mes, ano } = this._parseFecha(range.fecha);
+
+        // Paso 1: af_anular3 — obtener el formulario con campos ocultos del SII
+        let body3;
+        try {
+          const r3 = await this._withRetry(`af_anular3 rango ${iniA}-${finA}`, () =>
+            this.session.submitForm(
+              '/cvc_cgi/dte/af_anular3',
+              {
+                RUT_EMP: rut, DV_EMP: dv,
+                DIA: dia, MES: mes, ANO: ano,
+                COD_DOCTO: String(tipoDte),
+                FOLIO_INI: String(range.folioDesde),
+                FOLIO_FIN: String(range.folioHasta),
+                CANT_DOCTOS: String(range.cantidad ?? (range.folioHasta - range.folioDesde + 1)),
+              },
+              `https://${host}/cvc_cgi/dte/af_anular2`
+            )
+          );
+          body3 = r3.body || '';
+        } catch (err) {
+          console.error(`[FolioService] af_anular3 falló rango ${iniA}-${finA}: ${err.message}`);
+          rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'error-red' });
+          continue;
+        }
+
+        if (body3.includes('ya ha sido efectuado') || body3.includes('ya fue anulado') ||
+            body3.includes('efectuado anteriormente')) {
+          rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'ya-anulado' });
+          console.warn(`[FolioService] ✗ Rango ${iniA}-${finA}: ya anulado (af_anular3)`);
+          try { fs.writeFileSync(path.join(debugDirA, `rango-${iniA}-${finA}-af_anular3-error.html`), body3, 'utf8'); } catch (_) {}
+          continue;
+        }
+        try { fs.writeFileSync(path.join(debugDirA, `rango-${iniA}-${finA}-af_anular3.html`), body3, 'utf8'); } catch (_) {}
+
+        // Extraer campos ocultos del formulario devuelto por SII
+        const formFields = SiiSession.extractInputValues(body3);
+        formFields.FOLIO_INI_A = String(iniA);
+        formFields.FOLIO_FIN_A = String(finA);
+        formFields.MOTIVO = motivo;
+
+        // Paso 2: af_anular — intentar anulación bulk del rango completo
+        let bodyBulk;
+        try {
+          const rBulk = await this._withRetry(`af_anular bulk ${iniA}-${finA}`, () =>
+            this.session.submitForm('/cvc_cgi/dte/af_anular', formFields, `https://${host}/cvc_cgi/dte/af_anular3`)
+          );
+          bodyBulk = rBulk.body || '';
+        } catch (err) {
+          console.error(`[FolioService] af_anular bulk falló rango ${iniA}-${finA}: ${err.message}`);
+          rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'error-red' });
+          continue;
+        }
+
+        const exitoBulk = bodyBulk.includes('ha autorizado la anulaci') ||
+                          bodyBulk.includes('SOLICITUD ANULACION DE FOLIOS');
+        if (exitoBulk) {
+          anulados.push({ folioDesde: iniA, folioHasta: finA, count });
+          try { fs.writeFileSync(path.join(debugDirA, `rango-${iniA}-${finA}-af_anular-ok.html`), bodyBulk, 'utf8'); } catch (_) {}
+          console.log(`[FolioService] ✓ Rango ${iniA}-${finA} (${count} folios) anulado en bulk`);
+          continue;
+        }
+
+        try { fs.writeFileSync(path.join(debugDirA, `rango-${iniA}-${finA}-af_anular-fail.html`), bodyBulk, 'utf8'); } catch (_) {}
+        console.warn(`[FolioService] bulk falló rango ${iniA}-${finA}: ${bodyBulk.slice(0, 300).replace(/\s+/g, ' ')}`);
+
+        const yaConflicto = bodyBulk.includes('ya ha sido efectuado') ||
+                            bodyBulk.includes('ya fue anulado') ||
+                            bodyBulk.includes('efectuado anteriormente') ||
+                            bodyBulk.includes('recepcionad');
+        if (!yaConflicto) {
+          const razon = this._parseAnulacionResult(bodyBulk).reason || 'error';
+          rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: razon });
+          console.warn(`[FolioService] ✗ Rango ${iniA}-${finA} rechazado: ${razon}`);
+          continue;
+        }
+
+        // Fallback: algunos folios del rango ya fueron anulados/receptados.
+        // Reutilizar la sesión de af_anular3 y anular folio a folio.
+        console.log(`[FolioService] Rango ${iniA}-${finA}: conflicto bulk, fallback folio-a-folio...`);
+        let i = 0;
+        for (let folio = iniA; folio <= finA; folio++) {
+          i++;
+          process.stdout.write(`\r[FolioService] ${iniA}-${finA}: folio ${folio} (${i}/${count})  `);
+          const singleFields = { ...formFields, FOLIO_INI_A: String(folio), FOLIO_FIN_A: String(folio) };
+          let bs;
+          try {
+            const rSingle = await this._withRetry(`af_anular folio ${folio}`, () =>
+              this.session.submitForm('/cvc_cgi/dte/af_anular', singleFields, `https://${host}/cvc_cgi/dte/af_anular3`)
+            );
+            bs = rSingle.body || '';
+          } catch (err) {
+            rechazados.push({ folioDesde: folio, folioHasta: folio, count: 1, reason: 'error-red' });
+            continue;
+          }
+          const ok = bs.includes('ha autorizado la anulaci') || bs.includes('SOLICITUD ANULACION DE FOLIOS');
+          if (ok) {
+            anulados.push({ folioDesde: folio, folioHasta: folio, count: 1 });
+          } else {
+            const razon = this._parseAnulacionResult(bs).reason || 'error';
+            rechazados.push({ folioDesde: folio, folioHasta: folio, count: 1, reason: razon });
           }
         }
+        console.log('');
       }
+
+      // Pausa breve entre pasadas para no saturar el SII
+      if (pasada < maxPasadas - 1) await this._sleep(1500);
     }
 
-    // Nueva línea después del progreso
-    if (totalFolios > 0) {
-      console.log('');
-    }
+    const totalAnulados   = anulados.reduce((s, r) => s + r.count, 0);
+    const totalRechazados = rechazados.reduce((s, r) => s + r.count, 0);
+    console.log(`[FolioService] Completado: ${totalAnulados} anulados, ${totalRechazados} rechazados`);
 
-    return { ok: true, anulados, rechazados };
+    return { ok: true, anulados, rechazados, totalAnulados, totalRechazados };
+  }
+
+  /**
+   * Parsea una fecha "DD-MM-YYYY" o "DD/MM/YYYY" en sus componentes.
+   * @private
+   */
+  _parseFecha(fecha) {
+    const clean = String(fecha || '').replace(/[\s ]/g, '').trim();
+    const m = clean.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+    if (m) return { dia: m[1].padStart(2, '0'), mes: m[2].padStart(2, '0'), ano: m[3] };
+    // Si no tiene fecha válida, dejar vacío (el SII puede no requerirla siempre)
+    return { dia: '', mes: '', ano: '' };
   }
 
   /**
@@ -547,6 +627,15 @@ class FolioService {
    * @private
    */
   _parseAnulacionTable(html) {
+    // Primario: extraer desde formularios (no depende de posición de columnas, más robusto
+    // ante tablas anidadas que cortan el regex de filas)
+    const formRanges = this._extractRangesFromForms(html);
+    if (formRanges.length > 0) {
+      const ultimoFolioFinal = formRanges.reduce((acc, r) => r.folioHasta > acc ? r.folioHasta : acc, 0);
+      return { ranges: formRanges, ultimoFolioFinal: ultimoFolioFinal || null };
+    }
+
+    // Fallback: parsing por columnas de tabla (backup si no hay forms con FOLIO_INI/FOLIO_FIN)
     const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
     const ranges = [];
 
@@ -586,6 +675,53 @@ class FolioService {
 
     const ultimoFolioFinal = ranges.reduce((acc, r) => (r.folioHasta > acc ? r.folioHasta : acc), 0);
     return { ranges, ultimoFolioFinal: ultimoFolioFinal || null };
+  }
+
+  /**
+   * Extrae rangos de folios directamente de los <form> de la página af_anular2.
+   * Cada fila de la tabla tiene un form con inputs ocultos FOLIO_INI, FOLIO_FIN,
+   * CANT_DOCTOS, DIA, MES, ANO. Este método es más confiable que parsear columnas
+   * porque no se ve afectado por tablas anidadas ni por variaciones en el orden de columnas.
+   * @private
+   */
+  _extractRangesFromForms(html) {
+    const ranges = [];
+    const formRegex = /<form[^>]*>[\s\S]*?<\/form>/gi;
+    const forms = String(html || '').match(formRegex) || [];
+
+    forms.forEach(formHtml => {
+      const fields = SiiSession.extractInputValues(formHtml);
+      const folioDesde = SiiSession.parseIntFromText(fields.FOLIO_INI);
+      const folioHasta = SiiSession.parseIntFromText(fields.FOLIO_FIN);
+      if (!Number.isFinite(folioDesde) || !Number.isFinite(folioHasta)) return;
+
+      const cantidadRaw = SiiSession.parseIntFromText(fields.CANT_DOCTOS);
+      const cantidad = Number.isFinite(cantidadRaw) ? cantidadRaw : (folioHasta - folioDesde + 1);
+      const dia = String(fields.DIA || '').padStart(2, '0');
+      const mes = String(fields.MES || '').padStart(2, '0');
+      const ano = fields.ANO || '';
+      const fecha = (dia !== '00' && mes !== '00' && ano) ? `${dia}-${mes}-${ano}` : null;
+
+      ranges.push({
+        fecha,
+        cantidad,
+        folioDesde,
+        folioHasta,
+        efectuadoPor: null,
+        selection: null,
+        formFields: fields,
+        formAction: SiiSession.extractFormAction(formHtml) || '',
+      });
+    });
+
+    // Deduplicar por folioDesde+folioHasta (el SII puede repetir el mismo form)
+    const seen = new Set();
+    return ranges.filter(r => {
+      const key = `${r.folioDesde}-${r.folioHasta}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /**
@@ -675,6 +811,7 @@ class FolioService {
     if (
       text.includes('ya fue anulado') ||
       text.includes('anulado anteriormente') ||
+      text.includes('ya ha sido efectuado anteriormente') ||
       (text.includes('anulad') && text.includes('ya'))
     ) {
       return { ok: false, reason: 'ya-anulado' };
@@ -695,8 +832,40 @@ class FolioService {
     if (text.includes('anulaci') && text.includes('no')) {
       return { ok: false, reason: 'rechazado' };
     }
+
+    if (text.trim() === 'error 500' || text.includes('error 500') || text.includes('internal server error')) {
+      return { ok: false, reason: 'error-sii-500' };
+    }
     
     return { ok: null, reason: 'desconocido' };
+  }
+
+  /**
+   * Reintenta una función async ante errores de red.
+   * No reintenta en errores de lógica (respuestas HTML del SII con error).
+   * @private
+   */
+  async _withRetry(label, fn) {
+    const retries = this.config.retries ?? 2;
+    const delayMs = this.config.retryDelayMs ?? 1500;
+    let lastErr;
+    for (let i = 0; i <= retries; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (i < retries) {
+          console.warn(`[FolioService] ${label}: error "${err.message}", reintentando (${i + 1}/${retries})...`);
+          await this._sleep(delayMs);
+        }
+      }
+    }
+    throw lastErr;
+  }
+
+  /** @private */
+  _sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
   }
 }
 

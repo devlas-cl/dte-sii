@@ -62,17 +62,21 @@ class EnvioBase {
   }
   
   /**
-   * Generar SetId con formato específico
+   * Generar SetId con formato específico.
+   * @param {string} prefix
+   * @param {string} [suffix] - Sufijo opcional (ej: ID de sobre) para garantizar unicidad entre sobres del mismo segundo.
    */
-  _generateSetId(prefix) {
+  _generateSetId(prefix, suffix) {
     const now = new Date();
-    const dd = String(now.getDate()).padStart(2, '0');
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd   = String(now.getDate()).padStart(2, '0');
+    const mm   = String(now.getMonth() + 1).padStart(2, '0');
     const yyyy = now.getFullYear();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const min = String(now.getMinutes()).padStart(2, '0');
-    const ss = String(now.getSeconds()).padStart(2, '0');
-    return `${prefix}_${dd}_${mm}_${yyyy}_${hh}_${min}_${ss}`;
+    const hh   = String(now.getHours()).padStart(2, '0');
+    const min  = String(now.getMinutes()).padStart(2, '0');
+    const ss   = String(now.getSeconds()).padStart(2, '0');
+    const ms   = String(now.getMilliseconds()).padStart(3, '0');
+    const base = `${prefix}_${dd}_${mm}_${yyyy}_${hh}_${min}_${ss}_${ms}`;
+    return suffix ? `${base}_${suffix}` : base;
   }
   
   /**
