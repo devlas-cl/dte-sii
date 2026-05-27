@@ -14,7 +14,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const SiiSession = require('./SiiSession');
+const SiiPortalAuth = require('./SiiPortalAuth');
+const SiiSessionStore = require('./SiiSessionStore');
 const { splitRut } = require('./utils/rut');
 
 /**
@@ -70,6 +73,40 @@ class CafSolicitor {
         pfxPath: options.pfxPath,
         pfxPassword: options.pfxPassword,
       });
+
+      // Intentar reutilizar cookies del store compartido (SiiPortalAuth o sesión previa).
+      // También calcula certHash para escribir de vuelta al store cuando este SiiSession autentique.
+      let certHash = null;
+      try {
+        const pfxBuffer = fs.readFileSync(options.pfxPath);
+        const { certPem } = SiiPortalAuth._extractPems(pfxBuffer, options.pfxPassword);
+        certHash = crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
+
+        const existingCookies = SiiPortalAuth.getCookieStringForPfx(pfxBuffer, options.pfxPassword);
+        if (existingCookies) {
+          this.session.cookieJar = existingCookies;
+          console.log('[CafSolicitor] 🔗 Sesión SII pre-cargada desde store compartido — sin auth extra');
+        } else {
+          console.log('[CafSolicitor] 🔑 Sin sesión previa — SiiSession hará su propio auth');
+        }
+      } catch (_e) {
+        console.warn('[CafSolicitor] No se pudo leer PFX para seed de cookies:', _e.message);
+      }
+
+      // Monkey-patch: al autenticar, escribe las cookies al store compartido
+      // para que SiiPortalAuth pueda reutilizarlas (dirección inversa de la unificación).
+      if (certHash && typeof this.session.loginWithCertificate === 'function') {
+        const _origLogin = this.session.loginWithCertificate.bind(this.session);
+        this.session.loginWithCertificate = async (...args) => {
+          const result = await _origLogin(...args);
+          if (this.session.cookieJar && certHash) {
+            SiiSessionStore.set(certHash, this.session.cookieJar);
+            console.log('[CafSolicitor] 🔗 Sesión post-login escrita al store compartido (hash=' + certHash + ')');
+          }
+          return result;
+        };
+      }
+
       _sessionRegistry.set(sessionKey, this.session);
       console.log('[CafSolicitor] 🔑 Nueva sesión SII registrada para', sessionKey);
     }
