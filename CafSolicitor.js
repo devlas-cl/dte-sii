@@ -504,6 +504,18 @@ class CafSolicitor {
 
     return response;
   }
+
+  /**
+   * Cierra todas las sesiones SII en caché haciendo logout en el portal.
+   * Llamar durante el shutdown del proceso para no dejar sesiones huérfanas
+   * que acumulen el límite de sesiones concurrentes del SII.
+   */
+  static async closeAllSessions() {
+    for (const [key, session] of _sessionRegistry) {
+      try { await session.logout() } catch (_e) { /* ignorar errores de red al apagar */ }
+      _sessionRegistry.delete(key)
+    }
+  }
 }
 
 module.exports = CafSolicitor;
