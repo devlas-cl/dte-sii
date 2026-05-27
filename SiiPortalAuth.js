@@ -30,6 +30,20 @@ const os     = require('os');
 const { URL } = require('url');
 const forge  = require('node-forge');
 const crypto = require('crypto');
+const SiiSessionStore = require('./SiiSessionStore');
+
+function _cookieObjToStr(obj) {
+  return Object.entries(obj).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+function _parseCookieStr(str) {
+  const obj = {};
+  for (const pair of (str || '').split('; ')) {
+    const eq = pair.indexOf('=');
+    if (eq > 0) obj[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+  }
+  return obj;
+}
 
 // ─── Opciones TLS comunes para SII ────────────────────────────────────────────
 const SII_TLS_OPTS = {
@@ -47,6 +61,14 @@ const SESSION_CACHE_PATH = path.join(
   process.env.DATADIR || path.join(os.homedir(), 'AppData', 'Roaming', 'POS'),
   'sii_session_cache.json'
 );
+
+/**
+ * Registro global de instancias SiiPortalAuth por certHash (singleton por certificado).
+ * Evita abrir múltiples sesiones concurrentes en el portal SII para el mismo certificado.
+ * Mismo patrón que CafSolicitor._sessionRegistry.
+ * @type {Map<string, SiiPortalAuth>}
+ */
+const _instanceRegistry = new Map();
 
 /**
  * Clase principal de autenticación con el portal SII
@@ -67,8 +89,16 @@ class SiiPortalAuth {
     // Huella para identificar de qué cert es la sesión cacheada
     this._certHash = crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
 
+    // Reutilizar instancia existente en memoria si ya existe para este certificado.
+    // Esto evita abrir múltiples sesiones paralelas en el portal SII.
+    if (_instanceRegistry.has(this._certHash)) {
+      return _instanceRegistry.get(this._certHash);
+    }
+
     this._agentePlano = new https.Agent(SII_TLS_OPTS);
     this._agenteCert  = new https.Agent({ ...SII_TLS_OPTS, cert: certPem, key: keyPem });
+
+    _instanceRegistry.set(this._certHash, this);
   }
 
   /**
@@ -170,12 +200,29 @@ class SiiPortalAuth {
   async autenticar() {
     const TARGET = 'https://misiir.sii.cl/cgi_misii/siihome.cgi';
 
-    // ── 1. Intentar reusar sesión cacheada ───────────────────────────────────
+    // ── 1a. Store compartido (cubre sesiones de CafSolicitor/SiiSession) ────────
+    const storedStr = SiiSessionStore.get(this._certHash);
+    if (storedStr) {
+      const cookieObj = _parseCookieStr(storedStr);
+      const validaStore = await this._validarSesion(cookieObj);
+      if (validaStore) {
+        console.log('[SiiPortalAuth] Reutilizando sesión SII desde store compartido');
+        this._cachedCookieJar = cookieObj;
+        SiiPortalAuth._guardarSesionCache(this._certHash, cookieObj);
+        return cookieObj;
+      }
+      SiiSessionStore.delete(this._certHash);
+      console.warn('[SiiPortalAuth] Sesión del store compartido expirada, borrando...');
+    }
+
+    // ── 1b. Caché en disco ───────────────────────────────────────────────────
     const cached = SiiPortalAuth._cargarSesionCache(this._certHash);
     if (cached) {
       const valida = await this._validarSesion(cached);
       if (valida) {
         console.log('[SiiPortalAuth] Reutilizando sesión SII cacheada');
+        this._cachedCookieJar = cached;
+        SiiSessionStore.set(this._certHash, _cookieObjToStr(cached));
         return cached;
       }
       console.warn('[SiiPortalAuth] Sesión cacheada expirada, re-autenticando...');
@@ -216,6 +263,8 @@ class SiiPortalAuth {
     }
 
     SiiPortalAuth._guardarSesionCache(this._certHash, cookieJar);
+    SiiSessionStore.set(this._certHash, _cookieObjToStr(cookieJar));
+    this._cachedCookieJar = cookieJar;
     return cookieJar;
   }
 
@@ -605,6 +654,73 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
     );
 
     return { resumen, detalles: detallesArr.flat() };
+  }
+
+  /**
+   * Retorna las cookies de sesión activas para un PFX dado, en formato string para SiiSession.
+   * Busca primero en el registry en memoria, luego en el caché a disco.
+   * Retorna null si no hay sesión previa (no hace auth nueva).
+   *
+   * Usado por CafSolicitor para reutilizar la sesión de SiiPortalAuth y evitar
+   * abrir una segunda sesión paralela en el portal SII para el mismo certificado.
+   *
+   * @param {Buffer} pfxBuffer - Buffer del archivo PFX
+   * @param {string} pfxPassword - Contraseña del PFX
+   * @returns {string|null} Cookies en formato "KEY=val; KEY2=val2" o null
+   */
+  static getCookieStringForPfx(pfxBuffer, pfxPassword) {
+    try {
+      const { certPem } = SiiPortalAuth._extractPems(pfxBuffer, pfxPassword);
+      const certHash = crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
+
+      // 0. Store compartido (cubre tanto SiiPortalAuth como SiiSession/CafSolicitor)
+      const storedStr = SiiSessionStore.get(certHash);
+      if (storedStr) {
+        console.log('[SiiPortalAuth] 🔗 getCookieStringForPfx: cookies desde store compartido (hash=' + certHash + ')');
+        return storedStr;
+      }
+
+      // 1. Registry en memoria (más rápido, no hace I/O)
+      const instance = _instanceRegistry.get(certHash);
+      if (instance?._cachedCookieJar) {
+        const str = Object.entries(instance._cachedCookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
+        console.log('[SiiPortalAuth] 🔗 getCookieStringForPfx: cookies desde registry en memoria (hash=' + certHash + ')');
+        return str;
+      }
+
+      // 2. Caché en disco (sobrevive reinicios dentro del mismo deploy)
+      const fileCookies = SiiPortalAuth._cargarSesionCache(certHash);
+      if (fileCookies) {
+        const str = Object.entries(fileCookies).map(([k, v]) => `${k}=${v}`).join('; ');
+        console.log('[SiiPortalAuth] 🔗 getCookieStringForPfx: cookies desde caché en disco (hash=' + certHash + ')');
+        return str;
+      }
+
+      console.log('[SiiPortalAuth] getCookieStringForPfx: sin sesión previa para hash=' + certHash);
+    } catch (_e) {
+      console.warn('[SiiPortalAuth] getCookieStringForPfx: error leyendo PFX —', _e.message);
+    }
+    return null;
+  }
+
+  /**
+   * Cierra todas las instancias SiiPortalAuth en caché (logout en el portal SII).
+   * Llamar durante el shutdown del proceso junto a CafSolicitor.closeAllSessions().
+   */
+  static async closeAllSessions() {
+    for (const [hash, instance] of _instanceRegistry) {
+      try {
+        const logoutUrls = [
+          'https://herculesr.sii.cl/cgi_AUT2000/autLogout.cgi',
+          'https://www.sii.cl/AUT2000/autLogout.cgi',
+        ];
+        for (const url of logoutUrls) {
+          await instance._request(url, { method: 'GET' }).catch(() => {});
+        }
+      } catch (_e) { /* ignorar errores de red al apagar */ }
+      _instanceRegistry.delete(hash);
+      SiiSessionStore.delete(hash);
+    }
   }
 }
 
