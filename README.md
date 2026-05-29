@@ -197,9 +197,84 @@ const estadoDte = await enviador.consultarEstadoDte({
 
 ## Boletas electrónicas
 
-Las boletas usan la API REST del SII (en vez de SOAP) y un sobre `EnvioBOLETA`.
+> **Diferencia crítica por ambiente**
+>
+> - **Producción** → usar la API **REST** del SII (`enviarBoleta`) con los datos reales de resolución de la empresa.
+> - **Certificación** → la API REST **no funciona** para el proceso de certificación SII. Usar **SOAP** (`enviarDteSoap`) con resolución `NroResol: 0` y la fecha de resolución de certificación que entrega el SII.
+>
+> Usar los datos de empresa incorrectos para el ambiente (por ejemplo, datos de producción en certificación) provoca rechazo inmediato del SII.
 
-### Flujo con BoletaService (recomendado)
+---
+
+### Datos de resolución por ambiente
+
+| Campo | Certificación | Producción |
+|-------|--------------|------------|
+| `NroResol` | `0` (siempre cero en cert.) | Número real de resolución SII |
+| `FchResol` | Fecha entregada por el SII al iniciar certificación | Fecha real de la resolución |
+| Método de envío | `enviarDteSoap` (SOAP) | `enviarBoleta` (REST) |
+
+Para obtener la fecha y número de resolución de producción automáticamente desde el portal SII, ver [`SiiPortalAuth`](#sesión-y-autenticación-con-el-sii).
+
+---
+
+### Certificación — SOAP (obligatorio)
+
+```javascript
+const { DTE, CAF, Certificado, EnvioBOLETA, EnviadorSII } = require('@devlas/dte-sii')
+const fs = require('fs')
+
+const cert = new Certificado(fs.readFileSync('empresa_cert.pfx'), 'clave')
+const caf  = new CAF(fs.readFileSync('caf_39_cert.xml', 'utf8'))
+
+const dte = new DTE({ tipo: 39, folio: 1, emisor: { rut: '76354771-K', ... }, items: [ ... ] })
+dte.generarXML().timbrar(caf).firmar(cert)
+
+const envio = new EnvioBOLETA({ certificado: cert })
+envio.agregar(dte)
+envio.setCaratula({
+  RutEmisor: '76354771-K',
+  FchResol:  '2019-10-18',  // fecha de resolución de certificación (entregada por el SII)
+  NroResol:  0,             // siempre 0 en certificación
+})
+envio.generar()
+
+// SOAP — único método que funciona para certificación de boletas
+const enviador = new EnviadorSII(cert, 'certificacion')
+const resultado = await enviador.enviarDteSoap(envio)
+console.log('TrackID:', resultado.trackId)
+```
+
+### Producción — REST (recomendado)
+
+```javascript
+const { DTE, CAF, Certificado, EnvioBOLETA, EnviadorSII } = require('@devlas/dte-sii')
+const fs = require('fs')
+
+const cert = new Certificado(fs.readFileSync('empresa_prod.pfx'), 'clave')
+const caf  = new CAF(fs.readFileSync('caf_39_prod.xml', 'utf8'))
+
+const dte = new DTE({ tipo: 39, folio: 1, emisor: { rut: '76354771-K', ... }, items: [ ... ] })
+dte.generarXML().timbrar(caf).firmar(cert)
+
+const envio = new EnvioBOLETA({ certificado: cert })
+envio.agregar(dte)
+envio.setCaratula({
+  RutEmisor: '76354771-K',
+  FchResol:  '2024-01-15',  // fecha real de resolución SII de la empresa
+  NroResol:  123,           // número real de resolución SII de la empresa
+})
+envio.generar()
+
+// REST — método estándar para producción
+const enviador = new EnviadorSII(cert, 'produccion')
+const resultado = await enviador.enviarBoleta(envio)
+console.log('TrackID:', resultado.trackId)
+```
+
+### Flujo con BoletaService
+
+`BoletaService` simplifica la creación de boletas individuales. Aplica el mismo criterio de ambiente: usar `enviarDteSoap` para certificación y `enviarBoleta` para producción una vez que el servicio retorne el sobre.
 
 ```javascript
 const { BoletaService } = require('@devlas/dte-sii')
@@ -210,32 +285,14 @@ service.cargarCertificado(fs.readFileSync('empresa.pfx'), 'clave_pfx')
 service.cargarCAF(fs.readFileSync('caf_39.xml', 'utf8'))
 
 const boleta = await service.crearBoleta({
-  folio:    1,
-  emisor:   { rut: '76354771-K', razonSocial: 'Mi Empresa', giro: 'Software', ... },
-  items:    [{ nombre: 'Producto', cantidad: 1, precioConIva: 10000 }],
-  resolucion: { fecha: '2024-01-15', numero: 0 }, // nro 0 en certificación
+  folio:      1,
+  emisor:     { rut: '76354771-K', razonSocial: 'Mi Empresa', giro: 'Software', ... },
+  items:      [{ nombre: 'Producto', cantidad: 1, precioConIva: 10000 }],
+  resolucion: {
+    fecha:  process.env.SII_AMBIENTE === 'certificacion' ? '2019-10-18' : '2024-01-15',
+    numero: process.env.SII_AMBIENTE === 'certificacion' ? 0           : 123,
+  },
 })
-```
-
-### Flujo manual con EnvioBOLETA
-
-```javascript
-const { DTE, CAF, Certificado, EnvioBOLETA, EnviadorSII } = require('@devlas/dte-sii')
-
-// Crear y firmar la boleta (tipo 39 ó 41)
-const dte = new DTE({ tipo: 39, folio: 1, emisor: { ... }, items: [ ... ] })
-dte.generarXML().timbrar(caf).firmar(cert)
-
-// Sobre para boletas
-const envio = new EnvioBOLETA({ certificado: cert })
-envio.agregar(dte)
-envio.setCaratula({ RutEmisor: '76354771-K', FchResol: '2024-01-15', NroResol: 0 })
-envio.generar()
-
-// Enviar por REST
-const enviador = new EnviadorSII(cert, 'certificacion')
-const resultado = await enviador.enviarBoleta(envio)
-console.log('TrackID:', resultado.trackId)
 ```
 
 ---
