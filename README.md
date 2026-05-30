@@ -4,7 +4,7 @@
 
 Genera, timbra, firma y envía facturas electrónicas, boletas electrónicas, libros contables y automatiza el proceso de certificación ante el SII.
 
-> Desarrollada por [Devlas SpA](https://devlas.cl) · Licencia MIT · Node.js ≥ 18 · CommonJS
+> Desarrollada por [Devlas SpA](https://devlas.cl) · Licencia MIT · Node.js >= 18 · CommonJS
 
 ---
 
@@ -20,13 +20,13 @@ npm install @devlas/dte-sii
 
 - [Tipos de DTE soportados](#tipos-de-dte-soportados)
 - [Uso rápido](#uso-rápido)
-- [Flujo completo — Factura Electrónica (tipo 33)](#flujo-completo--factura-electrónica-tipo-33)
+- [Flujo completo: Factura Electrónica (tipo 33)](#flujo-completo-factura-electrónica-tipo-33)
 - [Boletas electrónicas](#boletas-electrónicas)
 - [Libros electrónicos y RCOF](#libros-electrónicos-y-rcof)
 - [Gestión de folios](#gestión-de-folios)
 - [Sesión y autenticación con el SII](#sesión-y-autenticación-con-el-sii)
 - [Aceptación y reclamo de DTE (WsReclamo)](#aceptación-y-reclamo-de-dte-wsreclamo)
-- [Estados SII — Interpretación de respuestas](#estados-sii--interpretación-de-respuestas)
+- [Estados SII: Interpretación de respuestas](#estados-sii-interpretación-de-respuestas)
 - [Manejo de errores](#manejo-de-errores)
 - [Configuración global y reintentos](#configuración-global-y-reintentos)
 - [Utilidades](#utilidades)
@@ -89,7 +89,7 @@ console.log('TrackID:', resultado.trackId)
 
 ---
 
-## Flujo completo — Factura Electrónica (tipo 33)
+## Flujo completo: Factura Electrónica (tipo 33)
 
 ### 1. Cargar certificado y CAF
 
@@ -218,7 +218,7 @@ Para obtener la fecha y número de resolución de producción automáticamente d
 
 ---
 
-### Certificación — SOAP (obligatorio)
+### Certificación: SOAP (obligatorio)
 
 ```javascript
 const { DTE, CAF, Certificado, EnvioBOLETA, EnviadorSII } = require('@devlas/dte-sii')
@@ -239,13 +239,13 @@ envio.setCaratula({
 })
 envio.generar()
 
-// SOAP — único método que funciona para certificación de boletas
+// SOAP - único método que funciona para certificación de boletas
 const enviador = new EnviadorSII(cert, 'certificacion')
 const resultado = await enviador.enviarDteSoap(envio)
 console.log('TrackID:', resultado.trackId)
 ```
 
-### Producción — REST (recomendado)
+### Producción: REST (recomendado)
 
 ```javascript
 const { DTE, CAF, Certificado, EnvioBOLETA, EnviadorSII } = require('@devlas/dte-sii')
@@ -266,7 +266,7 @@ envio.setCaratula({
 })
 envio.generar()
 
-// REST — método estándar para producción
+// REST - método estándar para producción
 const enviador = new EnviadorSII(cert, 'produccion')
 const resultado = await enviador.enviarBoleta(envio)
 console.log('TrackID:', resultado.trackId)
@@ -363,7 +363,7 @@ El flujo típico de producción combina las tres: `FolioRegistry` asigna folios 
 
 ---
 
-### FolioRegistry — registro local
+### FolioRegistry: registro local
 
 `FolioRegistry` mantiene un JSON en disco que registra qué folios están reservados, usados o pendientes de confirmación. Previene la doble asignación incluso ante reinicios del proceso.
 
@@ -386,7 +386,7 @@ const folio = registry.reserveNextFolio({
   cafFingerprint: fingerprint,
 })
 
-// … generar y enviar el DTE …
+// ... generar y enviar el DTE ...
 
 // Marcar folio como enviado al recibir trackId del SII
 registry.markFolioSent({
@@ -413,7 +413,7 @@ const cafXml = fs.readFileSync(cafPath, 'utf8')
 
 ---
 
-### FolioService — consulta, solicitud y anulación ante el SII
+### FolioService: consulta, solicitud y anulación ante el SII
 
 `FolioService` se comunica directamente con el SII para operar sobre folios: consultar el estado actual, solicitar un nuevo rango o anular folios no utilizados.
 
@@ -445,7 +445,7 @@ await service.anularFolios({
 
 ---
 
-### CafSolicitor — obtención automática de CAF
+### CafSolicitor: obtención automática de CAF
 
 `CafSolicitor` automatiza la descarga del XML del CAF desde el portal SII usando el certificado PFX, sin intervención manual. Es la pieza que cierra el ciclo de reposición automática de folios.
 
@@ -482,9 +482,9 @@ const TIPO_DTE   = 33
 const UMBRAL     = 10   // solicitar nuevo CAF cuando queden menos de N folios
 const CANTIDAD   = 200  // folios a solicitar
 
-const cert     = new Certificado(fs.readFileSync('empresa.pfx'), 'clave')
-const registry = new FolioRegistry()
-const service  = new FolioService({ ambiente: AMBIENTE, rutEmisor: RUT, certificado: cert })
+const cert      = new Certificado(fs.readFileSync('empresa.pfx'), 'clave')
+const registry  = new FolioRegistry()
+const service   = new FolioService({ ambiente: AMBIENTE, rutEmisor: RUT, certificado: cert })
 const solicitor = new CafSolicitor({ certificado: cert, ambiente: AMBIENTE })
 
 async function gestionarFolios() {
@@ -505,7 +505,7 @@ async function gestionarFolios() {
   //    y anularlos en el SII para mantener la contabilidad limpia
   const pendientes = registry.getFoliosPendientes({ rutEmisor: RUT, tipoDte: TIPO_DTE, ambiente: AMBIENTE })
   for (const rango of pendientes) {
-    console.log(`Anulando folios caídos: ${rango.desde}–${rango.hasta}`)
+    console.log(`Anulando folios caídos: ${rango.desde}-${rango.hasta}`)
     await service.anularFolios({
       tipoDte:    TIPO_DTE,
       folioDesde: rango.desde,
@@ -531,7 +531,7 @@ setInterval(() => gestionarFolios().catch(console.error), 60 * 60 * 1000)
 
 ## Sesión y autenticación con el SII
 
-### SiiPortalAuth — autenticación al portal
+### SiiPortalAuth: autenticación al portal
 
 Obtiene datos de empresa (nro_resol, fch_resol) directamente desde el portal SII usando el certificado PFX. Usa el patrón Singleton por certificado para evitar el límite de sesiones del SII.
 
@@ -551,7 +551,7 @@ const datos = await auth.obtenerDatosEmpresa()
 const cookies = await SiiPortalAuth.getCookieStringForPfx(cert)
 ```
 
-### SiiSession — sesiones HTTP autenticadas
+### SiiSession: sesiones HTTP autenticadas
 
 ```javascript
 const { SiiSession, Certificado } = require('@devlas/dte-sii')
@@ -595,33 +595,33 @@ await ws.ingresarAceptacion({
 
 ---
 
-## Estados SII — Interpretación de respuestas
+## Estados SII: Interpretación de respuestas
 
 `EnviadorSII` clasifica automáticamente cada código en `esExitoso`, `esIntermedio` o `esRechazado`.
 
-### QueryEstUp — Estado del sobre de envío
+### QueryEstUp - Estado del sobre de envío
 
 | Código | Descripción | `esExitoso` | `esIntermedio` | `esRechazado` |
 |--------|-------------|:-----------:|:--------------:|:-------------:|
-| `EPR`  | Envío Procesado | ✅ | | |
-| `RPR`  | Procesado con Reparos | ✅ | | |
-| `REC` / `SOK` / `FOK` / `CRT` / `PRD` / `PDR` | En proceso de validación | | ✅ | |
-| `RSC`  | Error en Schema XML | | | ✅ |
-| `RFR`  | Error en Firma Digital | | | ✅ |
-| `RCT`  | Error en Carátula | | | ✅ |
+| `EPR`  | Envío Procesado | ✓ | | |
+| `RPR`  | Procesado con Reparos | ✓ | | |
+| `REC` / `SOK` / `FOK` / `CRT` / `PRD` / `PDR` | En proceso de validación | | ✓ | |
+| `RSC`  | Error en Schema XML | | | ✓ |
+| `RFR`  | Error en Firma Digital | | | ✓ |
+| `RCT`  | Error en Carátula | | | ✓ |
 
-### QueryEstDte — Estado del DTE individual
+### QueryEstDte - Estado del DTE individual
 
 | Código | Descripción | Clasificación |
 |--------|-------------|---------------|
-| `DOK`  | Datos coinciden | ✅ Exitoso |
-| `DNK`  | Datos no coinciden | ⏳ Intermedio |
-| `FAU`  | Folio no autorizado | ❌ Rechazado |
-| `FNA`  | Emisor no habilitado | ❌ Rechazado |
-| `FAN` / `AND` / `ANC` | Anulado | ❌ Rechazado |
-| `EMP`  | Empresa sin autorización | ❌ Rechazado |
+| `DOK`  | Datos coinciden | ✓ Exitoso |
+| `DNK`  | Datos no coinciden | ~ Intermedio |
+| `FAU`  | Folio no autorizado | ✗ Rechazado |
+| `FNA`  | Emisor no habilitado | ✗ Rechazado |
+| `FAN` / `AND` / `ANC` | Anulado | ✗ Rechazado |
+| `EMP`  | Empresa sin autorización | ✗ Rechazado |
 
-### Códigos de error de consulta (−1 a −14)
+### Códigos de error de consulta (-1 a -14)
 
 Los valores negativos son **errores del servidor de consulta del SII**, no rechazo del documento. Resultan en `esIntermedio = true` y pueden reintentarse.
 
@@ -710,7 +710,7 @@ const {
 
 | Función / Constante | Descripción |
 |---------------------|-------------|
-| `formatRut(rut)` | Formatea RUT chileno con puntos y guión |
+| `formatRut(rut)` | Formatea RUT chileno con puntos y guion |
 | `validarRut(rut)` | Valida dígito verificador |
 | `calcularDV(rut)` | Calcula dígito verificador de un RUT |
 | `sanitizeSiiText(str)` | Elimina caracteres no aceptados por el SII |
@@ -819,35 +819,35 @@ import type {
 
 ```
 dte-sii/
-├── index.js              ← Punto de entrada; re-exporta todas las clases públicas
-├── dte-sii.d.ts          ← Definiciones TypeScript (979 líneas)
+├── index.js              <- Punto de entrada; re-exporta todas las clases públicas
+├── dte-sii.d.ts          <- Definiciones TypeScript (979 líneas)
 │
-├── Certificado.js        ← PFX/P12 loader
-├── CAF.js                ← CAF parser
-├── DTE.js                ← Document builder (XML, TED, firma)
-├── Signer.js             ← XML-DSig
-├── Envio.js              ← EnvioDTE + EnvioBOLETA
-├── EnviadorSII.js        ← SOAP/REST con SII; caché tokens; reintentos
+├── Certificado.js        <- PFX/P12 loader
+├── CAF.js                <- CAF parser
+├── DTE.js                <- Document builder (XML, TED, firma)
+├── Signer.js             <- XML-DSig
+├── Envio.js              <- EnvioDTE + EnvioBOLETA
+├── EnviadorSII.js        <- SOAP/REST con SII; caché tokens; reintentos
 │
-├── BoletaService.js      ← Flujo simplificado de boletas
-├── SiiPortalAuth.js      ← Autenticación portal SII (Singleton)
-├── SiiSession.js         ← Sesiones HTTP autenticadas
-├── SiiSessionStore.js    ← Persistencia de sesiones
-├── CafSolicitor.js       ← Solicitud automatizada de CAF
+├── BoletaService.js      <- Flujo simplificado de boletas
+├── SiiPortalAuth.js      <- Autenticación portal SII (Singleton)
+├── SiiSession.js         <- Sesiones HTTP autenticadas
+├── SiiSessionStore.js    <- Persistencia de sesiones
+├── CafSolicitor.js       <- Solicitud automatizada de CAF
 │
-├── FolioRegistry.js      ← Registro local de folios (JSON)
-├── FolioService.js       ← Gestión de folios ante el SII
+├── FolioRegistry.js      <- Registro local de folios (JSON)
+├── FolioService.js       <- Gestión de folios ante el SII
 │
-├── LibroBase.js          ← Clase base para libros electrónicos
-├── LibroCompraVenta.js   ← Libro compras/ventas
-├── LibroGuia.js          ← Libro guías de despacho
-├── ConsumoFolio.js       ← RCOF
+├── LibroBase.js          <- Clase base para libros electrónicos
+├── LibroCompraVenta.js   <- Libro compras/ventas
+├── LibroGuia.js          <- Libro guías de despacho
+├── ConsumoFolio.js       <- RCOF
 │
-├── WsReclamo.js          ← WS aceptación/reclamo de DTE
+├── WsReclamo.js          <- WS aceptación/reclamo de DTE
 │
-├── utils/                ← 20 módulos de utilidades (RUT, XML, cálculos, etc.)
-├── cert/                 ← 19 módulos para automatización de certificación SII
-└── docs/                 ← PDFs y XSDs oficiales del SII
+├── utils/                <- 20 módulos de utilidades (RUT, XML, cálculos, etc.)
+├── cert/                 <- 19 módulos para automatización de certificación SII
+└── docs/                 <- PDFs y XSDs oficiales del SII
 ```
 
 ---
@@ -873,8 +873,8 @@ const { CertFolioHelper } = require('@devlas/dte-sii')
 
 | Ambiente | Constante | Descripción |
 |----------|-----------|-------------|
-| `'certificacion'` | — | Apunta a `maullin.sii.cl` — para pruebas y certificación |
-| `'produccion'` | — | Apunta a `palena.sii.cl` — producción real |
+| `'certificacion'` | - | Apunta a `maullin.sii.cl` - para pruebas y certificación |
+| `'produccion'` | - | Apunta a `palena.sii.cl` - producción real |
 
 > Siempre verifica la variable de entorno `SII_AMBIENTE` (o el parámetro `ambiente`) antes de ejecutar código DTE para evitar envíos accidentales a producción.
 
@@ -882,7 +882,7 @@ const { CertFolioHelper } = require('@devlas/dte-sii')
 
 ## Licencia
 
-MIT — Copyright (c) 2026 [Devlas SpA](https://devlas.cl)
+MIT - Copyright (c) 2026 [Devlas SpA](https://devlas.cl)
 
 Implementa el protocolo XML público del SII de Chile.
 Inspirada conceptualmente en [LibreDTE de SASCO SpA](https://libredte.cl).
