@@ -349,7 +349,7 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
    * Obtiene datos del contribuyente desde ad_empresa2.
    * Incluye fch_resol, nro_resol, razón social, etc.
    *
-   * @param {string} rutEmpresa - RUT sin DV (ej: "78206276")
+   * @param {string} rutEmpresa - RUT sin DV (ej: "12345678")
    * @param {string} dvEmpresa  - DV (ej: "K")
    * @param {Object} [cookieJar] - Sesión ya autenticada (opcional; si omite, autenticará)
    * @returns {Promise<Object>} { rut, razonSocial, fch_resol, nro_resol, fecha_autorizacion }
@@ -378,7 +378,7 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
    * - fch_resol / nro_resol   (desde ad_empresa2)
    * - rut, razonSocial, giro, dirección, comuna, acteco  (desde pe_construccion_dte)
    *
-   * @param {string} rutEmpresa - RUT sin DV (ej: "78206276")
+   * @param {string} rutEmpresa - RUT sin DV (ej: "12345678")
    * @param {string} dvEmpresa  - DV (ej: "K")
    * @returns {Promise<Object>} Datos completos del emisor
    */
@@ -398,7 +398,7 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
    *      → redirige a ce_consulta_muestra_e con la tabla de datos
    *   2. Parsea la tabla: nombre, dirección, actividades económicas, glosa
    *
-   * @param {string} rutEmpresa - RUT sin DV (ej: "78206276")
+   * @param {string} rutEmpresa - RUT sin DV (ej: "12345678")
    * @param {string} dvEmpresa  - DV (ej: "K")
    * @param {Object} [cookieJar] - Sesión autenticada (si omite, autenticará)
    * @returns {Promise<Object>} { rut, razonSocial, direccion, comuna, dirReg, acteco, glosa }
@@ -424,10 +424,10 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
    * Parsea el HTML de ce_consulta_muestra_e.
    *
    * Estructura real del SII:
-   *   <td>DATOS DEL CONTRIBUYENTE RUT</td><td>78206276-K</td>
-   *   <td>NOMBRE O RAZÓN SOCIAL</td><td>DEVLAS SPA</td>
-   *   <td>DIRECCIÓN DE LA EMPRESA</td><td>AV.ESC.AGRICOLA 1710..., Comuna MACUL</td>
-   *   <td>DIRECCIÓN REGIONAL DEL CONTRIBUYENTE</td><td>NUNOA</td>
+   *   <td>DATOS DEL CONTRIBUYENTE RUT</td><td>12345678-9</td>
+   *   <td>NOMBRE O RAZÓN SOCIAL</td><td>EMPRESA EJEMPLO SPA</td>
+   *   <td>DIRECCIÓN DE LA EMPRESA</td><td>AV. EJEMPLO 123, Comuna Santiago</td>
+   *   <td>DIRECCIÓN REGIONAL DEL CONTRIBUYENTE</td><td>SANTIAGO</td>
    *   + tabla actividades: <td>620100</td><td>ACTIVIDADES DE PROGRAMACION...</td><td>SI</td>
    *   + tabla glosa: <td>GLOSA DESCRIPTIVA</td><td>Desarrollo de software...</td>
    * @private
@@ -599,7 +599,7 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
   /**
    * Obtiene el detalle de DTEs emitidos o recibidos desde www4.sii.cl.
    *
-   * @param {string} rut       - RUT sin DV (ej: "78206276")
+   * @param {string} rut       - RUT sin DV (ej: "12345678")
    * @param {string} dv        - DV (ej: "K")
    * @param {string} periodo   - Período YYYY-MM (ej: "2026-05")
    * @param {number} operacion - 1 = compras / recibidos, 2 = ventas / emitidos

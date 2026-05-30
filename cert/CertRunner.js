@@ -2656,10 +2656,10 @@ class CertRunner {
    *   4. Click "Bajar Nuevo Set" → descarga archivo .txt
    * @param {Object} opts
    * @param {string} [opts.setPath] - Ruta donde guardar el set
-   * @param {string} [opts.correoSet='sii.certificacion@devlas.cl'] - Correo proveedor para el set
+   * @param {string} [opts.correoSet=''] - Correo proveedor para el set
    * @returns {Promise<{success: boolean, setText?: string, error?: string}>}
    */
-  async obtenerSetBoletaPortal({ setPath, correoSet = 'sii.certificacion@devlas.cl' } = {}) {
+  async obtenerSetBoletaPortal({ setPath, correoSet = '' } = {}) {
     const puppeteer = require('puppeteer');
     const cookieJar = await this._obtenerCookiesSII();
     const puppeteerCookies = Object.entries(cookieJar).map(([name, value]) => ({
@@ -2944,16 +2944,16 @@ class CertRunner {
    * Marca los checkboxes de requisitos y rellena el formulario de proveedor.
    * @param {Object} opts
    * @param {string} [opts.linkConsulta='www.sii.cl']
-   * @param {string} [opts.rutProveedor='78206276-K']
-   * @param {string} [opts.nombreProveedor='DEVLAS SPA']
-   * @param {string} [opts.correoProveedor='certificacion.sii@devlas.cl']
+   * @param {string} opts.rutProveedor
+   * @param {string} opts.nombreProveedor
+   * @param {string} opts.correoProveedor
    * @returns {Promise<{success: boolean, mensaje?: string, error?: string}>}
    */
   async completarDeclaracionBoletaPortal({
     linkConsulta    = 'www.sii.cl',
-    rutProveedor    = '78206276-K',
-    nombreProveedor = 'DEVLAS SPA',
-    correoProveedor = 'certificacion.sii@devlas.cl',
+    rutProveedor    = '',
+    nombreProveedor = '',
+    correoProveedor = '',
   } = {}) {
     const puppeteer = require('puppeteer');
     const cookieJar = await this._obtenerCookiesSII();
