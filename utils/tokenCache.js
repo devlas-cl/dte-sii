@@ -18,8 +18,8 @@ const { getConfigSection } = require('./config');
 /**
  * Estructura del cache:
  * {
- *   'certificacion:rest:77111222-3': { token: 'xxx', expiresAt: Date },
- *   'produccion:soap:77111222-3': { token: 'yyy', expiresAt: Date },
+ *   'certificacion:rest:12345678-9': { token: 'xxx', expiresAt: Date },
+ *   'produccion:soap:12345678-9': { token: 'yyy', expiresAt: Date },
  * }
  */
 const tokenStore = new Map();
