@@ -49,8 +49,8 @@ class CafSolicitor {
     if (!options.rutEmisor) {
       throw new Error('CafSolicitor: options.rutEmisor es obligatorio');
     }
-    if (!options.pfxPath) {
-      throw new Error('CafSolicitor: options.pfxPath es obligatorio');
+    if (!options.pfxPath && !options.pfxBuffer) {
+      throw new Error('CafSolicitor: options.pfxPath o options.pfxBuffer es obligatorio');
     }
     if (!options.pfxPassword) {
       throw new Error('CafSolicitor: options.pfxPassword es obligatorio');
@@ -61,8 +61,9 @@ class CafSolicitor {
     this.baseDir = options.baseDir || path.resolve(__dirname, '..', '..');
     this.runStamp = options.runStamp || new Date().toISOString().replace(/[:.]/g, '-');
 
-    // Reutilizar sesión SII global si ya existe para este ambiente+rut.
-    // Esto evita abrir múltiples sesiones en el portal del SII.
+    // pfxBuffer tiene prioridad sobre pfxPath para evitar I/O a disco
+    const _pfxBuffer = options.pfxBuffer || fs.readFileSync(options.pfxPath);
+
     const sessionKey = `${this.ambiente}::${this.rutEmisor}`;
     if (_sessionRegistry.has(sessionKey)) {
       this.session = _sessionRegistry.get(sessionKey);
@@ -70,19 +71,16 @@ class CafSolicitor {
     } else {
       this.session = new SiiSession({
         ambiente: this.ambiente,
-        pfxPath: options.pfxPath,
+        pfxBuffer: _pfxBuffer,
         pfxPassword: options.pfxPassword,
       });
 
-      // Intentar reutilizar cookies del store compartido (SiiPortalAuth o sesión previa).
-      // También calcula certHash para escribir de vuelta al store cuando este SiiSession autentique.
       let certHash = null;
       try {
-        const pfxBuffer = fs.readFileSync(options.pfxPath);
-        const { certPem } = SiiPortalAuth._extractPems(pfxBuffer, options.pfxPassword);
+        const { certPem } = SiiPortalAuth._extractPems(_pfxBuffer, options.pfxPassword);
         certHash = crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
 
-        const existingCookies = SiiPortalAuth.getCookieStringForPfx(pfxBuffer, options.pfxPassword);
+        const existingCookies = SiiPortalAuth.getCookieStringForPfx(_pfxBuffer, options.pfxPassword);
         if (existingCookies) {
           this.session.cookieJar = existingCookies;
           console.log('[CafSolicitor] 🔗 Sesión SII pre-cargada desde store compartido — sin auth extra');
