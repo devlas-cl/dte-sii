@@ -192,6 +192,8 @@ class EnviadorSII {
 </soapenv:Envelope>`;
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const soapTimeout = setTimeout(() => controller.abort(), getConfigSection('timeout')?.soap || 30000);
       try {
         if (attempt > 1) {
           log.log(` [...] Reintento semilla SOAP ${attempt}/${maxRetries}...`);
@@ -205,7 +207,9 @@ class EnviadorSII {
             'SOAPAction': '',
           },
           body: soapEnvelope,
+          signal: controller.signal,
         });
+        clearTimeout(soapTimeout);
 
         if (!response.ok) {
           if (isRetryableStatus(response.status) && attempt < maxRetries) {
@@ -232,6 +236,7 @@ class EnviadorSII {
 
         throw siiError('No se pudo extraer semilla de la respuesta SOAP', ERROR_CODES.SII_INVALID_RESPONSE);
       } catch (error) {
+        clearTimeout(soapTimeout);
         if (isRetryableError(error) && attempt < maxRetries) {
           log.log(` [!] Error de conexión semilla SOAP (${error.cause?.code || 'socket'}), reintentando...`);
           continue;
@@ -264,6 +269,8 @@ class EnviadorSII {
     const url = this.urls[this.ambiente].tokenSoap;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const soapTimeout = setTimeout(() => controller.abort(), getConfigSection('timeout')?.soap || 30000);
       try {
         if (attempt > 1) {
           log.log(` [...] Reintento token SOAP ${attempt}/${maxRetries}...`);
@@ -289,7 +296,9 @@ class EnviadorSII {
             'SOAPAction': '',
           },
           body: soapEnvelope,
+          signal: controller.signal,
         });
+        clearTimeout(soapTimeout);
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -328,6 +337,7 @@ class EnviadorSII {
 
         throw siiError('No se pudo obtener token SOAP del SII', ERROR_CODES.SII_INVALID_RESPONSE);
       } catch (error) {
+        clearTimeout(soapTimeout);
         if (isRetryableError(error) && attempt < maxRetries) {
           log.log(` [!] Error de conexión token SOAP (${error.cause?.code || 'socket'}), reintentando...`);
           continue;
