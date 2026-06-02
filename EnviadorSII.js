@@ -12,8 +12,9 @@
  * - Consulta de estado de envíos
  */
 
-const https = require('https');
-const forge = require('node-forge');
+const https  = require('https');
+const crypto = require('crypto');
+const forge  = require('node-forge');
 const FormData = require('form-data');
 const { 
   saveEnvioArtifacts,
@@ -82,6 +83,49 @@ class EnviadorSII {
         tokenSoap: SOAP_ENDPOINTS.produccion.token,
       },
     };
+  }
+
+  // ============================================
+  // TLS helper — remplaza fetch() para endpoints SII
+  // ============================================
+
+  /**
+   * POST HTTPS a un endpoint SII con opciones TLS compatibles (rejectUnauthorized:false,
+   * TLSv1.2 max, legacy renegotiation). Reemplaza fetch() que usa undici y no acepta
+   * estas opciones, causando EPROTO/alert 48 "unknown_ca" en maullin/palena.
+   * @param {string} urlStr
+   * @param {{ headers?: Record<string,string>, body?: Buffer|string, timeoutMs?: number }} opts
+   * @returns {Promise<{ ok: boolean, status: number, text: string }>}
+   */
+  _siiPost(urlStr, { headers = {}, body = '', timeoutMs = 30000 } = {}) {
+    return new Promise((resolve, reject) => {
+      const url   = new URL(urlStr);
+      const buf   = Buffer.isBuffer(body) ? body : Buffer.from(body, 'latin1');
+      const opts  = {
+        hostname: url.hostname,
+        port:     url.port || 443,
+        path:     url.pathname + url.search,
+        method:   'POST',
+        headers:  { 'Content-Length': buf.length, ...headers },
+        rejectUnauthorized: false,
+        maxVersion: 'TLSv1.2',
+        secureOptions:
+          crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION |
+          crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+      };
+      const req = https.request(opts, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('latin1');
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text });
+        });
+      });
+      req.on('error', reject);
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error(`_siiPost timeout: ${urlStr}`)); });
+      req.write(buf);
+      req.end();
+    });
   }
 
   // ============================================
@@ -192,24 +236,17 @@ class EnviadorSII {
 </soapenv:Envelope>`;
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const controller = new AbortController();
-      const soapTimeout = setTimeout(() => controller.abort(), getConfigSection('timeout')?.soap || 30000);
       try {
         if (attempt > 1) {
           log.log(` [...] Reintento semilla SOAP ${attempt}/${maxRetries}...`);
           await wait(attempt * 1000);
         }
 
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'text/xml; charset=utf-8',
-            'SOAPAction': '',
-          },
+        const response = await this._siiPost(url, {
+          headers: { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '' },
           body: soapEnvelope,
-          signal: controller.signal,
+          timeoutMs: getConfigSection('timeout')?.soap || 30000,
         });
-        clearTimeout(soapTimeout);
 
         if (!response.ok) {
           if (isRetryableStatus(response.status) && attempt < maxRetries) {
@@ -219,7 +256,7 @@ class EnviadorSII {
           throw siiError(`Error obteniendo semilla SOAP: ${response.status}`, ERROR_CODES.SII_CONNECTION_FAILED);
         }
 
-        const xml = await response.text();
+        const xml = response.text;
         // Usar utilidad centralizada para decodificar entidades
         const decodedXml = decodeXmlEntities(xml);
 
@@ -236,9 +273,8 @@ class EnviadorSII {
 
         throw siiError('No se pudo extraer semilla de la respuesta SOAP', ERROR_CODES.SII_INVALID_RESPONSE);
       } catch (error) {
-        clearTimeout(soapTimeout);
         if (isRetryableError(error) && attempt < maxRetries) {
-          log.log(` [!] Error de conexión semilla SOAP (${error.cause?.code || 'socket'}), reintentando...`);
+          log.log(` [!] Error de conexión semilla SOAP (${error.code || error.cause?.code || 'socket'}), reintentando...`);
           continue;
         }
         throw error;
@@ -269,8 +305,6 @@ class EnviadorSII {
     const url = this.urls[this.ambiente].tokenSoap;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const controller = new AbortController();
-      const soapTimeout = setTimeout(() => controller.abort(), getConfigSection('timeout')?.soap || 30000);
       try {
         if (attempt > 1) {
           log.log(` [...] Reintento token SOAP ${attempt}/${maxRetries}...`);
@@ -289,27 +323,21 @@ class EnviadorSII {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'text/xml; charset=utf-8',
-            'SOAPAction': '',
-          },
+        const response = await this._siiPost(url, {
+          headers: { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '' },
           body: soapEnvelope,
-          signal: controller.signal,
+          timeoutMs: getConfigSection('timeout')?.soap || 30000,
         });
-        clearTimeout(soapTimeout);
 
         if (!response.ok) {
-          const errorText = await response.text();
           if (isRetryableStatus(response.status) && attempt < maxRetries) {
             log.log(` [!] Error token SOAP (${response.status}), reintentando...`);
             continue;
           }
-          throw siiError(`Error obteniendo token SOAP: ${response.status} - ${errorText}`, ERROR_CODES.SII_CONNECTION_FAILED);
+          throw siiError(`Error obteniendo token SOAP: ${response.status} - ${response.text}`, ERROR_CODES.SII_CONNECTION_FAILED);
         }
 
-        const xml = await response.text();
+        const xml = response.text;
         const decodedXml = xml
           .replace(/&lt;/g, '<')
           .replace(/&gt;/g, '>')
@@ -337,9 +365,8 @@ class EnviadorSII {
 
         throw siiError('No se pudo obtener token SOAP del SII', ERROR_CODES.SII_INVALID_RESPONSE);
       } catch (error) {
-        clearTimeout(soapTimeout);
         if (isRetryableError(error) && attempt < maxRetries) {
-          log.log(` [!] Error de conexión token SOAP (${error.cause?.code || 'socket'}), reintentando...`);
+          log.log(` [!] Error de conexión token SOAP (${error.code || error.cause?.code || 'socket'}), reintentando...`);
           continue;
         }
         throw error;
@@ -766,19 +793,14 @@ class EnviadorSII {
     log.log('Consultando estado SOAP:', urlQueryEstUp);
     log.log(' TrackID:', trackId, 'RUT:', rutEmisor);
     
-    const response = await fetch(urlQueryEstUp, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/xml; charset=utf-8',
-        'SOAPAction': '',
-      },
+    const response = await this._siiPost(urlQueryEstUp, {
+      headers: { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '' },
       body: soapBody,
+      timeoutMs: 30000,
     });
-    
-    const text = await response.text();
-    
+
     // Usar decodeXmlEntities centralizado
-    const decoded = decodeXmlEntities(text).replace(/&#xd;/g, '\n');
+    const decoded = decodeXmlEntities(response.text).replace(/&#xd;/g, '\n');
     
 
 
@@ -818,6 +840,10 @@ class EnviadorSII {
         break;
       case 'RPR':
         mensaje = '[!] Aceptado con Reparos';
+        esExitoso = true;
+        break;
+      case 'LOK':
+        mensaje = `[OK] Envio de Libro Aceptado - Cuadrado: ${glosa || ''}`.trim();
         esExitoso = true;
         break;
       case 'REC':
@@ -875,6 +901,20 @@ class EnviadorSII {
         break;
       case 'PDR':
         mensaje = '[...] Envío en Proceso - Validando...';
+        esIntermedio = true;
+        break;
+      case 'LNC':
+        mensaje = `[ERR] Tipo de Envio de Libro No Corresponde: ${glosa || 'Período ya tiene LTC'}`;
+        esRechazado = true;
+        break;
+      case 'LRH':
+        mensaje = `[ERR] Libro Rechazado con Historial: ${glosa || 'Rechazo con registro'}`;
+        esRechazado = true;
+        break;
+      case 'LSO':
+        // Schema de Envio de Libro Correcto: schema validado, SII aún no procesó el contenido.
+        // Es un estado INTERMEDIO — el libro no está en LTC todavía.
+        mensaje = '[...] Schema de Libro Correcto - Procesando contenido...';
         esIntermedio = true;
         break;
       // Códigos numéricos negativos = errores del servicio de consulta SII (NO rechazo del documento)
@@ -1236,15 +1276,7 @@ class EnviadorSII {
     const backoffMultiplier = retryConfig?.backoffMultiplier || 1.8;
     let lastError = null;
 
-    // Calcular Content-Length según tipo de body
-    const contentLength = Buffer.isBuffer(body) 
-      ? body.length.toString() 
-      : Buffer.byteLength(body).toString();
-
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000);
-
       try {
         if (attempt > 1) {
           const delay = Math.min(initialDelay * Math.pow(backoffMultiplier, attempt - 2), 15000);
@@ -1252,28 +1284,23 @@ class EnviadorSII {
           await new Promise(resolve => setTimeout(resolve, delay));
         }
 
-        const response = await fetch(url, {
-          method: 'POST',
+        const response = await this._siiPost(url, {
           headers: {
             'Cookie': `TOKEN=${this.tokenSoap}`,
             'Content-Type': `multipart/form-data; boundary=${boundary}`,
             'User-Agent': 'Mozilla/4.0 ( compatible; PROG 1.0; Windows NT)',
             'Accept': '*/*',
             'Connection': 'keep-alive',
-            'Content-Length': contentLength,
           },
           body: body,
-          signal: controller.signal,
+          timeoutMs: 60000,
         });
-        clearTimeout(timeout);
 
-        const responseText = await response.text();
-
-        const result = this._parsearRespuestaSoap(responseText, response.ok, response.status, tipoEnvio);
+        const result = this._parsearRespuestaSoap(response.text, response.ok, response.status, tipoEnvio);
         
         saveEnvioArtifacts({
           xml,
-          responseText,
+          responseText: response.text,
           responseOk: response.ok,
           responseStatus: response.status,
           trackId: result.trackId,
@@ -1283,27 +1310,26 @@ class EnviadorSII {
 
         return result;
       } catch (fetchError) {
-        clearTimeout(timeout);
         lastError = fetchError;
-        
+
         // Usar isRetryableError centralizado de utils
         if (isRetryableError(fetchError) && attempt < maxRetries) {
-          log.log(` [!] Error de conexión ${tipoEnvio} (${fetchError.cause?.code || 'socket'}), reintentando...`);
+          log.log(` [!] Error de conexión ${tipoEnvio} (${fetchError.code || fetchError.cause?.code || 'socket'}), reintentando...`);
           continue;
         }
-        
+
         saveEnvioArtifacts({
           xml,
-          responseText: `ERROR_FETCH: ${fetchError.message}`,
+          responseText: `ERROR: ${fetchError.message}`,
           responseOk: false,
           responseStatus: null,
           trackId: null,
           ambiente: this.ambiente,
           tipoEnvio,
-          error: fetchError.cause || fetchError,
+          error: fetchError,
         });
 
-        log.error('Fetch error details:', fetchError.cause || fetchError);
+        log.error('Error en envío SII:', fetchError.message);
         throw fetchError;
       }
     }
@@ -1379,6 +1405,16 @@ class EnviadorSII {
         return {
           ok: false, status,
           error: `XML rechazado por SII: esquema inválido (${detailMsg}). El XML contiene campos malformados o la referencia de esquema no es reconocida.`,
+          respuesta: responseText, duplicado: false,
+        };
+      }
+
+      // cvc-*: error de validación XSD (p.ej. elemento fuera de orden, tipo incorrecto)
+      // El SII puede retornar status 7 para errores XSD sin prefijo SCH-00001
+      if (detailMsg.includes('cvc-')) {
+        return {
+          ok: false, status,
+          error: `XML rechazado por SII: error de validación XSD. Detail: ${detailMsg}`,
           respuesta: responseText, duplicado: false,
         };
       }

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Devlas SpA — https://devlas.cl
+﻿// Copyright (c) 2026 Devlas SpA — https://devlas.cl
 // Licencia MIT. Ver archivo LICENSE para mas detalles.
 /**
  * CertRunner - Orquestador del proceso de certificación SII
@@ -399,8 +399,19 @@ class CertRunner {
       if (noProcessedError && intento < maxIntentos) {
         console.log(` [...] SII aún procesando, reintentando en ${intervalo / 1000}s...`);
         await sleep(intervalo);
+      } else if (result.conErrores) {
+        // SII reporta errores de contenido.
+        // Si verificado === false (campos vacíos), los TrackIds aún no están en el portal → reintentar.
+        // Si los campos sí aparecieron, es un error real de contenido → no reintentar.
+        if (result.verificado === false && intento < maxIntentos) {
+          console.log(` [!] ENVIO CON ERRORES pero campos vacíos — TrackIds aún no disponibles. Reintentando en ${intervalo / 1000}s...`);
+          await sleep(intervalo);
+        } else {
+          console.log(` [ERR] Contenido rechazado por SII (ENVIO CON ERRORES O REPAROS): ${(result.nombresConError || []).join(', ')}`);
+          break;
+        }
       } else if (result.allRejected) {
-        // SII rechazó todos los sets/libros — puede ser período incorrecto (libros) o TrackID no procesado aún (simulación)
+        // SII rechazó todos los sets/libros — período incorrecto, no tiene sentido reintentar
         if (retryOnAllRejected && intento < maxIntentos) {
           console.log(` [!] S21 — SII aún procesando TrackID, reintentando en ${intervalo / 1000}s...`);
           await sleep(intervalo);
@@ -517,10 +528,97 @@ class CertRunner {
     const resultados = {};
     const errores = [];
 
-    // Decrementar período UNA VEZ para todos los libros (todos usan el mismo período)
-    this._decrementarPeriodoLibros();
+    // Consultar QEstLibro hacia atrás hasta encontrar 2 años consecutivos sin entradas.
+    // En entornos con historial extenso (ej: pruebas desde 2003) esto cubre todo el rango.
+    const _nowFase4 = new Date();
+    const _añoActual = _nowFase4.getFullYear();
+    const _ocupados = new Set();
+    let _librosPortal = {};
+    // QEstLibro siempre devuelve "Recibido" como estado — no hay distinción entre LTC/LRH.
+    // Cualquier período con entrada existente se considera ocupado (hay un libro previo enviado).
+    const _esConforme = (_estadoStr) => true; // toda entrada en QEstLibro = período ocupado
+    {
+      let _yq = _añoActual;
+      let _añosSinEntradas = 0;
+      while (_yq >= 1990) {
+        const _yStr = String(_yq);
+        let _nPeriodos = 0;
+        try {
+          // Timeout de 12s por petición para evitar colgarse en años sin datos del SII.
+          const _timeoutProm = new Promise((_, r) => setTimeout(() => r(new Error('timeout QEstLibro')), 12000));
+          const _data = await Promise.race([this.siiCert.consultarLibrosExistentes(_yStr), _timeoutProm]);
+          _nPeriodos = Object.keys(_data).length;
+          let _conformes = 0;
+          for (const [_p, _libros] of Object.entries(_data)) {
+            if (Object.values(_libros).some(l => _esConforme(l.estado))) {
+              _ocupados.add(_p);
+              _conformes++;
+            }
+          }
+          if (_yq === _añoActual) _librosPortal = _data;
+          if (_nPeriodos > 0) console.log(`[INFO] QEstLibro ${_yStr}: ${_nPeriodos} períodos (${_conformes} bloqueados)`);
+        } catch (_e) {
+          console.warn(`[!] No se pudo consultar QEstLibro ${_yStr}: ${_e.message}`);
+        }
+        // Early exit: 2 años consecutivos sin entradas → no hay más historial que leer.
+        if (_nPeriodos === 0) {
+          _añosSinEntradas++;
+          if (_añosSinEntradas >= 2) {
+            console.log(`[INFO] QEstLibro: 2 años consecutivos sin datos (${_yStr}) — fin de escaneo.`);
+            break;
+          }
+        } else {
+          _añosSinEntradas = 0;
+        }
+        _yq--;
+      }
+    }
+    console.log(`[INFO] Períodos bloqueados (QEstLibro): ${_ocupados.size} — rango ${[..._ocupados].sort()[0] ?? '-'} a ${[..._ocupados].sort().at(-1) ?? '-'}`);
+
+    // Período = derivado del FchDoc real de los documentos del SET.
+    // El SII genera el SET con fecha = hoy, por lo que PeriodoTributario debe coincidir
+    // con el mes de esas fechas. Usar currentMonth-1 causa "ENVIO CON ERRORES O REPAROS".
+    let _periodoBase = null;
+    const _fchDocMuestra =
+      this._estructuras?.libroCompras?.detalle?.[0]?.FchDoc ||
+      this._estructuras?.libroComprasExentos?.detalle?.[0]?.FchDoc;
+    if (_fchDocMuestra) {
+      const _dt = new Date(_fchDocMuestra);
+      if (!isNaN(_dt.getTime())) {
+        // Usar UTC para evitar que el offset de zona horaria local (ej: UTC-3 en Chile)
+        // desplace la fecha al mes anterior (ej: '2026-06-01' → 2026-05-31 local → mes 5).
+        _periodoBase = `${_dt.getUTCFullYear()}-${String(_dt.getUTCMonth() + 1).padStart(2, '0')}`;
+        console.log(`[INFO] Período derivado de FchDoc en estructuras (${_fchDocMuestra}): ${_periodoBase}`);
+      }
+    }
+    if (!_periodoBase) {
+      // Fallback: mes actual UTC
+      _periodoBase = `${_nowFase4.getUTCFullYear()}-${String(_nowFase4.getUTCMonth() + 1).padStart(2, '0')}`;
+      console.log(`[INFO] Período por fallback (mes actual UTC): ${_periodoBase}`);
+    }
+
+    // Helper: salta períodos conocidos en QEstLibro (ocupados) al buscar uno libre.
+    // Usa el set _ocupados ya construido. Siempre llama a _decrementarPeriodoLibros al menos una vez
+    // antes de entrar, así que solo sirve para saltar DESPUÉS de haber decrementado.
+    const _saltarOcupados = (tag = '') => {
+      let _saltos = 0;
+      while (_ocupados.has(this._getPeriodoLibros()) && _saltos < 400) {
+        console.log(` [skip${tag}] ${this._getPeriodoLibros()} está en QEstLibro — saltando...`);
+        this._decrementarPeriodoLibros();
+        _saltos++;
+      }
+      return _saltos;
+    };
+
+    // Usar siempre el período derivado de FchDoc como punto de partida.
+    // En entornos de certificación con historial de años, QEstLibro está lleno de
+    // entradas antiguas y saltar sobre ellas lleva a períodos LTC inesperados.
+    // Con _ocupados completo (todos los años hasta 1990), el skip inicial es seguro:
+    // salta directamente al primer período genuinamente libre.
+    this.resetPeriodoLibros(_periodoBase);
+    const _busquedaHuecos = _saltarOcupados();
     const _periodoComunLibros = this._getPeriodoLibros();
-    console.log(` Período para todos los libros: ${_periodoComunLibros}`);
+    console.log(` Período inicial: ${_periodoComunLibros}${_busquedaHuecos > 0 ? ` (saltados ${_busquedaHuecos} períodos ocupados desde ${_periodoBase})` : ''}`);
 
     // Verificar cuáles libros ya están REVISADO CONFORME en el portal (no re-enviar)
     let _estadoActual = {};
@@ -564,8 +662,19 @@ class CertRunner {
         console.log('\nEnviando Libro de Compras...');
         resultados.libroCompras = await this.ejecutarLibroCompras({ ...options, periodo: _periodoComunLibros });
         if (!resultados.libroCompras.success) {
-          emitProgress(STEPS.BOOK_ERROR, { book: 'libroCompras', error: resultados.libroCompras.error });
-          errores.push(`Libro Compras: ${resultados.libroCompras.error}`);
+          const _errLC = resultados.libroCompras.error || '';
+          if (/duplicado|cvc-/i.test(_errLC)) {
+            console.log('\n[!] LibroCompras: SII ya tiene envío TOTAL para este período — reintentando con AJUSTE...');
+            emitProgress(STEPS.BOOK_SENDING, { book: 'libroCompras' });
+            resultados.libroCompras = await this.ejecutarLibroCompras({ ...options, periodo: _periodoComunLibros, tipoEnvio: 'AJUSTE' });
+          }
+          if (!resultados.libroCompras.success) {
+            emitProgress(STEPS.BOOK_ERROR, { book: 'libroCompras', error: resultados.libroCompras.error });
+            errores.push(`Libro Compras: ${resultados.libroCompras.error}`);
+          } else {
+            emitProgress(STEPS.BOOK_OK, { book: 'libroCompras', trackId: resultados.libroCompras.trackId });
+            _guardarResultadosParciales();
+          }
         } else {
           emitProgress(STEPS.BOOK_OK, { book: 'libroCompras', trackId: resultados.libroCompras.trackId });
           _guardarResultadosParciales();
@@ -679,19 +788,20 @@ class CertRunner {
 
       // Helper para re-enviar los libros no conformes con un nuevo período
       // keysAReenviar: Set opcional — si se pasa, solo re-envía las claves del Set
-      const _reenviarLibros = async (nuevoPeriodo, keysAReenviar) => {
+      // tipoEnvio: 'TOTAL' (default) o 'AJUSTE' (fallback cuando todos los períodos están agotados)
+      const _reenviarLibros = async (nuevoPeriodo, keysAReenviar, tipoEnvio) => {
         const _orden = [
-          { key: 'libroCompras', fn: (p) => this.ejecutarLibroCompras({ ...options, periodo: p }) },
-          { key: 'libroVentas', fn: (p) => this.ejecutarLibroVentas({ ...options, periodo: p }) },
-          { key: 'libroGuias', fn: (p) => this.ejecutarLibroGuias({ ...options, periodo: p }) },
-          { key: 'libroComprasExentos', fn: (p) => this.ejecutarLibroComprasExentos({ ...options, periodo: p }) },
+          { key: 'libroCompras', fn: (p, te) => this.ejecutarLibroCompras({ ...options, periodo: p, tipoEnvio: te }) },
+          { key: 'libroVentas', fn: (p, te) => this.ejecutarLibroVentas({ ...options, periodo: p, tipoEnvio: te }) },
+          { key: 'libroGuias', fn: (p, te) => this.ejecutarLibroGuias({ ...options, periodo: p, tipoEnvio: te }) },
+          { key: 'libroComprasExentos', fn: (p, te) => this.ejecutarLibroComprasExentos({ ...options, periodo: p, tipoEnvio: te }) },
         ];
         for (const { key, fn } of _orden) {
           if (resultados[key]?.conforme) continue; // ya conforme en SII
           if (keysAReenviar && !keysAReenviar.has(key)) continue; // filtro por S21
           emitProgress(STEPS.BOOK_SENDING, { book: key });
           try {
-            resultados[key] = await fn(nuevoPeriodo);
+            resultados[key] = await fn(nuevoPeriodo, tipoEnvio);
             if (!resultados[key].success) {
               emitProgress(STEPS.BOOK_ERROR, { book: key, error: resultados[key].error });
             } else {
@@ -701,27 +811,74 @@ class CertRunner {
             resultados[key] = { success: false, error: e.message };
           }
         }
+
+        // Polling SOAP para detectar LNC antes de intentar declarar.
+        // Si el SII rechaza el envío (LNC), limpiamos el trackId para que declararLibros
+        // no incluya ese libro, y marcamos el período como ocupado para no reintentarlo.
+        const _reenvTids = _orden.filter(({ key }) =>
+          !resultados[key]?.conforme &&
+          (!keysAReenviar || keysAReenviar.has(key)) &&
+          resultados[key]?.trackId
+        );
+        if (_reenvTids.length > 0) {
+          const _nombresReenv = _reenvTids.map(({ key }) => _KEY_A_SII_NOMBRE[key] || key);
+          console.log(`\n[SOAP-retry] Verificando estado de libros re-enviados (${_nombresReenv.join(', ')})...`);
+          await sleep(15000);
+          const _sRPend = new Set(_reenvTids.map(b => b.key));
+          const _sRErr = {};
+          for (let _ri = 0; _ri < 20 && _sRPend.size > 0; _ri++) {
+            for (const { key } of _reenvTids) {
+              if (!_sRPend.has(key)) continue;
+              const _tid = resultados[key].trackId;
+              const _nom = _KEY_A_SII_NOMBRE[key] || key;
+              try {
+                const _est = await _enviadorSoap.consultarEstadoSoap(_tid, _rutEmisor);
+                if (_est.ok === false) {
+                  _sRErr[key] = (_sRErr[key] || 0) + 1;
+                  if (_sRErr[key] >= 5) _sRPend.delete(key);
+                } else {
+                  _sRErr[key] = 0;
+                  if (!_est.esIntermedio) {
+                    _sRPend.delete(key);
+                    const _glosa = _est.glosa || _est.estado || '?';
+                    if (_est.esRechazado) {
+                      console.log(` [SOAP-retry] ${_nom} (${_tid}): [LNC] ${_glosa} — período ${nuevoPeriodo} ocupado`);
+                      _ocupados.add(nuevoPeriodo);
+                      resultados[key] = { success: false, error: `LNC: ${_glosa}`, periodo: nuevoPeriodo };
+                    } else {
+                      console.log(` [SOAP-retry] ${_nom} (${_tid}): [LOK] ${_glosa}`);
+                    }
+                  }
+                }
+              } catch (_e) {
+                _sRErr[key] = (_sRErr[key] || 0) + 1;
+                if (_sRErr[key] >= 5) _sRPend.delete(key);
+              }
+            }
+            if (_sRPend.size > 0) await sleep(15000);
+          }
+        }
       };
 
       // Polling de aprobación (reutilizable)
       // librosAVerificar: array de nombres SII a esperar. Si se omite, usa todos los no-conformes.
       // Devuelve { ok, estadosFinal }
-      // Bail-out anticipado: si todos los pendientes llevan 5 polls consecutivos en S21 → período incorrecto
+      // S21 = libro enviado al portal, PENDIENTE DE REVISIÓN — estado normal de espera.
+      // NO es un error de período. Solo LNC/LRH son errores reales que requieren acción.
       const _esperarAprobacion = async (librosAVerificar) => {
         const _todosCandidatos = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
         if (this._estructuras?.libroComprasExentos) _todosCandidatos.push('LIBRO DE COMPRAS PARA EXENTOS');
         const _librosAVerif = librosAVerificar || _todosCandidatos.filter(n => !_estaConforme(n));
         console.log(`\nEsperando aprobacion del SII para: ${_librosAVerif.join(', ')}`);
         let _ss = {};
-        let _consecutivosS21 = 0;
-        for (let _i = 0; _i < 20; _i++) {
+        for (let _i = 0; _i < 40; _i++) {
           await sleep(15000);
-          emitProgress(STEPS.POLLING, { intento: _i + 1, max: 20, label: 'libros' });
+          emitProgress(STEPS.POLLING, { intento: _i + 1, max: 40, label: 'libros' });
           const _poll = await this.siiCert.consultarEstadoSets();
           if (!_poll.success) continue;
           _ss = _poll.estadoSets || {};
           const _info = Object.entries(_ss).filter(([k]) => k.toUpperCase().includes('LIBRO')).map(([k, v]) => `${k.trim()}: ${v}`);
-          if (_info.length) console.log(` [...] Intento ${_i + 1}/20: ${_info.join(' | ')}`);
+          if (_info.length) console.log(` [...] Intento ${_i + 1}/40: ${_info.join(' | ')}`);
           const _librosObs = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
           const _todosObligatoriosOk = _librosObs.every(n => {
             const e = _findEntry(_ss, n);
@@ -736,6 +893,11 @@ class CertRunner {
             return e && (e[1] === 'LNC' || e[1] === 'LRH' || e[1].includes('RECHAZADO') || e[1].includes('ERROR'));
           });
           if (_todosOk) {
+            // Marcar conforme en resultados para que el RESUMEN final sea correcto.
+            for (const n of _librosAVerif) {
+              const _cKey = _SII_NOMBRE_A_KEY[n];
+              if (_cKey && resultados[_cKey]) resultados[_cKey].conforme = true;
+            }
             emitProgress(STEPS.BOOKS_DONE);
             console.log('\n[OK] LIBROS APROBADOS POR EL SII!');
             return { ok: true, estadosFinal: _ss };
@@ -744,46 +906,136 @@ class CertRunner {
             console.log('\n[ERR] Hay libros rechazados. Revisar emails del SII.');
             return { ok: false, estadosFinal: _ss };
           }
-          // Bail-out anticipado: todos los pendientes llevan N polls en S21 → período incorrecto
+          // S21 = procesando. Informar pero seguir esperando (no bail-out).
           const _pendientesAun = _librosAVerif.filter(n => {
             const e = _findEntry(_ss, n);
             return !e || (e[1] !== 'REVISADO CONFORME' && e[1] !== 'S25');
           });
-          const _todosS21 = _pendientesAun.length > 0 && _pendientesAun.every(n => {
-            const e = _findEntry(_ss, n);
-            return e && e[1] === 'S21';
-          });
-          if (_todosS21) {
-            _consecutivosS21++;
-            if (_consecutivosS21 >= 5) {
-              console.log(`\n[!] ${_pendientesAun.join(', ')} llevan ${_consecutivosS21} polls en S21 — período incorrecto.`);
-              return { ok: false, estadosFinal: _ss, stuckS21: true };
-            }
-          } else {
-            _consecutivosS21 = 0;
+          if (_pendientesAun.length > 0 && (_i + 1) % 4 === 0) {
+            console.log(` [...] Aún esperando (${Math.round((_i + 1) * 15 / 60)} min): ${_pendientesAun.join(', ')}`);
           }
         }
-        console.log('\n[!] Timeout (5 min). El SII aún no responde. Verifica con --avance más tarde.');
+        console.log('\n[!] Timeout (10 min). El SII aún no responde. Verifica con --avance más tarde.');
         return { ok: false, estadosFinal: _ss };
       };
 
+      // Polling SOAP: esperar que el SII procese los XMLs antes de declarar.
+      // Solo se sigue esperando mientras esIntermedio === true (REC, SOK, FOK, PRD, CRT, DNK...).
+      // Estados como LSO (no catalogado) no tienen esIntermedio = true → se consideran "listos".
+      const _librosParaConsultar = [
+        { key: 'libroCompras',        nombre: 'Libro Compras' },
+        { key: 'libroVentas',         nombre: 'Libro Ventas' },
+        { key: 'libroGuias',          nombre: 'Libro Guias' },
+        { key: 'libroComprasExentos', nombre: 'Libro Compras Exentos' },
+      ].filter(({ key }) => resultados[key]?.trackId);
+
+      const _enviadorSoap = this._createLibroEnviador();
+      const _rutEmisor = this.config.emisor.rut;
+
+      // Polling hasta 30 minutos (120 intentos × 15s).
+      // LSO (schema OK, procesando contenido) y otros intermedios esperan hasta LOK o rechazo.
+      const _MAX_SOAP_POLLS = 120;
+      const _SOAP_INTERVAL_MS = 15000;
+      let _soapPendientes = new Set(_librosParaConsultar.map(l => l.key));
+      const _soapFinalStates = {}; // key → resultado SOAP terminal (LOK/LNC/LRH/etc.)
+      const _soapErrCount = {};    // key → contador de errores SOAP consecutivos (ok:false o throw)
+      const _MAX_SOAP_ERR = 10;    // reintentos antes de desistir por errores transitorios
+
+      console.log('\n[SOAP] Consultando estado de envíos (espera hasta 15 min)...');
+      await sleep(15000); // espera inicial — SII tarda al menos 15s en validar schema
+      for (let _pi = 0; _pi < _MAX_SOAP_POLLS && _soapPendientes.size > 0; _pi++) {
+        for (const { key, nombre } of _librosParaConsultar) {
+          if (!_soapPendientes.has(key)) continue;
+          const _tid = resultados[key].trackId;
+          try {
+            const _est = await _enviadorSoap.consultarEstadoSoap(_tid, _rutEmisor);
+            const _estado = _est.estado || '?';
+            const _detalle = _est.glosa || _est.mensaje || _est.error || 'sin detalle';
+            if (_est.ok === false) {
+              // Sin tag <ESTADO> en respuesta — error de parseo/red, no un rechazo real.
+              // Reintentar hasta _MAX_SOAP_ERR veces consecutivas antes de desistir.
+              _soapErrCount[key] = (_soapErrCount[key] || 0) + 1;
+              if (_soapErrCount[key] >= _MAX_SOAP_ERR) {
+                _soapPendientes.delete(key);
+                console.log(` [SOAP] ${nombre} (${_tid}): [?] demasiados errores — desistiendo`);
+              } else {
+                console.log(` [SOAP] ${nombre} (${_tid}): [?] error transitorio (${_soapErrCount[key]}/${_MAX_SOAP_ERR}) — reintentando...`);
+              }
+            } else {
+              _soapErrCount[key] = 0; // reset en cualquier respuesta válida
+              if (!_est.esIntermedio) {
+                // Estado terminal: LOK (exitoso), LNC/LRH (rechazado), u otro no catalogado
+                _soapPendientes.delete(key);
+                _soapFinalStates[key] = _est;
+                const _tag = _est.esExitoso ? '[OK]' : _est.esRechazado ? '[ERR]' : '[->]';
+                console.log(` [SOAP] ${nombre} (${_tid}): ${_tag} ${_estado} — ${_detalle}`);
+              } else {
+                const _elapsed = Math.round((_pi * _SOAP_INTERVAL_MS + 15000) / 1000);
+                console.log(` [SOAP] ${nombre} (${_tid}): [...] ${_estado} — aún procesando (${_elapsed}s / ${_pi + 1}/${_MAX_SOAP_POLLS})`);
+              }
+            }
+          } catch (_e) {
+            _soapErrCount[key] = (_soapErrCount[key] || 0) + 1;
+            if (_soapErrCount[key] >= _MAX_SOAP_ERR) {
+              _soapPendientes.delete(key);
+              console.log(` [SOAP] ${nombre} (${_tid}): error — máx reintentos: ${_e.message}`);
+            } else {
+              console.log(` [SOAP] ${nombre} (${_tid}): error (${_soapErrCount[key]}/${_MAX_SOAP_ERR}) — reintentando: ${_e.message}`);
+            }
+          }
+        }
+        if (_soapPendientes.size > 0) await sleep(_SOAP_INTERVAL_MS);
+      }
+      if (_soapPendientes.size > 0) {
+        const _nombresTimeout = _librosParaConsultar.filter(l => _soapPendientes.has(l.key)).map(l => l.nombre);
+        console.log(` [SOAP] ${_nombresTimeout.join(', ')} siguen en proceso tras 15 min. Declarando igual — verifica correos del SII.`);
+      }
+
       // 4. Declarar + retry automático:
-      //    a) si allRejected al declarar → decrementar período y re-enviar todos
+      //    a) si allRejected al declarar → decrementar período y re-enviar TOTAL
+      //       (el período ya fue procesado en otra sesión → buscar uno libre)
       //    b) si libros quedan en S21 tras polling → decrementar y re-enviar solo los S21
       emitProgress(STEPS.BOOKS_DECLARING);
       console.log('\nDeclarando libros...');
-      const MAX_PERIOD_RETRIES = 120;
+      // 24 = ~2 años de meses. En entorno cert con histórico extenso puede haber
+      // muchos períodos LTC consecutivos antes de encontrar uno libre.
+      const MAX_PERIOD_RETRIES = 24;
+
+      // _librosPortal ya fue consultado arriba (antes de fijar período inicial)
+
       try {
         let declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
         resultados.declaracion = declaracion;
 
-        // Fase a: allRejected al declarar (período rechazado en pe_avance3)
+        // Fase a: allRejected → el período ya tiene data en el portal.
+        // Estrategia: decrementar uno a uno desde el período actual.
+        //   - Si tenemos LTC guardado localmente → AJUSTE una vez antes de decrementar.
+        //   - Si no hay LTC o AJUSTE también falló → decrementar y probar TOTAL.
+        // No hacemos saltos basados en el portal: QEstLibro solo cubre el año actual
+        // y puede haber entradas en años anteriores que no conocemos.
+        const _intentadoAjuste = new Set();
+
         for (let _pRetry = 0; _pRetry < MAX_PERIOD_RETRIES && declaracion.allRejected; _pRetry++) {
-          this._decrementarPeriodoLibros();
-          const _nuevoPeriodo = this._getPeriodoLibros();
-          console.log(`\n[!] Período rechazado por SII. Reintentando con ${_nuevoPeriodo} (${_pRetry + 1}/${MAX_PERIOD_RETRIES})...`);
-          emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
-          await _reenviarLibros(_nuevoPeriodo);
+          const _periodoActual = this._getPeriodoLibros();
+          const _tenemoLtc = !!this._leerLtcTotales(_periodoActual, 'COMPRA') || !!this._leerLtcTotales(_periodoActual, 'VENTA');
+          const _yaIntentadoAjuste = _intentadoAjuste.has(_periodoActual);
+
+          if (_tenemoLtc && !_yaIntentadoAjuste) {
+            console.log(`\n[!] ${_periodoActual}: LTC guardado — re-enviando con AJUSTE (intento ${_pRetry + 1})...`);
+            emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _periodoActual, intento: String(_pRetry + 1) });
+            _intentadoAjuste.add(_periodoActual);
+            await _reenviarLibros(_periodoActual, undefined, 'AJUSTE');
+          } else {
+            // Marcar este período como ocupado dinámicamente y saltar al siguiente libre.
+            _ocupados.add(_periodoActual);
+            this._decrementarPeriodoLibros();
+            _saltarOcupados('a'); // salta períodos conocidos (QEstLibro + descubiertos en tiempo real)
+            const _nuevoPeriodo = this._getPeriodoLibros();
+            const _razon = _yaIntentadoAjuste ? 'AJUSTE falló' : 'sin LTC local';
+            console.log(`\n[!] ${_periodoActual} (${_razon}) — probando TOTAL con ${_nuevoPeriodo} (intento ${_pRetry + 1})...`);
+            emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
+            await _reenviarLibros(_nuevoPeriodo, undefined, undefined);
+          }
           declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
           resultados.declaracion = declaracion;
         }
@@ -796,33 +1048,103 @@ class CertRunner {
           if (this._estructuras?.libroComprasExentos) _todosLibrosNombres.push('LIBRO DE COMPRAS PARA EXENTOS');
           let _librosAVerificar = _todosLibrosNombres.filter(n => !_estaConforme(n));
 
-          let { ok, estadosFinal } = await _esperarAprobacion(_librosAVerificar);
+          // Si SOAP detectó LNC/LRH para algún libro → excluirlos de la espera portal.
+          // El portal mostrará S21 para ellos (nunca resolverá) → phase b los maneja directamente.
+          const _soapLncNombres = Object.entries(_soapFinalStates)
+            .filter(([, est]) => est?.esRechazado)
+            .map(([k]) => _KEY_A_SII_NOMBRE[k])
+            .filter(Boolean);
+          // Si la declaración reportó errores de contenido para algún libro → también excluirlos.
+          // Esos libros tienen S21 en portal pero nunca resolverán a REVISADO CONFORME desde
+          // esta declaración → phase b los maneja directamente con nuevo período.
+          const _declaracionConErrorNombres = (declaracion.nombresConError || []);
+          const _excluirDeEspera = [...new Set([..._soapLncNombres, ..._declaracionConErrorNombres])];
+          const _librosAEsperar = _librosAVerificar.filter(n => !_excluirDeEspera.includes(n));
+          if (_soapLncNombres.length > 0) {
+            console.log(`\n[!] LNC vía SOAP en: ${_soapLncNombres.join(', ')} — esperando portal solo para: ${_librosAEsperar.join(', ') || 'ninguno'}`);
+          }
+          if (_declaracionConErrorNombres.length > 0) {
+            console.log(`\n[!] Errores de contenido en declaración: ${_declaracionConErrorNombres.join(', ')} — no esperando portal para ellos`);
+          }
 
-          // Fase b: algunos libros quedaron en S21 → re-enviar solo esos con período decrementado
+          let ok, estadosFinal;
+          if (_librosAEsperar.length > 0) {
+            ({ ok, estadosFinal } = await _esperarAprobacion(_librosAEsperar));
+          } else {
+            ok = false;
+            estadosFinal = {};
+          }
+          // Inyectar LNC de SOAP y errores de contenido de declaración en estadosFinal
+          for (const n of _soapLncNombres) estadosFinal[n] = 'LNC';
+          // Libros con errores de contenido en declaración = mismo tratamiento que LNC: period incorrecto
+          for (const n of _declaracionConErrorNombres) if (!estadosFinal[n]) estadosFinal[n] = 'LNC';
+          if (_excluirDeEspera.length > 0) ok = false;
+
+          // Fase b: libros con LNC/LRH/S21-timeout → reintentar con AJUSTE (si tenemos LTC) o nuevo período.
+          // - LNC/LRH = período tiene LTC → intentar AJUSTE si hay datos, sino decrementar.
+          // - S21 después de timeout = upload probablemente rechazado (SOAP LNC no reflejado en pe_avance2)
+          //   → mismo tratamiento que LNC.
+          const _intentadoAjusteB = new Set();
           for (let _pRetry = 0; !ok && _pRetry < MAX_PERIOD_RETRIES; _pRetry++) {
-            const _s21Keys = _getS21Keys(estadosFinal, _librosAVerificar);
-            if (_s21Keys.length === 0) break; // errores reales (LNC/LRH), no de período
+            // Libros con LNC/LRH o S21-timeout (no resuelto → asumimos error de período)
+            const _fallidos = Object.entries(estadosFinal)
+              .filter(([k, v]) => {
+                const ku = k.toUpperCase();
+                const esLibro = ku.includes('LIBRO');
+                const esFallido = (v === 'LNC' || v === 'LRH' || String(v).includes('RECHAZADO') || v === 'S21');
+                return esLibro && esFallido;
+              });
+            const _fallidosKeys = _fallidos.map(([k]) => _SII_NOMBRE_A_KEY[k]).filter(Boolean);
+            if (_fallidosKeys.length === 0) break; // todos conformes → salir
 
-            this._decrementarPeriodoLibros();
-            const _nuevoPeriodo = this._getPeriodoLibros();
-            const _s21Nombres = _s21Keys.map(k => _KEY_A_SII_NOMBRE[k]).filter(Boolean);
-            console.log(`\n[!] ${_s21Nombres.join(', ')} bloqueados en S21. Reintentando con período ${_nuevoPeriodo} (${_pRetry + 1}/${MAX_PERIOD_RETRIES})...`);
-            emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
+            const _periodoFase = this._getPeriodoLibros();
+            // Solo AJUSTE para libros que tienen su propio LTC guardado.
+            // LibroGuias y LibroComprasExentos nunca tienen LTC → van siempre a TOTAL en período nuevo.
+            const _LTC_TIPO_POR_LIBRO_B = { libroCompras: 'COMPRA', libroVentas: 'VENTA' };
+            const _hayLtcB = _fallidosKeys.some(k => {
+              const tipo = _LTC_TIPO_POR_LIBRO_B[k];
+              return tipo && !!this._leerLtcTotales(_periodoFase, tipo);
+            });
+            const _yaAjusteB = _intentadoAjusteB.has(_periodoFase);
+            const _fallidosNombres = _fallidosKeys.map(k => _KEY_A_SII_NOMBRE[k]).filter(Boolean);
 
-            await _reenviarLibros(_nuevoPeriodo, new Set(_s21Keys));
+            if (_hayLtcB && !_yaAjusteB) {
+              // Tenemos LTC guardado para este período → intentar AJUSTE antes de cambiar período
+              console.log(`\n[!] ${_fallidosNombres.join(', ')} fallidos en ${_periodoFase} — LTC local existe, probando AJUSTE (intento ${_pRetry + 1})...`);
+              emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _periodoFase, intento: String(_pRetry + 1) });
+              _intentadoAjusteB.add(_periodoFase);
+              await _reenviarLibros(_periodoFase, new Set(_fallidosKeys), 'AJUSTE');
+            } else {
+              // Sin LTC o AJUSTE ya intentado → marcar como ocupado y buscar período libre
+              _ocupados.add(_periodoFase);
+              this._decrementarPeriodoLibros();
+              _saltarOcupados('b');
+              const _nuevoPeriodo = this._getPeriodoLibros();
+              const _razonB = _yaAjusteB ? 'AJUSTE falló' : 'sin LTC local';
+              console.log(`\n[!] ${_fallidosNombres.join(', ')} (${_razonB}) — probando TOTAL en ${_nuevoPeriodo} (intento ${_pRetry + 1})...`);
+              emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
+              await _reenviarLibros(_nuevoPeriodo, new Set(_fallidosKeys), undefined);
+            }
             declaracion = await this.declararLibros({ ...resultados, ...(options.setsResultados || {}) });
             resultados.declaracion = declaracion;
 
             if (!declaracion.success && !declaracion.allRejected) {
-              console.log(`\n[ERR] Declaración fallida: ${declaracion.error}`);
-              break;
+              // Casos en que NO se debe cortar el loop:
+              // 1. Tras intentar AJUSTE → la siguiente iteración buscará período libre.
+              // 2. 'No hay libros para declarar' → todos los re-enviados tuvieron LNC en SOAP → continuar.
+              const _todosSoapLnc = (declaracion.error || '').includes('No hay libros para declarar');
+              if (_intentadoAjusteB.size > 0 || _todosSoapLnc) {
+                const _msg = _todosSoapLnc ? 'todos LNC en SOAP' : `AJUSTE falló (${declaracion.error})`;
+                console.log(`\n[!] Declaración fallida (${_msg}) — buscando período libre...`);
+              } else {
+                console.log(`\n[ERR] Declaración fallida: ${declaracion.error}`);
+                break;
+              }
             }
             if (declaracion.success) {
-              // Solo verificar los libros que acabamos de re-enviar
-              _librosAVerificar = _s21Nombres;
+              _librosAVerificar = _fallidosNombres;
               ;({ ok, estadosFinal } = await _esperarAprobacion(_librosAVerificar));
             }
-            // si allRejected → continuar loop (decrementar de nuevo)
           }
 
           if (!ok) {
@@ -985,6 +1307,47 @@ class CertRunner {
   }
 
   /**
+   * Guarda los totales del LTC (envío TOTAL/MENSUAL) para usar en futuros AJUSTE.
+   * @param {string} periodo - Período YYYY-MM
+   * @param {string} tipo - 'COMPRA' | 'VENTA'
+   * @param {Array} resumen - Array de totales por TpoDoc (igual estructura que setResumen)
+   * @private
+   */
+  _guardarLtcTotales(periodo, tipo, resumen) {
+    const ltcFile = path.join(this.debugDir, 'ltc-totales.json');
+    let data = {};
+    try {
+      if (fs.existsSync(ltcFile)) data = JSON.parse(fs.readFileSync(ltcFile, 'utf8'));
+    } catch (e) { /* usar vacío */ }
+    if (!data[periodo]) data[periodo] = {};
+    data[periodo][tipo] = resumen;
+    try {
+      fs.writeFileSync(ltcFile, JSON.stringify(data, null, 2));
+      console.log(` [LTC] Totales guardados: ${periodo}/${tipo} (${resumen.length} tipos doc)`);
+    } catch (e) {
+      console.warn(` [!] No se pudo guardar ltcTotales: ${e.message}`);
+    }
+  }
+
+  /**
+   * Lee los totales LTC guardados para un período y tipo.
+   * @param {string} periodo - Período YYYY-MM
+   * @param {string} tipo - 'COMPRA' | 'VENTA'
+   * @returns {Array|null} Array de totales o null si no hay datos
+   * @private
+   */
+  _leerLtcTotales(periodo, tipo) {
+    const ltcFile = path.join(this.debugDir, 'ltc-totales.json');
+    try {
+      if (fs.existsSync(ltcFile)) {
+        const data = JSON.parse(fs.readFileSync(ltcFile, 'utf8'));
+        return data[periodo]?.[tipo] || null;
+      }
+    } catch (e) { /* ignorar */ }
+    return null;
+  }
+
+  /**
    * Crea un enviador de libros
    * @private
    */
@@ -1016,9 +1379,21 @@ class CertRunner {
       periodo,
       certificado: this.certificado,
       signoNC: options.signoNC || 'POSITIVO',
+      tipoEnvio: options.tipoEnvio || 'TOTAL',
     });
 
-    const { libro, xml, detalle, resumen } = libroVentas.generar(setBasicoResult);
+    const { libro, xml: _xmlVentas, detalle, resumen } = libroVentas.generar(setBasicoResult);
+
+    // Si es AJUSTE, inyectar LTC para que TotalesPeriodo sea acumulado correcto
+    const _tipoEnvioVentas = options.tipoEnvio || 'TOTAL';
+    if (_tipoEnvioVentas === 'AJUSTE') {
+      const _ltcVentas = this._leerLtcTotales(periodo, 'VENTA');
+      if (_ltcVentas) {
+        libro.setLtcTotales(_ltcVentas);
+        libro.generar(); // re-firma con TotalesPeriodo correcto
+      }
+    }
+    const xml = libro.getXML() || _xmlVentas;
 
     // Guardar XML de debug
     const outPath = path.join(this.debugDir, 'libro-ventas.xml');
@@ -1037,9 +1412,13 @@ class CertRunner {
     };
 
     this.resultados.libroVentas = result;
-    
+
     if (result.success) {
       console.log(` [OK] Libro de Ventas enviado - TrackId: ${result.trackId}`);
+      // Persistir totales LTC para futuros AJUSTE de este período
+      if (_tipoEnvioVentas === 'TOTAL') {
+        this._guardarLtcTotales(periodo, 'VENTA', resumen);
+      }
     } else {
       console.log(` [ERR] Error enviando Libro de Ventas: ${result.error}`);
     }
@@ -1062,6 +1441,7 @@ class CertRunner {
       emisor: this.config.emisor,
       periodo,
       certificado: this.certificado,
+      tipoEnvio: options.tipoEnvio || 'TOTAL',
     });
 
     if (!libroComprasData?.detalle) {
@@ -1069,7 +1449,18 @@ class CertRunner {
     }
 
     console.log(` Generando Libro de Compras para período ${periodo} (${libroComprasData.detalle.length} documentos del SII)...`);
-    const { libro, xml, detalle, resumen } = libroCompras.generarDesdeEstructuras(libroComprasData, periodo);
+    const { libro, xml: _xmlCompras, detalle, resumen } = libroCompras.generarDesdeEstructuras(libroComprasData, periodo);
+
+    // Si es AJUSTE, inyectar LTC para que TotalesPeriodo sea acumulado correcto
+    const _tipoEnvioCompras = options.tipoEnvio || 'TOTAL';
+    if (_tipoEnvioCompras === 'AJUSTE') {
+      const _ltcCompras = this._leerLtcTotales(periodo, 'COMPRA');
+      if (_ltcCompras) {
+        libro.setLtcTotales(_ltcCompras);
+        libro.generar(); // re-firma con TotalesPeriodo correcto
+      }
+    }
+    const xml = libro.getXML() || _xmlCompras;
 
     // Guardar XML de debug
     const outPath = path.join(this.debugDir, 'libro-compras.xml');
@@ -1088,9 +1479,13 @@ class CertRunner {
     };
 
     this.resultados.libroCompras = result;
-    
+
     if (result.success) {
       console.log(` [OK] Libro de Compras enviado - TrackId: ${result.trackId}`);
+      // Persistir totales LTC para futuros AJUSTE de este período
+      if (_tipoEnvioCompras === 'TOTAL') {
+        this._guardarLtcTotales(periodo, 'COMPRA', resumen);
+      }
     } else {
       console.log(` [ERR] Error enviando Libro de Compras: ${result.error}`);
     }
@@ -1115,6 +1510,7 @@ class CertRunner {
       emisor: this.config.emisor,
       periodo,
       certificado: this.certificado,
+      tipoEnvio: options.tipoEnvio || 'TOTAL',
     });
 
     console.log(` Generando Libro de Compras para Exentos para período ${periodo} (${libroData.detalle.length} documentos del SII)...`);
@@ -1168,6 +1564,7 @@ class CertRunner {
       periodo,
       certificado: this.certificado,
       folioNotificacion: options.folioNotificacion || 3,
+      tipoEnvio: options.tipoEnvio || 'TOTAL',
     });
 
     const { libro, xml, detalle } = libroGuias.generar(setGuiaResult, {
@@ -1894,202 +2291,131 @@ class CertRunner {
   }
 
   /**
-   * Sube las 3 respuestas de intercambio a www4.sii.cl/pfeInternet usando Puppeteer.
-   * El portal GWT requiere que el JavaScript inicialice la sesión antes de aceptar uploads.
-   * Con Puppeteer el browser real ejecuta el JS del portal y los uploads quedan registrados.
+   * Sube las 3 respuestas de intercambio a www4.sii.cl/pfeInternet vía HTTP puro (sin Puppeteer).
+   * Flujo: warm-up → validarUsuario (GWT RPC) → uploadFile1/2/3 (multipart POST).
+   * Hashes GWT capturados 2026-06-01 desde INTERCAMBIO_SET.har.
    * @private
    */
   async _subirRespuestasPfeInternet({ recepcionXml, aprobacionXml, recibosXml, debugDir }) {
-    const puppeteer = require('puppeteer');
-    const os = require('os');
+    const PFE_BASE    = 'https://www4.sii.cl/pfeInternet/';
+    const PFE_PERM    = 'E487C7488217509D4EDCE9D341782C20'; // pfe.nocache.js 2026-06-01
+    const PFE_POLICY  = '4EB230A83E74980F353E4FCC209543CB'; // capturado 2026-06-01
+    const PFE_SVC     = 'cl.sii.sdi.dim.pfe.web.client.service.Facade';
 
-    // Guardar XMLs en archivos temporales para que Puppeteer pueda subirlos
-    const tmpDir = debugDir || path.join(os.tmpdir(), 'pfe-intercambio');
-    fs.mkdirSync(tmpDir, { recursive: true });
-    // Los labels deben coincidir con el texto del portal GWT (Archivo N: ...)
-    const archivos = [
-      { label: 'Respuesta de Intercambio', filename: 'respuesta-recepcion-envio.xml',     content: recepcionXml,  uploadN: 1 },
-      { label: 'Recibo de Mercaderias', filename: 'envio-recibos.xml',                  content: recibosXml,    uploadN: 2 },
-      { label: 'Resultado Aprobaci\u00f3n Comercial de Documento', filename: 'respuesta-aprobacion-comercial.xml', content: aprobacionXml, uploadN: 3 },
-    ];
-    for (const a of archivos) {
-      fs.writeFileSync(path.join(tmpDir, a.filename), a.content, 'utf8');
+    const { cookies, makeReq } = await this._autenticarPfeInternet();
+
+    const [empRut, empDv] = this.config.emisor.rut.replace(/\./g, '').split('-');
+    // Extraer RUT del certificado desde la ruta del PFX (e.g. "19925444-8.pfx")
+    const certBase = path.basename(this.config.certificado.path, '.pfx');
+    const [certRut, certDv = '0'] = certBase.includes('-') ? certBase.split('-') : [certBase, '0'];
+
+    const gwtHeaders = {
+      'Content-Type': 'text/x-gwt-rpc; charset=UTF-8',
+      'X-GWT-Module-Base': PFE_BASE,
+      'X-GWT-Permutation': PFE_PERM,
+      'Origin': 'https://www4.sii.cl',
+      'Referer': PFE_BASE,
+    };
+
+    // Parsear string table GWT (igual que pdfdteInternet)
+    const parseGwtTable = (body) => {
+      const stIdx = body.lastIndexOf(',["');
+      const stEnd = body.lastIndexOf('],');
+      if (stIdx === -1 || stEnd <= stIdx) return null;
+      try {
+        const raw = body.substring(stIdx + 1, stEnd + 1);
+        return JSON.parse(raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => `\\u00${h}`));
+      } catch (_) { return null; }
+    };
+
+    // === PASO 1: validarUsuario — verifica que empresa esté en estado P06 ===
+    // Payload GWT RPC de validarUsuario(UsuarioTo{empRut,empDv,certRut,certDv})
+    // String table: [base, policy, svc, method, UsuarioTo type, certDv, empDv, Integer type]
+    const validPayload = [
+      '7|0|8',
+      PFE_BASE, PFE_POLICY, PFE_SVC, 'validarUsuario',
+      'cl.sii.sdi.dim.pfe.to.UsuarioTo/3723336533',
+      certDv, empDv, 'java.lang.Integer/3438268394',
+      '1|2|3|4|1|5|5|0|0|0|0|6|7|8', empRut,
+      '0|0|0|0|0|8', certRut, '',
+    ].join('|');
+
+    console.log(' → pfeInternet: validarUsuario...');
+    const validResp = await makeReq(`${PFE_BASE}facade`, {
+      method: 'POST', body: validPayload, headers: gwtHeaders, cookies,
+    });
+
+    if (debugDir) fs.writeFileSync(path.join(debugDir, 'pfe-validar-resp.txt'), validResp.body.substring(0, 1000), 'utf8');
+
+    const validTable = parseGwtTable(validResp.body);
+    // MensajeTo con mensaje de error → empresa no está en P06
+    const errorMsg = validTable?.find(s => typeof s === 'string' && s.length > 5 && !/^(cl\.|java\.)/.test(s));
+    if (errorMsg && /no esta en estado|error/i.test(errorMsg)) {
+      const estadoMatch = errorMsg.match(/estado:\s*(\w+)/i);
+      const estadoActual = estadoMatch ? estadoMatch[1] : 'desconocido';
+      console.log(` → pfeInternet: empresa NO en P06 (${estadoActual}) — ${errorMsg}`);
+      return {
+        success: false,
+        estadoPortal: estadoActual,
+        error: errorMsg,
+        hint: estadoActual === 'P90'
+          ? 'Fase de intercambio ya completada (empresa en P90)'
+          : `Estado SII pfeInternet: ${estadoActual}`,
+      };
     }
+    console.log(' ✓ pfeInternet: empresa en P06, subiendo archivos XML...');
 
-    // Obtener cookies de sesión SII (reutiliza caché en memoria/disco)
-    const cookieJar = await this._obtenerCookiesSII();
+    // === PASO 2: Upload de los 3 XMLs vía multipart/form-data ===
+    const archivos = [
+      { filename: 'respuesta-recepcion-envio.xml',        content: recepcionXml,  uploadN: 1 },
+      { filename: 'envio-recibos.xml',                    content: recibosXml,    uploadN: 2 },
+      { filename: 'respuesta-aprobacion-comercial.xml',   content: aprobacionXml, uploadN: 3 },
+    ];
 
-    // Convertir cookieJar a formato Puppeteer para dominio .sii.cl
-    const puppeteerCookies = Object.entries(cookieJar).map(([name, value]) => ({
-      name, value, domain: '.sii.cl', path: '/', httpOnly: false, secure: true,
-    }));
+    for (const archivo of archivos) {
+      const boundary = `----WebKitFormBoundary${Date.now().toString(16)}`;
+      const CRLF = '\r\n';
+      const multipartBody = [
+        `--${boundary}`,
+        `Content-Disposition: form-data; name="uploadFormElement"; filename="${archivo.filename}"`,
+        'Content-Type: text/xml',
+        '',
+        archivo.content,
+        `--${boundary}--`,
+        '',
+      ].join(CRLF);
 
-    let browser;
-    try {
-      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
-
-      const page = await browser.newPage();
-      await page.setCookie(...puppeteerCookies);
-
-      // Navegar al portal pfeInternet
-      console.log(' → Cargando portal pfeInternet...');
-      await page.goto('https://www4.sii.cl/pfeInternet/', {
-        waitUntil: 'networkidle2',
-        timeout: 60000,
+      console.log(` → Subiendo ${archivo.filename}...`);
+      const uploadResp = await makeReq(`${PFE_BASE}uploadFile${archivo.uploadN}`, {
+        method: 'POST',
+        body: multipartBody,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Origin': 'https://www4.sii.cl',
+          'Referer': PFE_BASE,
+        },
+        cookies,
       });
 
-      // Dar 3 segundos extra para que GWT renderice el menú inicial
-      await new Promise(r => setTimeout(r, 3000));
-
-      // Hacer click en el enlace "Subir archivos XML de respuesta de Intercambio"
-      // El href es javascript:openForm('opt-ingresoEmpresaUp') — necesita click real para GWT
-      console.log(' → Clickeando "Subir archivos XML de respuesta de Intercambio"...');
-      const linkClicked = await page.click('a[href*="ingresoEmpresaUp"]').then(() => true).catch(() => false);
-      if (!linkClicked) {
-        // Fallback: evaluar click con dispatchEvent
-        await page.evaluate(() => {
-          const link = document.querySelector('a[href*="ingresoEmpresaUp"]');
-          if (link) link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        });
-      }
-
-      // Esperar a que GWT complete el RPC y re-renderice la vista de upload
-      await page.waitForNetworkIdle({ timeout: 15000, idleTime: 1000 }).catch(() => {});
-
-      // === PASO INTERMEDIO: ingresar RUT y confirmar empresa ===
-      // GWT muestra "Ingrese el RUT de la empresa" antes de mostrar el formulario de upload
-      const rutInput = await page.$('input.gwt-TextBox[maxlength="10"]');
-      if (rutInput) {
-        const [rutNum, dv] = this.config.emisor.rut.split('-');
-        const rutConDv = `${rutNum}-${dv}`;
-        console.log(` → Ingresando RUT empresa: ${rutConDv}`);
-        await rutInput.click({ clickCount: 3 }); // seleccionar todo
-        await rutInput.type(rutConDv);
-
-        // Click en "Confirmar Empresa"
-        const confirmBtn = await page.evaluateHandle(() => {
-          return Array.from(document.querySelectorAll('button.gwt-Button'))
-            .find(b => b.textContent.trim() === 'Confirmar Empresa');
-        });
-        if (confirmBtn) {
-          await confirmBtn.asElement().click();
-          console.log(' → Click "Confirmar Empresa", esperando formulario de upload...');
-          await page.waitForNetworkIdle({ timeout: 15000, idleTime: 1000 }).catch(() => {});
-        }
-      }
-
-      // Esperar que GWT renderice el formulario con los 3 inputs de upload
-      const inputFound = await page.waitForSelector('input[name="uploadFormElement"]', { timeout: 30000 }).catch(() => null);
-      if (!inputFound) {
-        if (debugDir) {
-          await page.screenshot({ path: path.join(debugDir, 'pfeInternet-error.png'), fullPage: true }).catch(() => {});
-          fs.writeFileSync(path.join(debugDir, 'pfeInternet-error.html'), await page.content().catch(() => ''), 'utf8');
-        }
-        const pageText = await page.$eval('body', el => el.textContent).catch(() => '');
-        if (pageText.includes('DOCUMENTOS IMPRESOS') || pageText.includes('fue cargado exitosamente')) {
-          throw new Error('PASO_YA_COMPLETADO');
-        }
-        throw new Error('pfeInternet no mostró formulario de upload tras openForm — ver pfeInternet-error.png/.html');
-      }
-      console.log(' → Formulario de upload listo');
-
-      // ── DEBUG: screenshot del formulario con los inputs listos ──
+      const respBody = uploadResp.body || '';
       if (debugDir) {
-        await page.screenshot({ path: path.join(debugDir, 'pfeInternet-form-listo.png'), fullPage: true }).catch(() => {});
-        fs.writeFileSync(path.join(debugDir, 'pfeInternet-form-listo.html'), await page.content().catch(() => ''), 'utf8');
+        fs.writeFileSync(path.join(debugDir, `pfe-upload${archivo.uploadN}-resp.txt`), respBody.substring(0, 2000), 'utf8');
       }
 
-      // Subir cada archivo en secuencia.
-      // GWT mantiene solo los inputs de archivos pendientes: "procesado con exito anteriormente"
-      // reemplaza al input. Así que iteramos solo los archivos pendientes en orden.
-      for (const archivo of archivos) {
-        const filePath = path.join(tmpDir, archivo.filename);
+      const respLow = respBody.toLowerCase();
+      const hasError = uploadResp.status >= 400
+        || (respLow.includes('error') && !respLow.includes('procesado'))
+        || respLow.includes('rechaz');
+      const hasSuccess = respLow.includes('procesado') || respLow.includes('exitosamente')
+        || respLow.includes('cargado') || uploadResp.status === 200;
 
-        // Asegurarse de que no haya diálogo abierto del upload anterior
-        await page.waitForFunction(
-          () => !document.querySelector('.gwt-DialogBox'),
-          { timeout: 10000 }
-        ).catch(() => {});
-
-        // Verificar si este archivo ya fue procesado (GWT reemplaza el input con texto)
-        // Estructura DOM: <td class="filter-label">Archivo N: Label</td> en una <tr>
-        // La siguiente <tr> tiene <td class="filter-widget"> con el input O el texto "procesado"
-        const yaProcessado = await page.evaluate((labelText) => {
-          const allTds = Array.from(document.querySelectorAll('td.filter-label'));
-          const labelTd = allTds.find(el => el.textContent.includes(labelText));
-          if (!labelTd) return false;
-          // Subir al <tr> padre y tomar el siguiente <tr>
-          const tr = labelTd.closest('tr');
-          if (!tr) return false;
-          const nextTr = tr.nextElementSibling;
-          if (!nextTr) return false;
-          return nextTr.textContent.includes('procesado con exito anteriormente');
-        }, archivo.label);
-
-        if (yaProcessado) {
-          console.log(` → ${archivo.filename}: ya procesado anteriormente, saltando...`);
-          continue;
-        }
-
-        console.log(` → Subiendo ${archivo.filename}...`);
-
-        // Cada archivo tiene su propio form con action uploadFile1/2/3
-        // Usamos el selector específico para no confundir entre los 3 inputs que pueden
-        // estar presentes simultáneamente en el DOM
-        const formSel = `form[action*="uploadFile${archivo.uploadN}"]`;
-        await page.waitForSelector(`${formSel} input[name="uploadFormElement"]`, { timeout: 15000 });
-
-        const input = await page.$(`${formSel} input[name="uploadFormElement"]`);
-        if (!input) throw new Error(`No se encontró input uploadFile${archivo.uploadN}`);
-        await input.uploadFile(filePath);
-
-        const submitBtn = await page.$(`${formSel} button.button-little`);
-        if (!submitBtn) throw new Error(`No se encontró botón Subir para uploadFile${archivo.uploadN}`);
-        await submitBtn.click();
-
-        // Esperar el diálogo GWT de confirmación
-        await page.waitForSelector('.gwt-DialogBox .msgeDialogBox', { timeout: 30000 });
-        const msgText = await page.$eval('.gwt-DialogBox .msgeDialogBox', el => el.textContent.trim());
-        console.log(` ✓ ${msgText}`);
-
-        if (debugDir) {
-          fs.writeFileSync(
-            path.join(debugDir, `upload-resp-${archivo.filename}.txt`),
-            `Puppeteer: ${msgText}`, 'utf8'
-          );
-        }
-
-        if (msgText.toLowerCase().includes('error') || msgText.toLowerCase().includes('rechaz')) {
-          throw new Error(`Error en archivo ${archivo.filename}: ${msgText}`);
-        }
-
-        // Cerrar el diálogo usando el botón "Cerrar" dentro del gwt-DialogBox
-        await page.evaluate(() => {
-          const dlg = document.querySelector('.gwt-DialogBox');
-          if (!dlg) return;
-          const btn = Array.from(dlg.querySelectorAll('button')).find(
-            b => b.textContent.trim() === 'Cerrar'
-          );
-          if (btn) btn.click();
-        });
-
-        // Esperar que el diálogo desaparezca antes del siguiente archivo
-        await page.waitForFunction(
-          () => !document.querySelector('.gwt-DialogBox'),
-          { timeout: 10000 }
-        ).catch(() => {});
-
-        // Esperar que GWT termine de actualizar el estado (RPC post-upload)
-        await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 }).catch(() => {});
+      if (hasError && !hasSuccess) {
+        throw new Error(`Error al subir ${archivo.filename}: HTTP ${uploadResp.status} — ${respBody.substring(0, 200)}`);
       }
-
-      return { success: true, resultado: 'Los 3 archivos subidos y registrados correctamente' };
-
-    } catch (err) {
-      return { success: false, error: err.message };
-    } finally {
-      if (browser) await browser.close();
+      console.log(` ✓ ${archivo.filename} subido (HTTP ${uploadResp.status})`);
     }
+
+    return { success: true, resultado: 'Los 3 archivos XML de intercambio subidos correctamente' };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2097,89 +2423,209 @@ class CertRunner {
   // ═══════════════════════════════════════════════════════════════
 
   /**
+   * Autentica contra pdfdteInternet reutilizando la sesión SII cacheada.
+   * Hace warm-up GET, obtiene el hash de política GWT desde nocache.js + cache.html
+   * y retorna los utilitarios HTTP listos para hacer llamadas GWT RPC.
+   * @private
+   * @returns {Promise<{cookies: string, makeReq: Function, permHash: string, policyHash: string}>}
+   */
+  async _autenticarPdfDteInternet() {
+    const https  = require('https');
+    const crypto = require('crypto');
+    const { URL } = require('url');
+
+    const tlsOpts = {
+      rejectUnauthorized: false,
+      maxVersion: 'TLSv1.2',
+      secureOptions: crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
+                   | crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+    };
+
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+
+    const makeReq = (urlStr, { method = 'GET', body = null, headers = {}, cookies: reqCookies = '' }) =>
+      new Promise((resolve, reject) => {
+        const u     = new URL(urlStr);
+        const agent = new https.Agent(tlsOpts);
+        const bodyBuf = body ? (Buffer.isBuffer(body) ? body : Buffer.from(body, 'utf8')) : null;
+        const opts = {
+          hostname: u.hostname, port: u.port || 443,
+          path: u.pathname + u.search, method, agent,
+          headers: {
+            'User-Agent': UA,
+            'Accept': '*/*',
+            'Connection': 'keep-alive',
+            'Origin': 'https://www4.sii.cl',
+            'Referer': 'https://www4.sii.cl/pdfdteInternet/',
+            ...(reqCookies ? { 'Cookie': reqCookies } : {}),
+            ...headers,
+          },
+        };
+        if (bodyBuf) opts.headers['Content-Length'] = bodyBuf.length;
+        const req = https.request(opts, (res) => {
+          const chunks = [];
+          res.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+          res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers }));
+        });
+        req.on('error', reject);
+        if (bodyBuf) req.write(bodyBuf);
+        req.end();
+      });
+
+    const collectNewCookies = (headers, existing) => {
+      const merged = {};
+      existing.split(';').forEach(c => { const [k, v] = c.trim().split('='); if (k) merged[k.trim()] = (v || '').trim(); });
+      for (const c of (headers['set-cookie'] || [])) {
+        const [kv] = c.split(';');
+        const eq = kv.indexOf('=');
+        if (eq > 0) merged[kv.slice(0, eq).trim()] = kv.slice(eq + 1).trim();
+      }
+      return Object.entries(merged).map(([k, v]) => `${k}=${v}`).join('; ');
+    };
+
+    const cookieJar = await this._obtenerCookiesSII();
+    let cookies = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
+
+    // Hashes GWT conocidos del portal pdfdteInternet (capturados 2026-06-01 vía HAR).
+    // permHash   = nombre del .cache.html cargado por el browser (permutation del GWT module)
+    // policyHash = hash de política de serialización GWT embebido dentro del cache.html
+    // Si el SII redespliega el portal se deben actualizar estos valores.
+    const KNOWN_PERM_HASH   = 'D86ACF99AE5C17F0B0F673A9872EF6CB';
+    const KNOWN_POLICY_HASH = '5459B93B9D030A67564300FBD346270F';
+
+    // Warm-up: GET /pdfdteInternet/ para inicializar contexto del portal en el servidor.
+    // Aprovechamos para intentar descubrir el permHash dinámicamente desde el HTML.
+    let permHash   = KNOWN_PERM_HASH;
+    let policyHash = KNOWN_POLICY_HASH;
+    try {
+      const warmup = await makeReq('https://www4.sii.cl/pdfdteInternet/', { cookies });
+      cookies = collectNewCookies(warmup.headers, cookies);
+      if ((warmup.status === 301 || warmup.status === 302) && warmup.headers?.location) {
+        const loc = warmup.headers.location;
+        const absLoc = loc.startsWith('http') ? loc : `https://www4.sii.cl${loc}`;
+        const warmup2 = await makeReq(absLoc, { cookies });
+        cookies = collectNewCookies(warmup2.headers, cookies);
+      }
+      console.log(`[pdfdteInternet Auth] warm-up → HTTP ${warmup.status}`);
+
+      // Descubrir permHash dinámicamente desde pdfdte.nocache.js
+      // (El módulo GWT se llama 'pdfdte', no 'pdfdteInternet' como podría esperarse)
+      try {
+        const ncResp = await makeReq('https://www4.sii.cl/pdfdteInternet/pdfdte.nocache.js', { cookies });
+        if (ncResp.status === 200 && ncResp.body) {
+          const ncHashes = [...new Set(
+            [...ncResp.body.matchAll(/[=',]([0-9A-Fa-f]{32})[',]/g)].map(m => m[1].toUpperCase())
+          )];
+          if (ncHashes.includes(KNOWN_PERM_HASH)) {
+            // Hash conocido sigue vigente
+            console.log(`[pdfdteInternet Auth] pdfdte.nocache.js confirma hash conocido (${ncHashes.length} permutaciones)`);
+          } else if (ncHashes.length > 0) {
+            // Portal redesplegado — actualizar hashes
+            const newPerm = ncHashes[0];
+            console.log(`[pdfdteInternet Auth] Nuevo permHash detectado: ${newPerm.substring(0, 8)}... (portal redesplegado)`);
+            try {
+              const cacheResp = await makeReq(`https://www4.sii.cl/pdfdteInternet/${newPerm}.cache.html`, {
+                cookies, headers: { 'Referer': 'https://www4.sii.cl/pdfdteInternet/' },
+              });
+              const hexInCache = [...new Set([...cacheResp.body.matchAll(/["']([0-9A-Fa-f]{32})["']/g)].map(m => m[1].toUpperCase()))];
+              const newPolicy = hexInCache.find(h => h !== newPerm);
+              if (newPolicy) {
+                permHash   = newPerm;
+                policyHash = newPolicy;
+                console.log(`[pdfdteInternet Auth] Hashes actualizados correctamente.`);
+              }
+            } catch (e2) {
+              console.log(`[pdfdteInternet Auth] No se pudo obtener nuevo cache.html: ${e2.message}. Usando hashes conocidos.`);
+            }
+          }
+        }
+      } catch (eNc) {
+        console.log(`[pdfdteInternet Auth] pdfdte.nocache.js no accesible: ${eNc.message}. Usando hashes conocidos.`);
+      }
+    } catch (e) {
+      console.log(`[pdfdteInternet Auth] warm-up falló (no crítico): ${e.message}`);
+    }
+
+    console.log(`[pdfdteInternet Auth] permHash=${permHash.substring(0, 8)}... policyHash=${policyHash.substring(0, 8)}...`);
+    return { cookies, makeReq, permHash, policyHash };
+  }
+
+  /**
    * Consulta el estado actual del portal pdfdteInternet sin subir nada.
    * Útil para saltarse la generación de PDFs si ya están enviados.
+   * Implementación HTTP pura — llama a leeImpreso() via GWT RPC.
    * @returns {Promise<{estado: string|null, error?: string}>}
    */
   async verificarEstadoPortalMuestras() {
-    const puppeteer = require('puppeteer');
-    const cookieJar = await this._obtenerCookiesSII();
-    const puppeteerCookies = Object.entries(cookieJar).map(([name, value]) => ({
-      name, value, domain: '.sii.cl', path: '/', httpOnly: false, secure: true,
-    }));
-    const [rutNum, dvChar] = this.config.emisor.rut.split('-');
-    let browser;
     try {
-      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
-      const page = await browser.newPage();
-      await page.setCookie(...puppeteerCookies);
-      await page.goto('https://www4.sii.cl/pdfdteInternet/', { waitUntil: 'networkidle2', timeout: 60000 });
-      await new Promise(r => setTimeout(r, 3000));
+      const { cookies, makeReq, permHash, policyHash } = await this._autenticarPdfDteInternet();
+      const [rutNum, dvChar] = this.config.emisor.rut.split('-');
 
-      const rutInputs = await page.$$('input[name="rut"]');
-      const dvInputs  = await page.$$('input[name="dv"]');
-      if (!rutInputs.length) return { estado: null, error: 'sin campos RUT (¿sesión expirada?)' };
+      const body =
+        `7|0|6|https://www4.sii.cl/pdfdteInternet/|${policyHash}|` +
+        `cl.sii.sdi.dim.validaPdfDte.web.client.service.ServicePdfDte|leeImpreso|` +
+        `java.lang.String/2004016611|${rutNum}-${dvChar}|1|2|3|4|1|5|6|`;
 
-      // Solo RUT empresa → "Rut": el portal ya muestra "Estado de la Revisión" en el DOM
-      await rutInputs[0].click({ clickCount: 3 }); await rutInputs[0].type(rutNum);
-      await dvInputs[0].click({ clickCount: 3 });  await dvInputs[0].type(dvChar);
-      await page.evaluate((t) => {
-        const btn = Array.from(document.querySelectorAll('button.x-btn-text'))
-          .find(b => b.textContent.trim() === t && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
-        if (btn) btn.click();
-      }, 'Rut');
+      const resp = await makeReq('https://www4.sii.cl/pdfdteInternet/ServicePdfDte', {
+        method: 'POST',
+        body,
+        headers: {
+          'Content-Type': 'text/x-gwt-rpc; charset=UTF-8',
+          'X-GWT-Module-Base': 'https://www4.sii.cl/pdfdteInternet/',
+          'X-GWT-Permutation': permHash,
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
+        cookies,
+      });
 
-      // IMPORTANTE: NO hacer click en "Sí" del diálogo "ya existe revisión".
-      // Hacerlo crea una revisión nueva vacía y borra el estado "POR REVISAR" del DOM.
-      // El estado de la revisión existente es visible en el body aunque el diálogo esté abierto.
-      await new Promise(r => setTimeout(r, 3000));
+      if (resp.status !== 200 || !resp.body.startsWith('//OK')) {
+        return { estado: null, error: `GWT leeImpreso HTTP ${resp.status}: ${resp.body.substring(0, 150)}` };
+      }
 
-      // Esperar hasta 10s a que aparezca el estado en el DOM (detrás del diálogo si aplica)
-      await page.waitForFunction(() => {
-        const t = (document.body.textContent || '').toUpperCase();
-        return t.includes('POR REVISAR') || t.includes('APROBADO') ||
-               t.includes('EN REVISI') || t.includes('RECHAZADO') ||
-               t.includes('ENVIADO AL SII');
-      }, { timeout: 10000, polling: 500 }).catch(() => {});
+      // Parsear string table GWT: siempre el penúltimo elemento (antes de flags,version)
+      // GWT usa \x27 etc. (no válido en JSON) → normalizar antes de parsear
+      const stIdx2 = resp.body.lastIndexOf(',["');
+      const stEnd  = stIdx2 !== -1 ? resp.body.lastIndexOf('],') : -1;
+      let table = null;
+      if (stIdx2 !== -1 && stEnd > stIdx2) {
+        try {
+          const raw = resp.body.substring(stIdx2 + 1, stEnd + 1);
+          const normalized = raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => `\\u00${h}`);
+          table = JSON.parse(normalized);
+        } catch (_) {}
+      }
 
-      // Leer estado directamente del label del formulario en el DOM
-      const estado = await page.evaluate(() => {
-        // Primero intentar leer el label específico de estado (más preciso)
-        const labels = Array.from(document.querySelectorAll('.x-form-label'));
-        for (const lbl of labels) {
-          const txt = (lbl.textContent || '').trim().toUpperCase();
-          if (txt === 'POR REVISAR') return 'POR REVISAR';
-          if (txt === 'APROBADO') return 'APROBADO';
-          if (txt.startsWith('EN REVISI')) return 'EN REVISIÓN';
-          if (txt === 'RECHAZADO') return 'RECHAZADO';
-          if (txt.includes('ENVIADO AL SII')) return 'ENVIADO AL SII';
-        }
-        // Fallback: buscar en todo el body
-        const t = (document.body.textContent || '').toUpperCase();
-        if (t.includes('APROBADO')) return 'APROBADO';
-        if (t.includes('POR REVISAR')) return 'POR REVISAR';
-        if (t.includes('EN REVISI')) return 'EN REVISIÓN';
-        if (t.includes('RECHAZADO')) return 'RECHAZADO';
-        if (t.includes('ENVIADO AL SII')) return 'ENVIADO AL SII';
-        return null;
-      }).catch(() => null);
-
-      return { estado };
+      let estado = null, numImpresos = null, fechaEnvio = null, revId = null;
+      if (table) {
+        const estadoStr = table.find(s => typeof s === 'string' && /APROBADO|POR REVISAR|RECHAZADO|INGRESO|EN REVISI/i.test(s));
+        const errorStr  = table.find(s => typeof s === 'string' && /El estado de la postulacion/i.test(s));
+        const fechaStr  = table.find(s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s));
+        const nStr      = table.find(s => typeof s === 'string' && /^\d+$/.test(s) && +s > 0 && +s < 500);
+        estado      = estadoStr ? estadoStr.toUpperCase() : (errorStr ? 'BLOQUEADO' : null);
+        fechaEnvio  = fechaStr || null;
+        numImpresos = nStr ? parseInt(nStr, 10) : null;
+      }
+      // Fallback: regex directo en el body
+      if (!estado) {
+        const m = resp.body.match(/"(APROBADO|POR REVISAR|EN REVISI[OÓ]N|RECHAZADO|INGRESO|ENVIADO AL SII)"/i);
+        if (m) estado = m[1].toUpperCase();
+        else if (/El estado de la postulacion/i.test(resp.body)) estado = 'BLOQUEADO';
+      }
+      // Extraer revId (Long GWT-base64 en rango plausible de IDs de revisión)
+      const GWT_B64_V = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_';
+      for (const m of resp.body.matchAll(/'([A-Za-z0-9$_]{3,7})'/g)) {
+        let n = 0; for (const c of m[1]) n = n * 64 + GWT_B64_V.indexOf(c);
+        if (n >= 100000 && n <= 9999999) { revId = n; break; }
+      }
+      return { estado, revId, numImpresos, fechaEnvio };
     } catch (err) {
       return { estado: null, error: err.message };
-    } finally {
-      if (browser) {
-        await Promise.race([
-          browser.close().catch(() => {}),
-          new Promise(r => setTimeout(r, 8000)),
-        ]);
-        try { browser.process()?.kill('SIGKILL'); } catch { /* ignorar */ }
-      }
     }
   }
 
   /**
-   * Sube los PDFs de muestras impresas al portal pe_avance5 via Puppeteer.
+   * Sube los PDFs de muestras impresas al portal pe_avance5 via HTTP puro.
    * @param {Object} opts
    * @param {string} opts.pdfDir - Directorio con los PDFs generados
    * @returns {Promise<Object>} { success, error? }
@@ -2204,443 +2650,193 @@ class CertRunner {
   }
 
   /**
-   * Sube PDFs al portal https://www4.sii.cl/pdfdteInternet/ via Puppeteer.
-   * El portal usa ExtJS 3 — botones buscados por texto, no por ID dinámico.
+   * Sube PDFs al portal https://www4.sii.cl/pdfdteInternet/ via HTTP puro (sin Puppeteer).
+   * Flujo GWT RPC: leeImpreso → creaLista → upload×N → solicitaRevisionSII.
    * @private
    */
   async _subirMuestrasImpresasPortal({ pdfPaths, debugDir }) {
-    const puppeteer = require('puppeteer');
+    // ── Helpers GWT base64 para codificar/decodificar java.lang.Long ──────────
+    const GWT_B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_';
+    const decodeGwtLong = (s) => { let n = 0; for (const c of s) n = n * 64 + GWT_B64.indexOf(c); return n; };
+    const encodeGwtLong = (n) => {
+      const chars = []; let r = n;
+      while (r > 0) { chars.unshift(GWT_B64[r & 63]); r = Math.floor(r / 64); }
+      while (chars.length < 4) chars.unshift('A');
+      return chars.join('');
+    };
 
-    // Reutiliza sesión SII en memoria/disco (misma sesión que intercambio u otros pasos)
-    const cookieJar = await this._obtenerCookiesSII();
-    const puppeteerCookies = Object.entries(cookieJar).map(([name, value]) => ({
-      name, value, domain: '.sii.cl', path: '/', httpOnly: false, secure: true,
-    }));
-
+    // ── Auth + obtención de hashes GWT ────────────────────────────────────────
+    const { cookies, makeReq, permHash, policyHash } = await this._autenticarPdfDteInternet();
     const [rutNum, dvChar] = this.config.emisor.rut.split('-');
 
-    // Helper: click botón ExtJS por texto
-    const clickBoton = (page, texto) => page.evaluate((t) => {
-      const btn = Array.from(document.querySelectorAll('button.x-btn-text'))
-        .find(b => b.textContent.trim() === t && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
-      if (btn) { btn.click(); return true; }
-      return false;
-    }, texto);
+    const GWT_SVC = 'cl.sii.sdi.dim.validaPdfDte.web.client.service.ServicePdfDte';
+    const GWT_BASE = 'https://www4.sii.cl/pdfdteInternet/';
+    const SVC_URL  = `${GWT_BASE}ServicePdfDte`;
 
-    let browser;
-    try {
-      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions([], { protocolTimeout: 300000 }));
-      const page = await browser.newPage();
-      await page.setCookie(...puppeteerCookies);
+    const gwtPost = (body) => makeReq(SVC_URL, {
+      method: 'POST',
+      body,
+      headers: {
+        'Content-Type': 'text/x-gwt-rpc; charset=UTF-8',
+        'X-GWT-Module-Base': GWT_BASE,
+        'X-GWT-Permutation': permHash,
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      },
+      cookies,
+    });
 
-      // Navegar directamente a www4.sii.cl/pdfdteInternet/ con las cookies de sesión SII
-      console.log(' → Cargando portal pdfdteInternet...');
-      await page.goto('https://www4.sii.cl/pdfdteInternet/', {
-        waitUntil: 'networkidle2', timeout: 60000,
-      });
-      await new Promise(r => setTimeout(r, 3000));
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-01-loaded.png'), fullPage: true }).catch(() => {});
+    // ── Paso 1: verificar si existe revisión previa (leeImpreso) ─────────────
+    const leeBody =
+      `7|0|6|${GWT_BASE}|${policyHash}|${GWT_SVC}|leeImpreso|` +
+      `java.lang.String/2004016611|${rutNum}-${dvChar}|1|2|3|4|1|5|6|`;
+    const leeResp = await gwtPost(leeBody);
+    if (leeResp.status !== 200) throw new Error(`pdfdteInternet leeImpreso HTTP ${leeResp.status}`);
 
-      // Hookear SWFUpload para capturar post_params.id cuando GWT inicialice el uploader
-      await page.evaluate(() => {
-        if (window.SWFUpload) {
-          const _Orig = window.SWFUpload;
-          window.SWFUpload = function(settings) {
-            const pp = (settings && settings.post_params) || {};
-            if (pp.id) window.__swfCapturedRevId = String(pp.id);
-            const inst = new _Orig(settings);
-            // Copiar propiedades estáticas
-            Object.assign(window.SWFUpload, _Orig);
-            return inst;
-          };
-          window.SWFUpload.prototype = _Orig.prototype;
-          // Copiar constantes estáticas del prototipo original
-          for (const k of Object.getOwnPropertyNames(_Orig)) {
-            try { window.SWFUpload[k] = _Orig[k]; } catch { }
-          }
-        }
-      }).catch(() => {});
-
-      // Paso 1: RUT Empresa
-      const rutInputs = await page.$$('input[name="rut"]');
-      const dvInputs  = await page.$$('input[name="dv"]');
-      if (!rutInputs.length) {
-        if (debugDir) {
-          await page.screenshot({ path: path.join(debugDir, 'pdfte-error-no-rut.png'), fullPage: true }).catch(() => {});
-          fs.writeFileSync(path.join(debugDir, 'pdfte-error.html'), await page.content(), 'utf8');
-        }
-        throw new Error('pdfdteInternet: no se encontraron campos de RUT (¿sesión expirada?)');
-      }
-      console.log(` → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
-      await rutInputs[0].click({ clickCount: 3 }); await rutInputs[0].type(rutNum);
-      await dvInputs[0].click({ clickCount: 3 });  await dvInputs[0].type(dvChar);
-      await clickBoton(page, 'Rut');
-      await new Promise(r => setTimeout(r, 2500));
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-02-after-rut.png'), fullPage: true }).catch(() => {});
-
-      // Paso 2: Diálogo "ya existe revisión" → click "Sí"
-      // nuevaRevisionCreada=true cuando el usuario acepta crear una nueva revisión;
-      // en ese caso NO se hace el early-exit por estado previo (el texto "EN REVISIÓN"
-      // que queda visible corresponde a la revisión antigua, no a la nueva vacía).
-      let nuevaRevisionCreada = false;
-      const hayDialog = await page.evaluate(() => {
-        const dlg = document.querySelector('.x-window');
-        return !!(dlg && dlg.offsetParent !== null);
-      });
-      if (hayDialog) {
-        console.log(' → Diálogo "Ya existe revisión" detectado → click "Sí"');
-        if (debugDir) {
-          await page.screenshot({ path: path.join(debugDir, 'pdfte-dialog-ya-existe.png'), fullPage: true }).catch(() => {});
-          fs.writeFileSync(path.join(debugDir, 'pdfte-dialog-ya-existe.html'), await page.content().catch(() => ''), 'utf8');
-          // Log texto del diálogo para debug
-          const dlgText = await page.evaluate(() => {
-            const dlg = document.querySelector('.x-window');
-            return dlg ? dlg.textContent.trim().replace(/\s+/g, ' ') : '';
-          }).catch(() => '');
-          console.log(` [DEBUG] Texto del diálogo: "${dlgText}"`);
-        }
-        const clicked = await page.evaluate(() => {
-          const si = Array.from(document.querySelectorAll('button.x-btn-text'))
-            .find(b => /^s[ií]$/i.test(b.textContent.trim()));
-          if (si) { si.click(); return true; }
-          return false;
-        });
-        if (!clicked) await page.evaluate(() => { const b = document.querySelector('.x-window button'); if (b) b.click(); });
-        await new Promise(r => setTimeout(r, 2500));
-        if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-dialog-despues-si.png'), fullPage: true }).catch(() => {});
-        nuevaRevisionCreada = true;
-      }
-
-      // Paso 3: RUT Proveedor (mismo RUT empresa)
-      await page.waitForFunction(() => {
-        const ins = document.querySelectorAll('input[name="rut"]');
-        return ins.length >= 2 && !ins[1].disabled;
-      }, { timeout: 15000 }).catch(() => {});
-
-      const rutNow = await page.$$('input[name="rut"]');
-      const dvNow  = await page.$$('input[name="dv"]');
-      const pRut = rutNow.length >= 2 ? rutNow[1] : rutNow[0];
-      const pDv  = dvNow.length  >= 2 ? dvNow[1]  : dvNow[0];
-      console.log(` → Ingresando RUT proveedor: ${rutNum}-${dvChar}`);
-      await pRut.click({ clickCount: 3 }); await pRut.type(rutNum);
-      await pDv.click({ clickCount: 3 });  await pDv.type(dvChar);
-
-      // Interceptar respuestas del portal durante "Consultar" para capturar el ID de revisión
-      let _capturedRevId = null;
-      const _onPortalResponse = async (resp) => {
-        const url = resp.url();
-        if (!url.includes('sii.cl/pdfdteInternet')) return;
-        try {
-          const body = await resp.text();
-          const matches = body.match(/\b(\d{5,7})\b/g);
-          if (matches) {
-            for (const m of matches) {
-              const n = +m;
-              if (n > 10000 && n < 9999999 && !_capturedRevId) {
-                _capturedRevId = m;
-                console.log(` [DEBUG] Posible nroRevision capturado de red: ${m} (url: ${url.split('?')[0]})`);
-              }
-            }
-          }
-        } catch { /* skip */ }
-      };
-      page.on('response', _onPortalResponse);
-      await clickBoton(page, 'Consultar');
-      await new Promise(r => setTimeout(r, 2500));
-      page.off('response', _onPortalResponse);
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-03-after-consultar.png'), fullPage: true }).catch(() => {});
-
-      // ── Re-ejecución: detectar estado terminal antes de proceder ──
-      // Solo aplicable cuando NO se creó una nueva revisión.
-      // NOTA: el tab de navegación "Muestras Impresas en revisión" siempre contiene
-      // el texto "en revisión", por lo que NO se puede usar textContent global para
-      // detectar ese estado. Solo hacer early-exit si el formulario de upload
-      // (input.gwt-FileUpload o botón "Crear") NO está visible, lo que indica que
-      // la revisión está en un estado terminal irreversible.
-      const _estadoYaSubido = nuevaRevisionCreada ? null : await page.evaluate(() => {
-        // Si el formulario de carga está presente, proceder siempre con el upload
-        const tieneFormulario = !!document.querySelector('input.gwt-FileUpload') ||
-          Array.from(document.querySelectorAll('button.x-btn-text'))
-            .some(b => ['Crear', 'Limpiar', 'Eliminar'].includes(b.textContent.trim()) && !b.disabled);
-        if (tieneFormulario) return null;
-        // Solo si NO hay formulario, verificar estado terminal
-        const t = (document.body.textContent || '').toUpperCase();
-        if (t.includes('APROBADO')) return 'APROBADO';
-        if (t.includes('ENVIADO AL SII')) return 'ENVIADO AL SII';
-        if (t.includes('RECHAZADO')) return 'RECHAZADO';
-        return null;
-      }).catch(() => null);
-      if (_estadoYaSubido) {
-        console.log(` [OK] Portal ya muestra estado "${_estadoYaSubido}" — muestras subidas previamente. Proceso completado.`);
-        return { success: true, alreadyCompleted: true, estado: _estadoYaSubido };
-      }
-
-      // Paso 4: "Crear" → habilita el input de archivo
-      console.log(' → Click "Crear"...');
-      await clickBoton(page, 'Crear');
-      await new Promise(r => setTimeout(r, 2500));
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04-after-crear.png'), fullPage: true }).catch(() => {});
-
-      // Paso 5: Verificar que el input de archivo existe antes de empezar
-      const inputCheck = await page.waitForSelector('input.gwt-FileUpload', { timeout: 30000 }).catch(() => null);
-      if (!inputCheck) {
-        if (debugDir) {
-          await page.screenshot({ path: path.join(debugDir, 'pdfte-error-no-fileinput.png'), fullPage: true }).catch(() => {});
-          fs.writeFileSync(path.join(debugDir, 'pdfte-error.html'), await page.content(), 'utf8');
-        }
-        throw new Error('pdfdteInternet: no apareció el input de archivo tras "Crear"');
-      }
-
-      // El portal sólo acepta un PDF a la vez (input sin atributo "multiple").
-      // Tras el submit GWT no recrea el input dentro de la misma carga de página.
-      // Solución: re-navegar al portal antes de cada archivo ≥ 2 (misma revisión,
-      // misma sesión con cookies); el diálogo "ya existe revisión → Sí" la abre.
-      const navegarAlFormulario = async () => {
-        await page.goto('https://www4.sii.cl/pdfdteInternet/', { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 2000));
-        const _ruts = await page.$$('input[name="rut"]');
-        const _dvs  = await page.$$('input[name="dv"]');
-        if (!_ruts.length) throw new Error('pdfdteInternet: sin campos RUT en re-navegación (¿sesión expirada?)');
-        await _ruts[0].click({ clickCount: 3 }); await _ruts[0].type(rutNum);
-        await _dvs[0].click({ clickCount: 3 });  await _dvs[0].type(dvChar);
-        await clickBoton(page, 'Rut');
-        await new Promise(r => setTimeout(r, 2000));
-        // Diálogo "ya existe revisión" → click "Sí" para abrirla
-        const _dlg = await page.evaluate(() => { const d = document.querySelector('.x-window'); return !!(d && d.offsetParent !== null); });
-        if (_dlg) {
-          const _ok = await page.evaluate(() => {
-            const si = Array.from(document.querySelectorAll('button.x-btn-text')).find(b => /^s[ií]$/i.test(b.textContent.trim()));
-            if (si) { si.click(); return true; }
-            return false;
-          });
-          if (!_ok) await page.evaluate(() => { const b = document.querySelector('.x-window button'); if (b) b.click(); });
-          await new Promise(r => setTimeout(r, 2000));
-        }
-        // RUT proveedor (mismo que empresa)
-        await page.waitForFunction(() => { const ins = document.querySelectorAll('input[name="rut"]'); return ins.length >= 2 && !ins[1].disabled; }, { timeout: 10000 }).catch(() => {});
-        const _rutsN = await page.$$('input[name="rut"]');
-        const _dvsN  = await page.$$('input[name="dv"]');
-        const _pRut  = _rutsN.length >= 2 ? _rutsN[1] : _rutsN[0];
-        const _pDv   = _dvsN.length  >= 2 ? _dvsN[1]  : _dvsN[0];
-        await _pRut.click({ clickCount: 3 }); await _pRut.type(rutNum);
-        await _pDv.click({ clickCount: 3 });  await _pDv.type(dvChar);
-        await clickBoton(page, 'Consultar');
-        await new Promise(r => setTimeout(r, 2500));
-        // Si aún no hay formulario de subida (primera vez), crear revisión
-        const _hayInp = await page.$('input.gwt-FileUpload').catch(() => null);
-        if (!_hayInp) { await clickBoton(page, 'Crear'); await new Promise(r => setTimeout(r, 2500)); }
-      };
-
-      const fileInput = await page.$('input.gwt-FileUpload');
-      if (!fileInput) throw new Error('pdfdteInternet: input.gwt-FileUpload no encontrado');
-
-      // ── Obtener nroRevision y subir todos los archivos vía fetch() ──────────────────
-      // ── Primer upload para obtener nroRevision ─────────────────────────────────────
-      // Puppeteer 22+ usa waitForFileChooser() para file uploads.
-      // Triggear el input via click + page.waitForFileChooser() es el API nativo.
-      // GWT procesa el onChange, somete el FormPanel a /upload con id de revisión.
-      // Capturamos nroRevision desde la respuesta del servidor.
-      // ────────────────────────────────────────────────────────────────────────────
-
-      let nroRevision = null;
-
-      // Listener de respuesta para capturar nroRevision del primer upload GWT
-      const _onFirstUploadResp = async (resp) => {
-        if (resp.url().includes('/pdfdteInternet/upload')) {
-          const txt = await resp.text().catch(() => '');
-          const m = txt.trim().match(/^(\d+),(\d+)$/);
-          if (m && !nroRevision) {
-            nroRevision = m[2];
-            console.log(` ✓ ID de revisión obtenido: ${nroRevision} (1/${pdfPaths.length} subido)`);
-          }
-        }
-      };
-      page.on('response', _onFirstUploadResp);
-
-      console.log(` → Disparando primer upload vía fileChooser para obtener ID de revisión...`);
+    // ── Parsear string table GWT (siempre antes de flags/version al final) ─────
+    const _parseGwtStringTable = (body) => {
+      const stIdx = body.lastIndexOf(',["');
+      if (stIdx === -1) return null;
+      const stEnd = body.lastIndexOf('],');   // ÚLTIMO ], = cierre del string table
+      if (stEnd <= stIdx) return null;
       try {
-        const _chooserPromise = page.waitForFileChooser({ timeout: 15000 });
-        // Triggear el file input: click en el wrapper visible O directamente en el input
-        await page.evaluate(() => {
-          // a) intentar click en el botón visible (wrapper div con overflow: hidden)
-          const wrapper = document.querySelector('div[style*="position: relative"][style*="overflow: hidden"] div.gwt-Label');
-          if (wrapper) { wrapper.click(); return; }
-          // b) click directo en el input oculto (funciona en headless Chrome)
-          const inp = document.querySelector('input.gwt-FileUpload');
-          if (inp) inp.click();
-        });
-        const _chooser = await _chooserPromise;
-        await _chooser.accept([path.resolve(pdfPaths[0])]);
-        console.log(` [DEBUG] fileChooser.accept → OK (${path.basename(pdfPaths[0])})`);
-      } catch (e) {
-        console.warn(` [!] waitForFileChooser falló (${e.message}), intentando CDP DOM.setFileInputFiles...`);
-        // Fallback: CDP DOM.setFileInputFiles
-        const _cdp = await page.createCDPSession();
-        try {
-          const { root }   = await _cdp.send('DOM.getDocument', { depth: 0 });
-          const { nodeId } = await _cdp.send('DOM.querySelector', {
-            nodeId: root.nodeId, selector: 'input.gwt-FileUpload',
-          });
-          if (nodeId) {
-            await _cdp.send('DOM.setFileInputFiles', { files: [path.resolve(pdfPaths[0])], nodeId });
-            console.log(` [DEBUG] CDP setFileInputFiles → OK`);
-          }
-        } catch (cdpErr) {
-          console.warn(` [!] CDP también falló: ${cdpErr.message}`);
-        } finally {
-          await _cdp.detach().catch(() => {});
-        }
+        // GWT usa \x27 etc. (no válido en JSON) → convertir a \uXXXX
+        const raw = body.substring(stIdx + 1, stEnd + 1);
+        const normalized = raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => `\\u00${h}`);
+        return JSON.parse(normalized);
+      } catch (_) { return null; }
+    };
+
+    const leeTable = _parseGwtStringTable(leeResp.body);
+    const estadoMatch = leeResp.body.match(/"(APROBADO|POR REVISAR|EN REVISI[OÓ]N|RECHAZADO|INGRESO|ENVIADO AL SII)"/i);
+    const estadoActual = estadoMatch ? estadoMatch[1].toUpperCase() : null;
+
+    // Detectar mensaje de error del SII: tabla parseada o regex directo en body (por si \x27 falla)
+    const errorEstadoMsg = !estadoActual && (
+      (leeTable && leeTable.find(s => typeof s === 'string' && /El estado de la postulacion/i.test(s))) ||
+      (() => { const m = leeResp.body.match(/"(El estado de la postulacion[^"\\]*(?:\\.[^"\\]*)*)"/i); return m ? m[1].replace(/\\x27/g, "'").replace(/\\x22/g, '"') : null; })()
+    );
+    if (errorEstadoMsg) {
+      console.log(` → Portal SII bloqueado: ${errorEstadoMsg}`);
+      return {
+        success: false, blocked: true, estado: 'BLOQUEADO',
+        error: errorEstadoMsg,
+        hint: 'Espere a que el SII procese la revisión en curso (APROBADO/RECHAZADO) antes de re-subir.',
+      };
+    }
+
+    // Si ya hay una revisión activa (no rechazada ni aprobada), no se puede re-subir.
+    // El SII sólo permite crear nueva revisión cuando el estado es RECHAZADO o APROBADO.
+    if (estadoActual && estadoActual !== 'RECHAZADO' && estadoActual !== 'APROBADO') {
+      // Extraer detalles adicionales de la respuesta leeImpreso para diagnóstico
+      let numImpresos = null, fechaEnvio = null, revId = null;
+      if (leeTable) {
+        const fechaStr = leeTable.find(s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s));
+        const nStr     = leeTable.find(s => typeof s === 'string' && /^\d+$/.test(s) && +s > 0 && +s < 500);
+        fechaEnvio  = fechaStr || null;
+        numImpresos = nStr ? parseInt(nStr, 10) : null;
       }
-
-      // Esperar hasta 60s para que el FormPanel iframe complete el upload
-      const _t0 = Date.now();
-      while (!nroRevision && Date.now() - _t0 < 60000) {
-        await new Promise(r => setTimeout(r, 500));
+      for (const m of leeResp.body.matchAll(/'([A-Za-z0-9$_]{3,7})'/g)) {
+        let n = 0; for (const c of m[1]) n = n * 64 + GWT_B64.indexOf(c);
+        if (n >= 100000 && n <= 9999999) { revId = n; break; }
       }
-      page.off('response', _onFirstUploadResp);
+      console.log(` → Estado: ${estadoActual}${revId ? ` | Revisión #${revId}` : ''}${fechaEnvio ? ` | Enviado: ${fechaEnvio}` : ''}${numImpresos ? ` | ${numImpresos} documentos` : ''} — ya enviadas, no se requiere re-subida`);
+      return { success: true, alreadyCompleted: true, estado: estadoActual, revId, numImpresos, fechaEnvio };
+    }
+    if (estadoActual) {
+      console.log(` → Estado previo: ${estadoActual} — creando nueva revisión`);
+    } else {
+      console.log(` → No hay revisión previa — creando primera revisión`);
+    }
 
-      if (!nroRevision) {
-        if (debugDir) {
-          await page.screenshot({ path: path.join(debugDir, 'pdfte-error-no-revid.png'), fullPage: true }).catch(() => {});
-          fs.writeFileSync(path.join(debugDir, 'pdfte-error-no-revid.html'), await page.content(), 'utf8');
-        }
-        throw new Error('pdfdteInternet: no se pudo obtener ID de revisión. El file chooser o CDP no disparó el handler GWT o el servidor rechazó la petición.');
-      }
+    // ── Paso 2: crear nueva lista/revisión (creaLista) ────────────────────────
+    // Params (6): amb=Z, rutNum, dv, proveedor=rutNum, provDv=dv, provNomre=""
+    // String table (9): module, policy, svc, method, String type, Z, rutNum, dv, ""
+    const creaBody =
+      `7|0|9|${GWT_BASE}|${policyHash}|${GWT_SVC}|creaLista|` +
+      `java.lang.String/2004016611|Z|${rutNum}|${dvChar}||` +
+      `1|2|3|4|6|5|5|5|5|5|6|7|8|9|7|8|0|`;
+    const creaResp = await gwtPost(creaBody);
+    if (creaResp.status !== 200 || !creaResp.body.startsWith('//OK')) {
+      throw new Error(`pdfdteInternet creaLista falló HTTP ${creaResp.status}: ${creaResp.body.substring(0, 200)}`);
+    }
+    // Detectar error de SII dentro del //OK (e.g. revisión en curso bloqueando)
+    const creaTable = _parseGwtStringTable(creaResp.body);
+    const creaErrorMsg = creaTable && creaTable.find(s => typeof s === 'string' && /El estado de la postulacion/i.test(s));
+    if (creaErrorMsg) {
+      throw new Error(`pdfdteInternet creaLista: ${creaErrorMsg} — Espere a que el SII procese la revisión en curso.`);
+    }
 
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-04b-primer-upload.png'), fullPage: true }).catch(() => {});
+    // Extraer ID de revisión (Long codificado en GWT base64, ej: 'BAqo' = 264872)
+    let revId = null;
+    let revIdEncoded = null;
+    for (const m of creaResp.body.matchAll(/'([A-Za-z0-9$_]{3,7})'/g)) {
+      const n = decodeGwtLong(m[1]);
+      if (n >= 10000 && n <= 9999999) { revId = n; revIdEncoded = m[1]; break; }
+    }
+    if (!revId) throw new Error(`pdfdteInternet: no se pudo extraer ID de revisión de: ${creaResp.body.substring(0, 300)}`);
+    console.log(` → ID de revisión: ${revId} (GWT: ${revIdEncoded})`);
 
-      // ── Subir archivos restantes en paralelo vía fetch directo ──
-      const CONCURRENCIA = 5;
-      const _remaining = pdfPaths.slice(1);
-      let _procesados = 1;
+    if (debugDir) {
+      fs.writeFileSync(path.join(debugDir, `pdfte-crea-lista-resp.txt`), creaResp.body, 'utf8');
+    }
 
-      for (let i = 0; i < _remaining.length; i += CONCURRENCIA) {
-        const _chunk = _remaining.slice(i, i + CONCURRENCIA);
-        const _fileData = _chunk.map(p => ({
-          name: path.basename(p),
-          b64: fs.readFileSync(p).toString('base64'),
-        }));
-        const _responses = await page.evaluate(async (files, revId) => {
-          return Promise.all(files.map(async ({ name, b64 }) => {
-            const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-            const blob = new Blob([bytes], { type: 'application/pdf' });
-            const fd = new FormData();
-            fd.append('Filedata', blob, name);
-            fd.append('id', String(revId));
-            fd.append('ambiente', 'false');
-            const resp = await fetch('/pdfdteInternet/upload', { method: 'POST', body: fd });
-            const text = await resp.text();
-            return { name, ok: resp.ok, status: resp.status, text };
-          }));
-        }, _fileData, nroRevision);
+    // ── Paso 3: subir cada PDF ────────────────────────────────────────────────
+    const uploadUrl = `${GWT_BASE}upload`;
+    let uploadedCount = 0;
+    for (const pdfPath of pdfPaths) {
+      const filename  = path.basename(pdfPath);
+      const pdfData   = fs.readFileSync(pdfPath);
+      const boundary  = `----WebKitFormBoundary${Date.now().toString(16)}`;
 
-        _procesados += _chunk.length;
-        console.log(` → Procesados ${_procesados}/${pdfPaths.length}`);
-        for (const r of _responses) {
-          if (!r.ok || !r.text.match(/^\d+,\d+$/)) {
-            console.warn(`   [!] ${r.name}: HTTP ${r.status} → ${r.text.substring(0, 120)}`);
-          }
-        }
-      }
+      // Construir multipart/form-data manualmente para soportar datos binarios
+      const partFile = Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="Filedata"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`),
+        pdfData,
+        Buffer.from('\r\n'),
+      ]);
+      const partId  = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="id"\r\n\r\n${revId}\r\n`);
+      const partAmb = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="ambiente"\r\n\r\nfalse\r\n`);
+      const closing = Buffer.from(`--${boundary}--\r\n`);
+      const formBody = Buffer.concat([partFile, partId, partAmb, closing]);
 
-      console.log(` ✓ ${pdfPaths.length} PDFs subidos al portal`);
-
-      // Esperar que las validaciones del portal (leeImpresoById) terminen
-      await page.waitForNetworkIdle({ timeout: 60000, idleTime: 2000 }).catch(() => {});
-      await new Promise(r => setTimeout(r, 2000));
-
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-05-archivos-listos.png'), fullPage: true }).catch(() => {});
-
-      // Paso 6: re-navegar al estado limpio y Enviar al SII
-      console.log(' → Re-navegando para "Enviar al SII"...');
-      await navegarAlFormulario();
-
-      // Esperar a que el botón esté habilitado (aria-disabled="false")
-      await page.waitForFunction(() => {
-        const btn = Array.from(document.querySelectorAll('button.x-btn-text'))
-          .find(b => b.textContent.trim() === 'Enviar al SII' && b.getAttribute('aria-disabled') !== 'true');
-        return !!btn;
-      }, { timeout: 15000 }).catch(() => {});
-
-      if (debugDir) await page.screenshot({ path: path.join(debugDir, 'pdfte-05b-antes-enviar.png'), fullPage: true }).catch(() => {});
-
-      // Debug: listar todos los botones visibles y sus estados
-      const _btnsDebug = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('button.x-btn-text')).map(b => ({
-          text: b.textContent.trim(),
-          disabled: b.disabled,
-          aria: b.getAttribute('aria-disabled'),
-          visible: b.offsetParent !== null,
-        }))
-      ).catch(() => []);
-      console.log(` [DEBUG] Botones en página: ${JSON.stringify(_btnsDebug.filter(b => b.text))}`);
-
-      console.log(' → Click "Enviar al SII"...');
-
-      // Intentar click en el botón directo (ignorar aria-disabled en esta etapa)
-      const _clickedEnviar = await page.evaluate(() => {
-        // a) Buscar button.x-btn-text exacto
-        for (const btn of document.querySelectorAll('button.x-btn-text')) {
-          if (btn.textContent.trim() === 'Enviar al SII') {
-            btn.click();
-            return 'direct';
-          }
-        }
-        // b) Abrir overflow ">" y buscar en el menú desplegable
-        const overflow = document.querySelector('td.x-toolbar-overflow-region, .x-toolbar-more-icon, button[class*="overflow"]');
-        if (overflow) {
-          overflow.click();
-          return 'overflow-click';
-        }
-        return false;
+      const upResp = await makeReq(uploadUrl, {
+        method: 'POST',
+        body: formBody,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Referer': `${GWT_BASE}${permHash}.cache.html`,
+          'x-dtreferer': GWT_BASE,
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
+        cookies,
       });
 
-      if (_clickedEnviar === 'overflow-click') {
-        // Esperar que aparezca el menú y hacer click en "Enviar al SII"
-        await new Promise(r => setTimeout(r, 500));
-        const _menuClicked = await page.evaluate(() => {
-          for (const el of document.querySelectorAll('.x-menu-item-text')) {
-            if (el.textContent.trim() === 'Enviar al SII') {
-              el.click();
-              return true;
-            }
-          }
-          return false;
-        });
-        if (!_menuClicked) throw new Error('pdfdteInternet: botón "Enviar al SII" no encontrado en overflow menu');
-      } else if (!_clickedEnviar) {
-        throw new Error('pdfdteInternet: botón "Enviar al SII" no disponible o deshabilitado');
+      if (upResp.status !== 200) {
+        throw new Error(`pdfdteInternet upload ${filename} → HTTP ${upResp.status}: ${upResp.body.substring(0, 150)}`);
       }
-
-      await page.waitForNetworkIdle({ timeout: 30000, idleTime: 1000 }).catch(() => {});
-      await new Promise(r => setTimeout(r, 3000));
-      if (debugDir) {
-        await page.screenshot({ path: path.join(debugDir, 'pdfte-06-enviado.png'), fullPage: true }).catch(() => {});
-        fs.writeFileSync(path.join(debugDir, 'pdfte-06-enviado.html'), await page.content(), 'utf8');
-      }
-
-      const pageText = await page.$eval('body', el => el.textContent).catch(() => '');
-      const exitoso  = /revision.*creada|solicitud.*enviada|documentos.*enviados|fue.*enviado|[eé]xito|por revisar/i.test(pageText);
-      console.log(` → Resultado: ${exitoso ? '[OK] enviado correctamente' : '[!] sin confirmación explícita'}`);
-      // Imprimir el marcador de éxito ANTES de cerrar el browser para que quede en stdout
-      // aunque browser.close() cuelgue y el proceso sea forzado a terminar.
-      if (exitoso) process.stdout.write('\nMUESTRAS SUBIDAS EXITOSAMENTE\n');
-      return { success: exitoso, pageText: pageText.substring(0, 800) };
-
-    } catch (err) {
-      return { success: false, error: err.message };
-    } finally {
-      if (browser) {
-        // browser.close() puede colgarse indefinidamente si Chromium no responde.
-        // Limitar a 8 segundos; si no cierra, matar el proceso del browser directamente.
-        await Promise.race([
-          browser.close().catch(() => {}),
-          new Promise(r => setTimeout(r, 8000)),
-        ]);
-        // Forzar cierre del proceso de Chromium si quedó colgado
-        try { browser.process()?.kill('SIGKILL'); } catch { /* ignorar */ }
-      }
+      uploadedCount++;
+      console.log(` ✓ [${uploadedCount}/${pdfPaths.length}] ${filename} → ${upResp.body.trim()}`);
     }
+
+    // ── Paso 4: enviar al SII (solicitaRevisionSII) ────────────────────────
+    // Params: Long id (revIdEncoded), String amb=Z
+    const enviarBody =
+      `7|0|6|${GWT_BASE}|${policyHash}|${GWT_SVC}|solicitaRevisionSII|` +
+      `java.lang.Long/4227064769|Z|1|2|3|4|2|5|6|5|${revIdEncoded}|0|`;
+    const enviarResp = await gwtPost(enviarBody);
+    if (enviarResp.status !== 200 || !enviarResp.body.startsWith('//OK')) {
+      throw new Error(`pdfdteInternet solicitaRevisionSII falló HTTP ${enviarResp.status}: ${enviarResp.body.substring(0, 200)}`);
+    }
+
+    if (debugDir) {
+      fs.writeFileSync(path.join(debugDir, `pdfte-enviar-sii-resp.txt`), enviarResp.body, 'utf8');
+    }
+
+    console.log(` ✓ Solicitud enviada al SII correctamente (${pdfPaths.length} PDFs, revisión ${revId})`);
+    process.stdout.write('\nMUESTRAS SUBIDAS EXITOSAMENTE\n');
+    return { success: true, revId };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2660,179 +2856,85 @@ class CertRunner {
    * @returns {Promise<{success: boolean, setText?: string, error?: string}>}
    */
   async obtenerSetBoletaPortal({ setPath, correoSet = '' } = {}) {
-    const puppeteer = require('puppeteer');
+    const https  = require('https');
+    const crypto = require('crypto');
+    const CBE_BASE   = 'https://www4.sii.cl/certBolElectDteInternet/';
+    const CBE_PERM   = '0FC3D987613537E6E13E9BB93A406F13';
+    const CBE_POLICY = '082D0AC4BC4D75A5DF38F116C53877D4';
+    const CBE_SVC    = 'cl.sii.sdi.diii.certBolElectDte.web.client.service.Facade';
+
     const cookieJar = await this._obtenerCookiesSII();
-    const puppeteerCookies = Object.entries(cookieJar).map(([name, value]) => ({
-      name, value, domain: '.sii.cl', path: '/', httpOnly: false, secure: true,
-    }));
-    const [rutNum, dvChar] = this.config.emisor.rut.split('-');
+    const cookieStr = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
+    const [rutNum, dvChar] = this.config.emisor.rut.replace(/\./g, '').split('-');
+    const dvUp = dvChar.toUpperCase();
 
-    let browser;
-    try {
-      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
-      const page = await browser.newPage();
-      await page.setCookie(...puppeteerCookies);
-      page.on('dialog', async dlg => { console.log(` → [dialog SET=1] ${dlg.message()}`); await dlg.accept(); });
+    const tlsOpts = {
+      rejectUnauthorized: false, maxVersion: 'TLSv1.2',
+      secureOptions: crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
+                   | crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+    };
+    const gwtPost = (bodyStr) => new Promise((resolve, reject) => {
+      const buf = Buffer.from(bodyStr, 'utf-8');
+      const req = https.request({
+        hostname: 'www4.sii.cl', port: 443, path: '/certBolElectDteInternet/facade', method: 'POST',
+        headers: {
+          'Content-Type': 'text/x-gwt-rpc; charset=UTF-8',
+          'X-GWT-Permutation': CBE_PERM,
+          'X-GWT-Module-Base': CBE_BASE,
+          'Cookie': cookieStr,
+          'Content-Length': buf.length,
+        },
+        ...tlsOpts,
+      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      req.on('error', reject);
+      req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE')); });
+      req.write(buf); req.end();
+    });
 
-      // Helper debug: guarda screenshot + HTML con timestamp
-      const dbgDirSet1 = this.config.debugDir ? path.join(this.config.debugDir, 'boleta-set1') : null;
-      if (dbgDirSet1) fs.mkdirSync(dbgDirSet1, { recursive: true });
-      const saveDebugSet1 = async (label) => {
-        if (!dbgDirSet1) return;
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const base = path.join(dbgDirSet1, `${label}-${ts}`);
-        try { await page.screenshot({ path: `${base}.png`, fullPage: true }); } catch {}
-        try { fs.writeFileSync(`${base}.html`, await page.content(), 'utf-8'); } catch {}
-        console.log(` [debug] Captura guardada: ${base}.png`);
-      };
+    // recuperarRepresentantesVigentesUsuariosAutorizados -> obtener rutRepre/dvRepre
+    const reprResp = await gwtPost(
+      `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|recuperarRepresentantesVigentesUsuariosAutorizados|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|2|5|6|5|${rutNum}|7|`
+    );
+    // Response: //OK[...,["...","...RepreTo/...","<dv>","<rut>"],0,7]
+    const reprMatch = reprResp.match(/"(d{1,2})","(d{7,8})"],0/);
+    const dvRepreChar = reprMatch ? reprMatch[1] : (cookieJar['NETSCAPE_LIVEWIRE.dv']  || cookieJar['DV_NS']  || '');
+    const rutRepreNum = reprMatch ? reprMatch[2] : (cookieJar['NETSCAPE_LIVEWIRE.rut'] || cookieJar['RUT_NS'] || '');
+    if (!rutRepreNum) throw new Error('No se pudo obtener rutRepre (facade + cookies fallaron)');
 
-      console.log(' → Cargando portal certBolElectDteInternet (SET=1)...');
-      await page.goto('https://www4.sii.cl/certBolElectDteInternet/?SET=1', {
-        waitUntil: 'networkidle2', timeout: 60000,
-      });
-      await new Promise(r => setTimeout(r, 2000));
-      await saveDebugSet1('01-carga');
+    // obtenerPostulacionSeg -> requerido por portal antes de descarga
+    await gwtPost(
+      `7|0|9|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|obtenerPostulacionSeg|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|90|P90|1|2|3|4|4|5|6|6|6|5|${rutNum}|7|8|9|`
+    );
 
-      // Paso 1: RUT empresa → "Confirmar Empresa"
-      const rutInput = await page.waitForSelector('input[maxlength="8"]', { timeout: 15000 }).catch(() => null);
-      const dvInput  = await page.waitForSelector('input[maxlength="1"]', { timeout: 5000 }).catch(() => null);
-      if (!rutInput) {
-        await saveDebugSet1('ERROR-norut');
-        throw new Error('certBolElectDteInternet/?SET=1: no se encontró campo RUT');
-      }
-      console.log(` → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
-      await rutInput.click({ clickCount: 3 }); await rutInput.type(rutNum);
-      await dvInput.click({ clickCount: 3 });  await dvInput.type(dvChar);
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button'))
-          .find(b => /confirmar/i.test(b.textContent));
-        if (btn) btn.click();
-      });
-      console.log(' → Click "Confirmar Empresa"');
+    // DownloadFileServlet GET
+    const dlUrl = `${CBE_BASE}DownloadFileServlet?rutEmpresa=${rutNum}&dvEmpresa=${dvUp}&rutRepre=${rutRepreNum}&dvRepre=${dvRepreChar}&mailProvSw=${encodeURIComponent(correoSet)}`;
+    console.log(` -> Descargando set boleta: DownloadFileServlet?rutEmpresa=${rutNum}&dvEmpresa=${dvUp}...`);
 
-      // Esperar checkboxes — GWT dispara ~8-10 POST /facade en paralelo
-      await page.waitForNetworkIdle({ idleTime: 800, timeout: 40000 }).catch(() => {});
-      await page.waitForFunction(() => {
-        return document.querySelector('input[type="checkbox"]') !== null;
-      }, { timeout: 40000, polling: 500 }).catch(() => {});
-      await new Promise(r => setTimeout(r, 500));
-      await saveDebugSet1('02-post-confirm');
+    const setText = await new Promise((resolve, reject) => {
+      const req = https.get(dlUrl, {
+        headers: {
+          'Cookie': cookieStr,
+          'Referer': `${CBE_BASE}?SET=1`,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/plain,text/html,*/*',
+        },
+        ...tlsOpts,
+      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      req.on('error', reject);
+      req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout DownloadFileServlet boleta')); });
+    });
 
-      // Paso 2: Marcar todos los checkboxes
-      const nCbs = await page.evaluate(() => {
-        const cbs = Array.from(document.querySelectorAll('input[type="checkbox"]'));
-        cbs.forEach(cb => { if (!cb.checked) cb.click(); });
-        return cbs.length;
-      });
-      console.log(` → ${nCbs} checkbox(es) marcados`);
-      await new Promise(r => setTimeout(r, 300));
+    if (!setText || setText.trim().length < 10)
+      throw new Error(`DownloadFileServlet boleta vacio (${setText?.length ?? 0} chars). Verificar sesion SII.`);
 
-      // Paso 3: Rellenar correo proveedor
-      // El campo de email es el input visible que NO tiene maxlength pequeño
-      const allInputs = await page.$$('input[type="text"].form-control');
-      let emailInput = null;
-      for (const inp of allInputs) {
-        const ml = await page.evaluate(el => el.maxLength, inp);
-        const visible = await page.evaluate(el => el.offsetParent !== null, inp);
-        if (visible && (ml <= 0 || ml > 8)) { emailInput = inp; break; }
-      }
-      if (emailInput) {
-        await emailInput.click({ clickCount: 3 });
-        await emailInput.type(correoSet);
-        console.log(` → Correo proveedor: ${correoSet}`);
-      } else {
-        console.log(' [!] No se encontró campo de correo — continuando sin él');
-      }
-
-      // Paso 4: Click "Bajar Nuevo Set" — esperar POST /facade (GWT RPC) y luego
-      // construir la URL de DownloadFileServlet directamente con los parámetros conocidos.
-      // La descarga real es un GET:
-      //   DownloadFileServlet?rutEmpresa=X&dvEmpresa=X&rutRepre=X&dvRepre=X&mailProvSw=X
-      // donde rutRepre/dvRepre vienen de las cookies NETSCAPE_LIVEWIRE.rut / .dv
-
-      const rutRepreNum = cookieJar['NETSCAPE_LIVEWIRE.rut'] || cookieJar['RUT_NS'] || '';
-      const dvRepreChar = cookieJar['NETSCAPE_LIVEWIRE.dv'] || cookieJar['DV_NS'] || '';
-      if (!rutRepreNum) throw new Error('No se pudo obtener rutRepre de las cookies SII (NETSCAPE_LIVEWIRE.rut)');
-
-      // Registrar listener de facade ANTES de hacer click
-      const facadePromise = page.waitForResponse(
-        resp => resp.url().includes('/certBolElectDteInternet/facade'),
-        { timeout: 20000 }
-      ).catch(() => null);
-
-      console.log(' → Click "Bajar Nuevo Set" — esperando GWT facade...');
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button'))
-          .find(b => /bajar/i.test(b.textContent));
-        if (btn) btn.click();
-      });
-
-      // Esperar que el facade GWT procese la solicitud
-      await facadePromise;
-      await new Promise(r => setTimeout(r, 1000));
-
-      // Construir URL de descarga e ir directo con https.get + cookies
-      const https = require('https');
-      const cookieStr = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
-      const downloadUrl = `https://www4.sii.cl/certBolElectDteInternet/DownloadFileServlet` +
-        `?rutEmpresa=${rutNum}&dvEmpresa=${dvChar}` +
-        `&rutRepre=${rutRepreNum}&dvRepre=${dvRepreChar}` +
-        `&mailProvSw=${encodeURIComponent(correoSet)}`;
-
-      console.log(` → Descargando set directamente: DownloadFileServlet?rutEmpresa=${rutNum}&dvEmpresa=${dvChar}&rutRepre=${rutRepreNum}&dvRepre=${dvRepreChar}&mailProvSw=${correoSet}`);
-
-      const setText = await new Promise((resolve, reject) => {
-        const req = https.get(downloadUrl, {
-          headers: {
-            'Cookie': cookieStr,
-            'Referer': 'https://www4.sii.cl/certBolElectDteInternet/?SET=1',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-          rejectUnauthorized: false,
-        }, (res) => {
-          const chunks = [];
-          res.on('data', chunk => chunks.push(chunk));
-          res.on('end', () => {
-            const body = Buffer.concat(chunks).toString('utf-8');
-            resolve(body);
-          });
-        });
-        req.on('error', reject);
-        req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout descargando DownloadFileServlet')); });
-      });
-
-      if (!setText || setText.trim().length < 10) {
-        if (dbgDirSet1) {
-          fs.writeFileSync(path.join(dbgDirSet1, 'boleta-set-contenido-vacio.txt'), setText || '', 'utf-8');
-          await saveDebugSet1('ERROR-descarga-vacia');
-        }
-        throw new Error(`DownloadFileServlet devolvió contenido vacío (${setText?.length ?? 0} chars). Verificar cookies.`);
-      }
-
-      if (setPath) {
-        const nodePath = require('path');
-        fs.mkdirSync(nodePath.dirname(setPath), { recursive: true });
-        fs.writeFileSync(setPath, setText, 'utf-8');
-        console.log(` ✓ Set guardado en: ${setPath}`);
-      }
-
-      console.log(` ✓ Set de pruebas obtenido (${setText.length} chars)`);
-      return { success: true, setText };
-    } catch (err) {
-      try {
-        if (dbgDirSet1) {
-          const ts = new Date().toISOString().replace(/[:.]/g, '-');
-          const base = path.join(dbgDirSet1, `ERROR-catch-${ts}`);
-          await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
-          fs.writeFileSync(`${base}.html`, await page.content().catch(() => ''), 'utf-8');
-          console.log(` [debug] Captura de error guardada: ${base}.png`);
-        }
-      } catch {}
-      return { success: false, error: err.message };
-    } finally {
-      if (browser) await browser.close().catch(() => {});
+    if (setPath) {
+      const nodePath = require('path');
+      fs.mkdirSync(nodePath.dirname(setPath), { recursive: true });
+      fs.writeFileSync(setPath, setText, 'utf-8');
+      console.log(` OK Set boleta guardado en: ${setPath}`);
     }
+    console.log(` OK Set de pruebas boleta obtenido (${setText.length} chars)`);
+    return { success: true, setText };
   }
 
   /**
@@ -2848,95 +2950,53 @@ class CertRunner {
    */
   async solicitarValidacionBoletaPortal({ trackId } = {}) {
     if (!trackId) throw new Error('solicitarValidacionBoletaPortal: trackId es obligatorio');
-    const puppeteer = require('puppeteer');
+    const https  = require('https');
+    const crypto = require('crypto');
+    const CBE_BASE   = 'https://www4.sii.cl/certBolElectDteInternet/';
+    const CBE_PERM   = '0FC3D987613537E6E13E9BB93A406F13';
+    const CBE_POLICY = '082D0AC4BC4D75A5DF38F116C53877D4';
+    const CBE_SVC    = 'cl.sii.sdi.diii.certBolElectDte.web.client.service.Facade';
+
     const cookieJar = await this._obtenerCookiesSII();
-    const puppeteerCookies = Object.entries(cookieJar).map(([name, value]) => ({
-      name, value, domain: '.sii.cl', path: '/', httpOnly: false, secure: true,
-    }));
-    const [rutNum, dvChar] = this.config.emisor.rut.split('-');
+    const cookieStr = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
+    const [rutNum, dvChar] = this.config.emisor.rut.replace(/\./g, '').split('-');
+    const dvUp       = dvChar.toUpperCase();
+    const trackIdStr = String(trackId);
 
-    let browser;
-    try {
-      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
-      const page = await browser.newPage();
-      await page.setCookie(...puppeteerCookies);
-      page.on('dialog', async dlg => { console.log(` → [dialog SET=2] ${dlg.message()}`); await dlg.accept(); });
+    const tlsOpts = {
+      rejectUnauthorized: false, maxVersion: 'TLSv1.2',
+      secureOptions: crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
+                   | crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+    };
+    const gwtPost = (bodyStr) => new Promise((resolve, reject) => {
+      const buf = Buffer.from(bodyStr, 'utf-8');
+      const req = https.request({
+        hostname: 'www4.sii.cl', port: 443, path: '/certBolElectDteInternet/facade', method: 'POST',
+        headers: {
+          'Content-Type': 'text/x-gwt-rpc; charset=UTF-8',
+          'X-GWT-Permutation': CBE_PERM,
+          'X-GWT-Module-Base': CBE_BASE,
+          'Cookie': cookieStr,
+          'Content-Length': buf.length,
+        },
+        ...tlsOpts,
+      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      req.on('error', reject);
+      req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE')); });
+      req.write(buf); req.end();
+    });
 
-      const debugSet2Dir = this.config.debugDir ? require('path').join(this.config.debugDir, 'boleta-set2') : null;
-      if (debugSet2Dir) require('fs').mkdirSync(debugSet2Dir, { recursive: true });
-      const snapSet2 = async (nombre) => {
-        if (!debugSet2Dir) return;
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const p = require('path').join(debugSet2Dir, `${nombre}-${ts}.png`);
-        await page.screenshot({ path: p, fullPage: true }).catch(() => {});
-        console.log(` [debug] Captura guardada: ${p}`);
-      };
+    // ingresarTrackId — GWT body format from BOLETA_SET2.har
+    // 7 params: (Integer rutNum, String dvChar, String null, String "90", Integer 0, String null, String trackId)
+    const body = `7|0|9|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|ingresarTrackId|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|90|${trackIdStr}|1|2|3|4|7|5|6|6|6|5|6|6|5|${rutNum}|7|0|8|0|0|9|`;
+    console.log(` -> certBolElectDteInternet/?SET=2: ingresarTrackId trackId=${trackIdStr}...`);
+    const resp = await gwtPost(body);
+    console.log(` OK ingresarTrackId respuesta: ${resp.substring(0, 120)}`);
 
-      console.log(' → Cargando portal certBolElectDteInternet (SET=2)...');
-      await page.goto('https://www4.sii.cl/certBolElectDteInternet/?SET=2', {
-        waitUntil: 'networkidle2', timeout: 60000,
-      });
-      await new Promise(r => setTimeout(r, 2000));
-      await snapSet2('01-carga');
+    if (!resp.startsWith('//OK'))
+      return { success: false, error: `ingresarTrackId fallo: ${resp.substring(0, 200)}` };
 
-      // Paso 1: RUT empresa → "Confirmar Empresa"
-      const rutInput = await page.$('input[maxlength="8"]');
-      const dvInput  = await page.$('input[maxlength="1"]');
-      if (!rutInput) throw new Error('certBolElectDteInternet/?SET=2: no se encontró campo RUT');
-      console.log(` → Ingresando RUT empresa: ${rutNum}-${dvChar}`);
-      await rutInput.click({ clickCount: 3 }); await rutInput.type(rutNum);
-      await dvInput.click({ clickCount: 3 });  await dvInput.type(dvChar);
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button'))
-          .find(b => /confirmar/i.test(b.textContent));
-        if (btn) btn.click();
-      });
-      console.log(' → Click "Confirmar Empresa"');
-
-      // Esperar que aparezca el campo "Identificador de Envio" — GWT dispara ~8-10 POST /facade en paralelo
-      await page.waitForNetworkIdle({ idleTime: 800, timeout: 40000 }).catch(() => {});
-      await page.waitForFunction(() => {
-        return document.querySelector('input[maxlength="15"]') !== null;
-      }, { timeout: 40000, polling: 500 }).catch(() => {});
-      await new Promise(r => setTimeout(r, 500));
-      await snapSet2('02-post-confirm');
-
-      // Paso 2: Ingresar TrackId
-      const trackInput = await page.$('input[maxlength="15"]');
-      if (!trackInput) {
-        const pageText = await page.evaluate(() => (document.body.innerText || '').trim().substring(0, 600));
-        console.log(` [!] Texto del portal al fallar:\n${pageText}`);
-        throw new Error('No se encontró campo "Identificador de Envio" en certBolElectDteInternet/?SET=2');
-      }
-      console.log(` → Ingresando TrackId: ${trackId}`);
-      await trackInput.click({ clickCount: 3 });
-      await trackInput.type(String(trackId));
-
-      // Paso 3: Click "Solicitar validación"
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button'))
-          .find(b => /solicitar/i.test(b.textContent));
-        if (btn) btn.click();
-      });
-      console.log(' → Click "Solicitar validación" — esperando respuesta...');
-
-      // Esperar respuesta del portal (puede ser confirmación o error)
-      await page.waitForFunction(() => {
-        const t = (document.body.textContent || '').toUpperCase();
-        return t.includes('ENVI') || t.includes('CORREO') || t.includes('ERROR') ||
-               t.includes('VALIDACI') || t.includes('SOLICITUD');
-      }, { timeout: 15000, polling: 500 }).catch(() => {});
-      await snapSet2('03-respuesta');
-
-      const respuesta = await page.evaluate(() => (document.body.innerText || '').trim().substring(0, 500));
-      console.log(` ✓ Validación solicitada. Respuesta: ${respuesta.substring(0, 120)}`);
-
-      return { success: true, respuesta };
-    } catch (err) {
-      return { success: false, error: err.message };
-    } finally {
-      if (browser) await browser.close().catch(() => {});
-    }
+    return { success: true, respuesta: resp };
   }
 
   /**
@@ -2955,220 +3015,101 @@ class CertRunner {
     nombreProveedor = '',
     correoProveedor = '',
   } = {}) {
-    const puppeteer = require('puppeteer');
+    const https  = require('https');
+    const crypto = require('crypto');
+    const CBE_BASE   = 'https://www4.sii.cl/certBolElectDteInternet/';
+    const CBE_PERM   = '0FC3D987613537E6E13E9BB93A406F13';
+    const CBE_POLICY = '082D0AC4BC4D75A5DF38F116C53877D4';
+    const CBE_SVC    = 'cl.sii.sdi.diii.certBolElectDte.web.client.service.Facade';
+
     const cookieJar = await this._obtenerCookiesSII();
+    const cookieStr = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
+    const [rutNum, dvChar] = this.config.emisor.rut.replace(/\./g, '').split('-');
+    const dvUp       = dvChar.toUpperCase();
+    const razonSocial = this.config.emisor.razon_social || this.config.emisor.razonSocial || '';
 
-    // RUT empresa desde config (ej: "78206276-K")
-    const rutEmpresaRaw = (this.config.emisor?.rut || '').replace(/\./g, '');
-    const [rutEmpNum, rutEmpDvRaw = 'K'] = rutEmpresaRaw.split('-');
-    const rutEmpDv = rutEmpDvRaw.toUpperCase();
+    const tlsOpts = {
+      rejectUnauthorized: false,
+      maxVersion: 'TLSv1.2',
+      secureOptions: crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION
+                   | crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+    };
+    const gwtPost = (bodyStr) => new Promise((resolve, reject) => {
+      const buf = Buffer.from(bodyStr, 'utf-8');
+      const req = https.request({
+        hostname: 'www4.sii.cl', port: 443, path: '/certBolElectDteInternet/facade', method: 'POST',
+        headers: {
+          'Content-Type': 'text/x-gwt-rpc; charset=UTF-8',
+          'X-GWT-Permutation': CBE_PERM,
+          'X-GWT-Module-Base': CBE_BASE,
+          'Cookie': cookieStr,
+          'Content-Length': buf.length,
+        },
+        ...tlsOpts,
+      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      req.on('error', reject);
+      req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE declaracion')); });
+      req.write(buf); req.end();
+    });
 
-    const puppeteerCookies = Object.entries(cookieJar).map(([name, value]) => ({
-      name, value, domain: '.sii.cl', path: '/', httpOnly: false, secure: true,
-    }));
-
-    let browser;
+    // 1. Obtener representante legal vigente
+    const reprResp = await gwtPost(
+      `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|recuperarRepresentantesVigentesUsuariosAutorizados|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|2|5|6|5|${rutNum}|7|`
+    );
+    const reprTableStr = reprResp.substring(reprResp.lastIndexOf(',[') + 1, reprResp.lastIndexOf('],0,7]') + 1);
+    let rutRepreNum = '';
     try {
-      browser = await puppeteer.launch(this._getPuppeteerLaunchOptions());
-      const page = await browser.newPage();
-      await page.setCookie(...puppeteerCookies);
+      const reprTable = JSON.parse(reprTableStr);
+      rutRepreNum = reprTable.filter(s => /^\d{7,8}$/.test(s)).pop() || '';
+    } catch {}
+    if (!rutRepreNum) return { success: false, error: 'No se pudo obtener representante vigente (facade CBE)' };
 
-      // Capturar alerts/confirms de GWT — sin handler quedan bloqueados
-      let dialogMsg = null;
-      page.on('dialog', async dlg => {
-        dialogMsg = dlg.message();
-        console.log(` → [dialog] ${dialogMsg}`);
-        await dlg.accept();
-      });
-
-      // Helper debug: guarda screenshot + HTML con timestamp
-      const dbgDirDecl = this.config.debugDir ? path.join(this.config.debugDir, 'boleta-declaracion') : null;
-      if (dbgDirDecl) fs.mkdirSync(dbgDirDecl, { recursive: true });
-      const saveDebugDecl = async (label) => {
-        if (!dbgDirDecl) return;
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const base = path.join(dbgDirDecl, `${label}-${ts}`);
-        try { await page.screenshot({ path: `${base}.png`, fullPage: true }); } catch {}
-        try { fs.writeFileSync(`${base}.html`, await page.content(), 'utf-8'); } catch {}
-        console.log(` [debug] Captura guardada: ${base}.png`);
-      };
-
-      // ── PASOS 1+2: Confirmar Empresa → esperar formulario (con retry) ──
-      // El portal GWT a veces responde con error transitorio ("empresa no autorizada")
-      // que se resuelve recargando la página y reintentando.
-      const MAX_INTENTOS = 3;
-      let checkboxOk = false;
-      let lastDialogMsg = null;
-      for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
-        dialogMsg = null; // resetear entre intentos
-
-        console.log(` → Navegando a certBolElectDteInternet (declaración) [intento ${intento}/${MAX_INTENTOS}]...`);
-        await page.goto('https://www4.sii.cl/certBolElectDteInternet/', {
-          waitUntil: 'networkidle2', timeout: 60000,
-        });
-        await new Promise(r => setTimeout(r, 2500));
-        await saveDebugDecl(`intento${intento}-01-carga`);
-
-        // GWT requiere eventos de teclado reales — NO funciona con .value = ...
-        const rutInput = await page.waitForSelector('input[maxlength="8"]', { timeout: 15000 }).catch(() => null);
-        const dvInput  = await page.waitForSelector('input[maxlength="1"]', { timeout: 5000 }).catch(() => null);
-        if (!rutInput) {
-          await saveDebugDecl(`intento${intento}-ERROR-norut`);
-          throw new Error('certBolElectDteInternet/: no se encontró campo RUT empresa');
-        }
-        console.log(` → Ingresando RUT empresa: ${rutEmpresaRaw}`);
-        await rutInput.click({ clickCount: 3 }); await rutInput.type(rutEmpNum);
-        await dvInput.click({ clickCount: 3 });  await dvInput.type(rutEmpDv);
-
-        await page.evaluate(() => {
-          const btn = Array.from(document.querySelectorAll('button'))
-            .find(b => /confirmar empresa/i.test(b.textContent));
-          if (btn) btn.click();
-        });
-        console.log(' → Click "Confirmar Empresa"...');
-
-        // GWT dispara ~8-10 POST /facade EN PARALELO al confirmar.
-        // Esperar red inactiva y luego DOM con checkboxes.
-        await page.waitForNetworkIdle({ idleTime: 800, timeout: 40000 }).catch(() => {});
-        await page.waitForFunction(() => {
-          return document.querySelector('input[type="checkbox"]') !== null;
-        }, { timeout: 40000, polling: 500 }).catch(() => {});
-        await saveDebugDecl(`intento${intento}-02-post-confirm`);
-
-        if (dialogMsg) {
-          // Portal lanzó alert — puede ser transitorio. Guardar y reintentar.
-          lastDialogMsg = dialogMsg;
-          await saveDebugDecl(`intento${intento}-DIALOG`);
-          console.log(` [!] Portal respondió con alerta en intento ${intento}: ${dialogMsg.substring(0, 100)}`);
-          if (intento < MAX_INTENTOS) {
-            console.log(' → Recargando y reintentando en 3s...');
-            await new Promise(r => setTimeout(r, 3000));
-            continue;
-          }
-          // Agotados los intentos con alerta — el SII puede requerir esperar SOK
-          await saveDebugDecl('PENDINGSOK-final');
-          return { success: false, pendingSok: true, error: lastDialogMsg };
-        }
-
-        if (await page.$('input[type="checkbox"]')) {
-          checkboxOk = true;
-          break;
-        }
-
-        console.log(` [!] Formulario no cargó en intento ${intento}${intento < MAX_INTENTOS ? ` — reintentando...` : ''}`);
-        await new Promise(r => setTimeout(r, 2000));
-      }
-
-      if (!checkboxOk) {
-        throw new Error('Formulario de declaración no cargó tras confirmar empresa (3 intentos)');
-      }
-
-      const totalCbs = await page.evaluate(() => {
-        const todos = Array.from(document.querySelectorAll('input[type="checkbox"]'));
-        todos.forEach(cb => { if (!cb.checked) cb.click(); });
-        return todos.length;
-      });
-      console.log(` → ${totalCbs} checkbox(es) marcados`);
-      await new Promise(r => setTimeout(r, 500));
-
-      // ── PASO 3: Rellenar campos proveedor software ────────────────
-      // GWT requiere page.type() real — NOT funciona con .value + dispatchEvent
-      const fillByLabel = async (labelFragment, value) => {
-        const handle = await page.evaluateHandle((frag) => {
-          for (const td of document.querySelectorAll('td')) {
-            if (!td.textContent.includes(frag)) continue;
-            const next = td.nextElementSibling;
-            if (!next) continue;
-            const inp = next.querySelector('input[type="text"]');
-            if (inp) return inp;
-          }
-          return null;
-        }, labelFragment);
-        const elem = handle && await handle.asElement();
-        if (!elem) return false;
-        await elem.click({ clickCount: 3 });
-        await elem.type(value);
-        return true;
-      };
-
-      // Link de Consulta  (maxlength=100)
-      const linkOk = await fillByLabel('Link de Consulta', linkConsulta);
-      if (!linkOk) {
-        const inp = await page.$('input[type="text"][maxlength="100"]');
-        if (inp) { await inp.click({ clickCount: 3 }); await inp.type(linkConsulta); }
-      }
-
-      // RUT Proveedor — dos inputs (num + DV) en la fila "Rut Proveedor"
-      const [rutProvNum, rutProvDvRaw] = rutProveedor.replace(/\./g, '').split('-');
-      const rutProvDv = (rutProvDvRaw || 'K').toUpperCase();
-      const rutProvH = await page.evaluateHandle(() => {
-        for (const td of document.querySelectorAll('td')) {
-          if (!td.textContent.includes('Rut Proveedor')) continue;
-          const next = td.nextElementSibling;
-          if (next) { const ins = next.querySelectorAll('input[type="text"]'); if (ins[0]) return ins[0]; }
-        }
-        return null;
-      });
-      const dvProvH = await page.evaluateHandle(() => {
-        for (const td of document.querySelectorAll('td')) {
-          if (!td.textContent.includes('Rut Proveedor')) continue;
-          const next = td.nextElementSibling;
-          if (next) { const ins = next.querySelectorAll('input[type="text"]'); if (ins[1]) return ins[1]; }
-        }
-        return null;
-      });
-      if (rutProvH && await rutProvH.asElement()) { const e = rutProvH.asElement(); await e.click({ clickCount: 3 }); await e.type(rutProvNum); }
-      if (dvProvH  && await dvProvH.asElement())  { const e = dvProvH.asElement();  await e.click({ clickCount: 3 }); await e.type(rutProvDv);  }
-
-      // Nombre Proveedor
-      await fillByLabel('Nombre Proveedor', nombreProveedor);
-
-      // Correo Proveedor Software
-      await fillByLabel('Correo electrónico Proveedor', correoProveedor);
-
-      // Captura pre-submit
-      await saveDebugDecl('03-pre-submit');
-
-      // ── PASO 4: Click "Grabar Declaración" ───────────────────────
-      const submitOk = await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button'))
-          .find(b => /grabar declaraci/i.test(b.textContent));
-        if (btn) { btn.click(); return true; }
-        return false;
-      });
-      if (!submitOk) {
-        await saveDebugDecl('ERROR-no-boton-grabar');
-        throw new Error('No se encontró botón "Grabar Declaración" en certBolElectDteInternet/');
-      }
-      console.log(' → Click "Grabar Declaración"...');
-
-      // Esperar confirmación del SII
-      await page.waitForFunction(() => {
-        const t = (document.body.textContent || '').toUpperCase();
-        return t.includes('GRABADA') || t.includes('GRABADO') || t.includes('COMPLETADA') ||
-               t.includes('EXITOSA') || t.includes('GUARDADA') || t.includes('REGISTRADA');
-      }, { timeout: 20000, polling: 1000 }).catch(() => {});
-
-      const msgFinal = await page.evaluate(() => (document.body.textContent || '').trim().substring(0, 300));
-      console.log(` ✓ Declaración completada. Respuesta: ${msgFinal.substring(0, 150)}`);
-      await saveDebugDecl('04-post-submit-OK');
-
-      return { success: true, mensaje: msgFinal };
-    } catch (err) {
-      // Guardar captura del estado de error si page sigue abierta
-      try {
-        if (dbgDirDecl) {
-          const ts = new Date().toISOString().replace(/[:.]/g, '-');
-          const base = path.join(dbgDirDecl, `ERROR-catch-${ts}`);
-          await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
-          fs.writeFileSync(`${base}.html`, await page.content().catch(() => ''), 'utf-8');
-          console.log(` [debug] Captura de error guardada: ${base}.png`);
-        }
-      } catch {}
-      return { success: false, error: err.message };
-    } finally {
-      if (browser) await browser.close().catch(() => {});
+    // 2. Verificar estado portal — debe ser P90 (SOK recibido, listo para declarar)
+    const estadoResp = await gwtPost(
+      `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|obtenerEstadoAutorizaEmp|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|4|5|6|5|6|5|${rutNum}|7|5|90|0|`
+    );
+    if (!estadoResp.includes('P90')) {
+      const estadoMatch = estadoResp.match(/"(P\d+)"/);
+      const estado = estadoMatch ? estadoMatch[1] : '(desconocido)';
+      return { success: false, pendingSok: true, error: `Estado portal no es P90 (es ${estado}) — espere SOK del SII` };
     }
+
+    // 3. Obtener datos de postulacion: fchAutorizacion y longCharValue
+    const postulResp = await gwtPost(
+      `7|0|9|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|obtenerPostulacionSeg|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|90|P90|1|2|3|4|4|5|6|6|6|5|${rutNum}|7|8|9|`
+    );
+    const postulTableStr = postulResp.substring(postulResp.lastIndexOf(',[') + 1, postulResp.lastIndexOf('],0,7]') + 1);
+    let fchAutorizacion = '';
+    try {
+      const postulTable = JSON.parse(postulTableStr);
+      fchAutorizacion = postulTable.find(s => /^\d{2}\/\d{2}\/\d{4}$/.test(s)) || '';
+    } catch {}
+    const longMatch = /'([^']+)'/.exec(postulResp);
+    const longCharValue = longMatch ? longMatch[1] : '0';
+
+    // 4. Autorizar empresa boleta produccion
+    const fechaHoy = this._getFechaHoy();
+    const authBody =
+      `7|0|23|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|autorizarEmpresaBolProd|` +
+      `cl.sii.sdi.diii.certBolElectDte.to.PostulSegHistInsUpdTo/138688689|P91|BVE|` +
+      `java.lang.Integer/3438268394|${dvUp}|` +
+      `cl.sii.sdi.diii.certBolElectDte.to.TdtEmpresaAutorizadaTo/2240026086|8|SII|` +
+      `${fechaHoy}|${correoProveedor}|${nombreProveedor}|19|S|${linkConsulta}|` +
+      `java.util.ArrayList/4159755760|cl.sii.sdi.diii.certBolElectDte.to.DocumentoAutorizadoTo/493967287|` +
+      `${fchAutorizacion}|java.lang.Long/4227064769|${razonSocial}|` +
+      `1|2|3|4|1|5|5|6|0|7|8|90|0|0|0|0|9|0|10|0|7|9|9|11|12|13|13|13|14|15|16|17|8|` +
+      `${rutNum}|8|${rutNum}|8|${rutRepreNum}|18|13|13|0|19|2|20|0|0|9|11|21|0|0|0|0|0|0|8|` +
+      `${rutNum}|8|${rutRepreNum}|22|${longCharValue}|-11|8|39|0|20|0|0|9|11|21|0|0|0|0|0|0|8|` +
+      `${rutNum}|8|${rutRepreNum}|-11|-11|8|41|0|0|23|-11|0|8|${rutNum}|0|0|`;
+
+    console.log(` -> autorizarEmpresaBolProd rutNum=${rutNum} rutRepreNum=${rutRepreNum} fchAutorizacion=${fchAutorizacion} longCharValue=${longCharValue}`);
+    const authResp = await gwtPost(authBody);
+    console.log(` OK autorizarEmpresaBolProd respuesta: ${authResp.substring(0, 200)}`);
+
+    if (!authResp.startsWith('//OK') || !authResp.includes('DECLARACION EFECTUADA')) {
+      return { success: false, error: `autorizarEmpresaBolProd respuesta inesperada: ${authResp.substring(0, 300)}` };
+    }
+    return { success: true, mensaje: 'DECLARACION EFECTUADA' };
   }
 
   /**
@@ -3271,33 +3212,6 @@ class CertRunner {
   // ═══════════════════════════════════════════════════════════════
   // Helpers privados
   // ═══════════════════════════════════════════════════════════════
-
-  /**
-   * Opciones base para puppeteer.launch.
-   * Usa Chrome del sistema (executablePath) para evitar crashes del Chromium
-   * bundled en Windows (0xC0000409). Respeta this.config.puppeteerHeadless.
-   */
-  _getPuppeteerLaunchOptions(extraArgs = [], extraOpts = {}) {
-    const fs = require('fs');
-    const chromePaths = [
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-      process.env.LOCALAPPDATA ? process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe' : null,
-    ].filter(Boolean);
-    const systemChrome = chromePaths.find(p => fs.existsSync(p));
-
-    const opts = {
-      headless: this.config.puppeteerHeadless !== false,
-      ignoreHTTPSErrors: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors', ...extraArgs],
-      ...extraOpts,
-    };
-    if (systemChrome) {
-      opts.executablePath = systemChrome;
-      console.log(` [browser] Usando Chrome del sistema: ${systemChrome}`);
-    }
-    return opts;
-  }
 
   _getFechaHoy() {
     const now = new Date();

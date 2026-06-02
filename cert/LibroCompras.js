@@ -40,6 +40,7 @@ class LibroCompras {
     this.emisor = config.emisor;
     this.periodo = config.periodo;
     this.certificado = config.certificado;
+    this.tipoEnvio = config.tipoEnvio || 'TOTAL';
   }
 
   /**
@@ -76,7 +77,7 @@ class LibroCompras {
       NroResol: this.emisor.nro_resol,
       TipoOperacion: 'COMPRA',
       TipoLibro: 'MENSUAL',
-      TipoEnvio: 'TOTAL',
+      TipoEnvio: this.tipoEnvio,
     });
     libro.setResumen(resumen);
     libro.setDetalle(detalles);
@@ -164,7 +165,7 @@ class LibroCompras {
       NroResol: this.emisor.nro_resol,
       TipoOperacion: 'COMPRA',
       TipoLibro: 'MENSUAL',
-      TipoEnvio: 'TOTAL',
+      TipoEnvio: this.tipoEnvio,
     });
     libro.setResumen(resumenRecalculado);
     libro.setDetalle(detalleAjustado);

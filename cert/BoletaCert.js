@@ -162,6 +162,7 @@ class BoletaCert {
         tipo: 39,
         folio: folioActual,
         fechaEmision: fechaHoy,
+        precioConIva: true, // Set de pruebas SII define precios "con IVA" (precio al consumidor)
         emisor: {
           RUTEmisor: this.emisor.rut,
           RznSocEmisor: this.emisor.razon_social,
@@ -453,8 +454,34 @@ class BoletaCert {
       }
     } else {
       console.log(` [OK] Enviado - TrackId: ${resultadoBoleta.trackId}`);
+
+      // Verificar estado SOAP antes de continuar. Error 6 "Rut No Autorizado a Firmar"
+      // es fatal — reintentar con otro sec no sirve de nada.
+      process.stderr.write(`[PROGRESS]${JSON.stringify({ step: 'BOLETA_SOAP_CHECK' })}\n`);
+      console.log(` ⏳ Esperando 20s para verificar estado SOAP del EnvioBOLETA...`);
+      await new Promise(r => setTimeout(r, 20000));
+      try {
+        const _estadoBoleta = await enviador.consultarEstadoSoap(resultadoBoleta.trackId, this.emisor.rut);
+        console.log(` [Estado SOAP EnvioBOLETA] ${_estadoBoleta.estado} — ${_estadoBoleta.mensaje}`);
+        if (_estadoBoleta.esRechazado) {
+          const _glosa = _estadoBoleta.glosa || _estadoBoleta.estado || '?';
+          const _esAuth = /autorizado|autorizar|firmar|permiso/i.test(_glosa);
+          console.log(` [ERR] EnvioBOLETA rechazado por SII${_esAuth ? ' (error de autorización)' : ''}: ${_glosa}`);
+          return {
+            success: false,
+            error: `EnvioBOLETA rechazado por SII: ${_glosa} (${_estadoBoleta.estado})`,
+            fase: 'EnvioBOLETA-SOAP',
+            noAutorizado: _esAuth,
+            estadoSoap: _estadoBoleta.estado,
+          };
+        }
+        // Estado intermedio (REC, SOK, FOK…) → SII aún procesa, continuar con RCOF
+      } catch (_e) {
+        console.log(` [!] No se pudo verificar estado SOAP EnvioBOLETA: ${_e.message} — continuando`);
+      }
     }
-    
+
+    process.stderr.write(`[PROGRESS]${JSON.stringify({ step: 'BOLETA_RCOF' })}\n`);
     // 5 & 6. Generar y enviar RCOF — loop hasta que SII lo acepte o se agoten intentos.
     // Estrategia: enviar → si ok, esperar 30s → consultar estado (EPR o RPR = éxito).
     // Si DUPLICADO: el SII ya tiene un RCOF para este RUT/período. El entorno de certificación
@@ -528,8 +555,17 @@ class BoletaCert {
         break;
       }
 
-      // SII lo rechazó explícitamente — probar con el siguiente sec
-      console.log(` [⚠️ RECHAZADO] RCOF sec=${secActual} rechazado (${estadoRcof.estado}: ${estadoRcof.glosa || estadoRcof.mensaje}). Probando sec=${secActual + 1}...`);
+      // SII lo rechazó explícitamente.
+      // Si es un error de autorización (error 6 "Rut No Autorizado a Firmar"),
+      // cambiar sec no sirve — abortar inmediatamente.
+      const _glosaRcof = estadoRcof.glosa || estadoRcof.mensaje || '';
+      const _esAuthRcof = /autorizado|autorizar|firmar|permiso/i.test(_glosaRcof);
+      if (_esAuthRcof) {
+        console.log(` [ERR-AUTH] RCOF rechazado por error de autorización (${estadoRcof.estado}): ${_glosaRcof} — abortando (reintentar no ayuda)`);
+        resultadoRCOF = { ok: false, error: `Empresa no autorizada para firmar RCOF: ${_glosaRcof}`, noAutorizado: true };
+        break;
+      }
+      console.log(` [⚠️ RECHAZADO] RCOF sec=${secActual} rechazado (${estadoRcof.estado}: ${_glosaRcof}). Probando sec=${secActual + 1}...`);
       trackIdRCOFloop = null;
     }
 
@@ -542,7 +578,8 @@ class BoletaCert {
           success: false,
           error: resultadoRCOF.error,
           fase: 'RCOF',
-          trackIdBoleta: resultadoBoleta.trackId
+          noAutorizado: resultadoRCOF.noAutorizado || false,
+          trackIdBoleta: resultadoBoleta.trackId,
         };
       }
     }
