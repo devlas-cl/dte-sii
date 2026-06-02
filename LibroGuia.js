@@ -40,8 +40,10 @@ class LibroGuia extends LibroBase {
       throw new Error('Debe establecer la carátula antes de generar');
     }
 
+    const tipoEnvio = String(this.caratula?.TipoEnvio || '').toUpperCase();
     const caratulaXml = this._renderCaratula();
     const resumenXml = this._renderResumen();
+    // AJUSTE con documentos: Detalle + ResumenSegmento + ResumenPeriodo
     const detalleXml = this._renderDetalle();
 
     const schemaLoc = 'http://www.sii.cl/SiiDte LibroGuia_v10.xsd';
@@ -87,7 +89,9 @@ class LibroGuia extends LibroBase {
   _renderResumen() {
     const resumen = this._buildResumenPeriodo();
     if (!resumen) return '';
-    
+
+    const tipoEnvio = String(this.caratula?.TipoEnvio || '').toUpperCase();
+
     const order = [
       'TotFolAnulado',
       'TotGuiaAnulada',
@@ -95,30 +99,37 @@ class LibroGuia extends LibroBase {
       'TotMntGuiaVta',
       'TotTraslado',
     ];
-    
-    let xml = '<ResumenPeriodo>';
-    order.forEach((key) => {
-      const value = resumen[key];
-      if (value === undefined || value === null || value === '' || value === false) return;
-      
-      if (Array.isArray(value)) {
-        value.forEach((item) => {
-          if (item && typeof item === 'object') {
-            xml += `<${key}>`;
-            Object.keys(item).forEach((itemKey) => {
-              if (item[itemKey] !== undefined && item[itemKey] !== null && item[itemKey] !== '') {
-                xml += `<${itemKey}>${this._escapeXmlText(String(item[itemKey]))}</${itemKey}>`;
-              }
-            });
-            xml += `</${key}>`;
-          }
-        });
-      } else {
-        xml += `<${key}>${this._escapeXmlText(String(value))}</${key}>`;
-      }
-    });
-    xml += '</ResumenPeriodo>';
-    return xml;
+
+    const _renderSection = (tag) => {
+      let xml = `<${tag}>`;
+      order.forEach((key) => {
+        const value = resumen[key];
+        if (value === undefined || value === null || value === '' || value === false) return;
+        if (Array.isArray(value)) {
+          value.forEach((item) => {
+            if (item && typeof item === 'object') {
+              xml += `<${key}>`;
+              Object.keys(item).forEach((itemKey) => {
+                if (item[itemKey] !== undefined && item[itemKey] !== null && item[itemKey] !== '') {
+                  xml += `<${itemKey}>${this._escapeXmlText(String(item[itemKey]))}</${itemKey}>`;
+                }
+              });
+              xml += `</${key}>`;
+            }
+          });
+        } else {
+          xml += `<${key}>${this._escapeXmlText(String(value))}</${key}>`;
+        }
+      });
+      xml += `</${tag}>`;
+      return xml;
+    };
+
+    // AJUSTE con documentos: ResumenSegmento (delta) + ResumenPeriodo (acumulado)
+    if (tipoEnvio === 'AJUSTE' && this.detalle.length > 0) {
+      return _renderSection('ResumenSegmento') + _renderSection('ResumenPeriodo');
+    }
+    return _renderSection('ResumenPeriodo');
   }
 
   _renderDetalle() {

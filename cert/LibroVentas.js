@@ -35,6 +35,7 @@ class LibroVentas {
     this.periodo = config.periodo;
     this.certificado = config.certificado;
     this.signoNC = (config.signoNC || 'POSITIVO').toUpperCase();
+    this.tipoEnvio = config.tipoEnvio || 'TOTAL';
   }
 
   /**
@@ -99,7 +100,7 @@ class LibroVentas {
       NroResol: this.emisor.nro_resol,
       TipoOperacion: 'VENTA',
       TipoLibro: 'MENSUAL',
-      TipoEnvio: 'TOTAL',
+      TipoEnvio: this.tipoEnvio,
     });
     libro.setResumen(resumen);
     libro.setDetalle(detalles);

@@ -83,7 +83,7 @@ class SiiPortalAuth {
     if (!pfxBuffer) throw new Error('SiiPortalAuth: pfxBuffer es obligatorio');
     if (pfxPassword === undefined) throw new Error('SiiPortalAuth: pfxPassword es obligatorio');
 
-    const { certPem, keyPem } = SiiPortalAuth._extractPems(pfxBuffer, pfxPassword);
+    const { certPem, keyPem, chainPem } = SiiPortalAuth._extractPems(pfxBuffer, pfxPassword);
     this._certPem = certPem;
     this._keyPem  = keyPem;
     // Huella para identificar de qué cert es la sesión cacheada
@@ -96,7 +96,11 @@ class SiiPortalAuth {
     }
 
     this._agentePlano = new https.Agent(SII_TLS_OPTS);
-    this._agenteCert  = new https.Agent({ ...SII_TLS_OPTS, cert: certPem, key: keyPem });
+    // chainPem incluye hoja + intermedios + raíz extraídos por forge.
+    // Necesario para PFX con cadena completa (ej. IDOK) — SII necesita los
+    // intermedios para verificar la firma. tls.createSecureContext({ pfx }) no se
+    // usa porque OpenSSL 3 (Node 24) rechaza ciertos formatos PKCS12 modernos.
+    this._agenteCert  = new https.Agent({ ...SII_TLS_OPTS, cert: chainPem, key: keyPem });
 
     _instanceRegistry.set(this._certHash, this);
   }
@@ -106,24 +110,86 @@ class SiiPortalAuth {
    * (node-forge soporta PKCS12 moderno AES-256 que Node nativo rechaza)
    * @private
    */
+  /**
+   * Extrae clave privada y cadena de certificados de un PFX/PKCS12.
+   * Soporta: RSA y EC, 1 a N certificados, cadenas desordenadas,
+   * pkcs8ShroudedKeyBag y keyBag, algoritmos legacy (RC2, 3DES) y modernos.
+   * Usa forge (no tls.createSecureContext) para ser compatible con formatos
+   * PKCS12 que OpenSSL 3 rechaza (ej. IDOK con SHA-1 MAC o AES-256 encryption).
+   *
+   * @returns {{ certPem: string, keyPem: string, chainPem: string }}
+   *   certPem  - solo el certificado hoja (para _certHash)
+   *   keyPem   - clave privada PEM
+   *   chainPem - cadena completa ordenada: hoja → intermedios → raíz
+   */
   static _extractPems(pfxBuffer, password) {
-    const p12Asn1 = forge.asn1.fromDer(pfxBuffer.toString('binary'));
-    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, password);
+    // ── 1. Parsear PKCS12 ────────────────────────────────────────────────────
+    let p12;
+    try {
+      p12 = forge.pkcs12.pkcs12FromAsn1(forge.asn1.fromDer(pfxBuffer.toString('binary')), password);
+    } catch (e) {
+      throw new Error(`SiiPortalAuth: no se pudo parsear el PFX — ${e.message}`);
+    }
 
-    // Clave privada
-    const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
-    const keyBag  = keyBags[forge.pki.oids.pkcs8ShroudedKeyBag]?.[0]
-      || p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag]?.[0];
-    if (!keyBag?.key) throw new Error('SiiPortalAuth: no se encontró clave privada en el PFX');
-    const keyPem = forge.pki.privateKeyToPem(keyBag.key);
+    // ── 2. Clave privada: probar todos los tipos de key bag ──────────────────
+    let keyObj = null;
+    for (const oid of [forge.pki.oids.pkcs8ShroudedKeyBag, forge.pki.oids.keyBag]) {
+      const bags = p12.getBags({ bagType: oid })[oid] || [];
+      const found = bags.find(b => b.key);
+      if (found) { keyObj = found.key; break; }
+    }
+    if (!keyObj) throw new Error('SiiPortalAuth: no se encontró clave privada en el PFX');
+    const keyPem = forge.pki.privateKeyToPem(keyObj);
 
-    // Certificado
-    const certBags = p12.getBags({ bagType: forge.pki.oids.certBag });
-    const certBag  = certBags[forge.pki.oids.certBag]?.[0];
-    if (!certBag?.cert) throw new Error('SiiPortalAuth: no se encontró certificado en el PFX');
-    const certPem = forge.pki.certificateToPem(certBag.cert);
+    // ── 3. Certificados: recopilar todos ─────────────────────────────────────
+    const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
+    const allCerts = certBags.map(b => b.cert).filter(Boolean);
+    if (!allCerts.length) throw new Error('SiiPortalAuth: no se encontró certificado en el PFX');
 
-    return { certPem, keyPem };
+    // ── 4. Identificar el certificado hoja ───────────────────────────────────
+    // Estrategia 1: el cert cuya clave pública coincide con la clave privada
+    let leafCert = null;
+    try {
+      // Funciona para RSA y EC mientras forge pueda derivar la clave pública
+      const pubFromKey = forge.pki.setRsaPublicKey
+        ? forge.pki.setRsaPublicKey(keyObj.n, keyObj.e)   // RSA
+        : null;
+      if (pubFromKey) {
+        const pubPem = forge.pki.publicKeyToPem(pubFromKey);
+        leafCert = allCerts.find(c => forge.pki.publicKeyToPem(c.publicKey) === pubPem) ?? null;
+      }
+    } catch (_) { /* EC u otro — caer a estrategia 2 */ }
+
+    // Estrategia 2: el primer cert que NO sea CA (basicConstraints.cA = false/absent)
+    if (!leafCert) {
+      leafCert = allCerts.find(c => {
+        const bc = c.getExtension('basicConstraints');
+        return !bc || bc.cA !== true;
+      }) ?? allCerts[0];
+    }
+
+    // ── 5. Ordenar cadena: hoja → intermedios → raíz ─────────────────────────
+    // Construir la cadena siguiendo relaciones issuer→subject
+    const remaining = allCerts.filter(c => c !== leafCert);
+    const chain = [leafCert];
+    let current = leafCert;
+
+    while (remaining.length > 0) {
+      // El siguiente eslabón es el cert cuyo subject coincide con el issuer del actual
+      const issuerHash = current.issuer.hash;
+      const idx = remaining.findIndex(c => c.subject.hash === issuerHash);
+      if (idx < 0) break;                              // fin de cadena conocida
+      current = remaining.splice(idx, 1)[0];
+      if (chain.includes(current)) break;             // ciclo (self-signed raíz)
+      chain.push(current);
+    }
+    // Appender cualquier cert restante que no pudimos encadenar
+    chain.push(...remaining);
+
+    const certPem  = forge.pki.certificateToPem(leafCert);
+    const chainPem = chain.map(c => forge.pki.certificateToPem(c)).join('');
+
+    return { certPem, keyPem, chainPem };
   }
 
   // ─── HTTP helpers ────────────────────────────────────────────────────────────

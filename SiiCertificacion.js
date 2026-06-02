@@ -459,6 +459,53 @@ class SiiCertificacion {
   }
 
   /**
+   * Consulta los libros IECV ya enviados al SII para un año dado.
+   * Usa el portal QEstLibro (DTEauth?7) para determinar si cada período tiene
+   * un envío MENSUAL (TOTAL/LTC) o RECTIFICA (AJUSTE) por tipo de operación.
+   *
+   * @param {number|string} year - Año (ej: 2026)
+   * @returns {Promise<Object>} Mapa con estructura:
+   *   { '2026-04': { COMPRA: { periodicidad: 'MENSUAL', estado: 'Recibido', codigo: 'COMPRA-...' }, VENTA: {...} } }
+   */
+  async consultarLibrosExistentes(year) {
+    const year4 = String(year || new Date().getFullYear());
+
+    await this.session.ensureSession('/cgi_dte/UPL/DTEauth?7');
+
+    const url = `https://maullin.sii.cl/cgi_dte/UPL/QEstLibro` +
+      `?rutCompany=${this.rutEmpresa}&dvCompany=${this.dvEmpresa}` +
+      `&TrackId=&year=${year4}&month=00&tipo=TODOS`;
+
+    const resp = await this.session.request(url);
+    const html = resp.body || '';
+
+    if (html.includes('NO ESTA AUTORIZADO') || html.includes('SESION HA EXPIRADO')) {
+      throw new Error('QEstLibro: sesión no autorizada o expirada');
+    }
+
+    // Cada fila tiene 6 <td>: periodo, operacion, estado, tipoLibro, periodicidad, cantidad+link
+    // Capturamos los 5 primeros <td> de texto plano + el Codigo de la URL del link
+    const result = {};
+    const rowRegex =
+      /<tr><td[^>]*>([^<]+)<\/td><td[^>]*>([^<]+)<\/td><td[^>]*>([^<]+)<\/td><td[^>]*>([^<]+)<\/td><td[^>]*>([^<]+)<\/td><td[^>]*>[^<]*<a href=QDetEstLibro\?Codigo=([^&"'\s>]+)/gi;
+
+    let m;
+    while ((m = rowRegex.exec(html)) !== null) {
+      const periodo      = m[1].trim();
+      const tipo         = m[2].trim().toUpperCase();        // COMPRA | VENTA
+      const estado       = m[3].trim();                      // Recibido | ...
+      const periodicidad = m[5].trim().toUpperCase();        // MENSUAL | RECTIFICA
+      const codigo       = m[6].trim();
+
+      if (!/^\d{4}-\d{2}$/.test(periodo)) continue;
+      if (!result[periodo]) result[periodo] = {};
+      result[periodo][tipo] = { periodicidad, estado, codigo };
+    }
+
+    return result;
+  }
+
+  /**
    * Declara avance en una etapa de certificación con TrackIds específicos
    * @param {Object} options - Opciones
    * @param {Object} options.sets - Sets a declarar con sus TrackIds
@@ -859,15 +906,50 @@ class SiiCertificacion {
         console.log(` [!] No se pudo verificar la declaración: ${verifyErr.message}`);
       }
 
-      // allRejected: SII rechazó todos los sets declarados — período incorrecto, no tiene sentido reintentar
+      // conErrores: el SII procesó el envío pero encontró errores en el contenido del XML.
+      // Detectar en el body de la respuesta de pe_avance3 (no en la re-verificación de pe_avance2).
+      const _erroresBody = body || '';
+      const _nombresConError = [];
+      const _patronesNombre = [
+        'LIBRO DE VENTAS', 'LIBRO DE COMPRAS PARA EXENTOS', 'LIBRO DE COMPRAS',
+        'LIBRO DE GUIAS', 'SET BASICO', 'SET GUIA DE DESPACHO', 'SET FACTURA EXENTA',
+        'SET CASO GENERAL FACTURA COMPRA', 'SET DE SIMULACION',
+      ];
+      for (const _nom of _patronesNombre) {
+        // Buscar fila que contenga el nombre Y "ENVIO CON ERRORES O REPAROS".
+        // Se usa un lookahead negativo para que "LIBRO DE COMPRAS" no haga match dentro de
+        // "LIBRO DE COMPRAS PARA EXENTOS", evitando falsos positivos.
+        const _nomEscapado = _nom.replace(/ /g, '\\s+');
+        // Si el nombre es un prefijo de otro nombre más largo, agregar un límite tras él.
+        const _otrosNombres = _patronesNombre.filter(n => n !== _nom && n.startsWith(_nom));
+        let _patronNom = _nomEscapado;
+        if (_otrosNombres.length > 0) {
+          // Lookahead negativo: no debe seguir el texto diferenciador de los nombres más largos
+          const _sufijos = _otrosNombres.map(n => n.slice(_nom.length).replace(/ /g, '\\s+').trim());
+          _patronNom += `(?!\\s+(?:${_sufijos.join('|')}))`;
+        }
+        const _re = new RegExp(_patronNom + '[\\s\\S]{0,200}?ENVIO CON ERRORES O REPAROS', 'i');
+        if (_re.test(_erroresBody)) _nombresConError.push(_nom);
+      }
+      const conErrores = _nombresConError.length > 0;
+      if (conErrores) {
+        console.log(` [ERR] SII rechazó por ERRORES DE CONTENIDO: ${_nombresConError.join(', ')}`);
+      }
+
+      // allRejected: SII rechazó todos los sets declarados — período incorrecto, no tiene sentido reintentar.
+      // Solo aplica cuando NO hay errores de contenido explícitos (esos deben manejarse por separado).
       const _declaredCount = Object.keys(fieldMapping).filter(k => sets[k]).length;
-      const allRejected = !enRevision && camposVacios.length > 0 && camposVacios.length >= _declaredCount && _declaredCount > 0;
+      const allRejected = !enRevision && !conErrores && camposVacios.length > 0 && camposVacios.length >= _declaredCount && _declaredCount > 0;
 
       return {
         success: verificado || enRevision,
-        error: verificacionError || errorMsg || undefined,
+        error: conErrores
+          ? `ENVIO CON ERRORES O REPAROS: ${_nombresConError.join(', ')}`
+          : (verificacionError || errorMsg || undefined),
         verificado,
         enRevision,
+        conErrores,
+        nombresConError: _nombresConError,
         allRejected,
         status: declareResponse.status,
         rawHtml: body,

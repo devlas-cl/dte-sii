@@ -13,6 +13,16 @@ const LibroBase = require('./LibroBase');
 class LibroCompraVenta extends LibroBase {
   constructor(certificado) {
     super(certificado);
+    this.ltcTotales = null;
+  }
+
+  /**
+   * Establece los totales del envío LTC (MENSUAL/TOTAL) previo para este período.
+   * Cuando se genera un AJUSTE, TotalesPeriodo = LTC + delta actual.
+   * @param {Array} totalesLtc - Array de resumen del libro TOTAL (misma estructura que setResumen)
+   */
+  setLtcTotales(totalesLtc) {
+    this.ltcTotales = totalesLtc || null;
   }
 
   setCaratula(caratula) {
@@ -24,10 +34,11 @@ class LibroCompraVenta extends LibroBase {
     if (!this.caratula) {
       throw new Error('Debe establecer la carátula antes de generar');
     }
-    
+
+    const tipoEnvio = String(this.caratula?.TipoEnvio || '').toUpperCase();
     const caratulaXml = this._renderCaratula();
     const resumenXml = this._renderResumen();
-    const detalleXml = this._renderDetalle();
+    const detalleXml = this._renderDetalle(tipoEnvio === 'AJUSTE');
     const envioLibroId = this.id;
     const tmstFirma = this._getTmstFirma();
     
@@ -64,13 +75,53 @@ class LibroCompraVenta extends LibroBase {
 
   _renderResumen() {
     if (!this.resumen.length) return '';
-    
+
     const tipoEnvio = String(this.caratula?.TipoEnvio || '').toUpperCase();
-    const useSegmento = tipoEnvio && tipoEnvio !== 'TOTAL';
-    const resumenTag = useSegmento ? 'ResumenSegmento' : 'ResumenPeriodo';
-    const totalesTag = useSegmento ? 'TotalesSegmento' : 'TotalesPeriodo';
-    
-    const order = [
+
+    if (tipoEnvio === 'AJUSTE') {
+      // AJUSTE: ResumenSegmento (delta actual) + ResumenPeriodo (LTC acumulado + delta)
+      const segmentoXml = this._renderResumenSection('ResumenSegmento', 'TotalesSegmento');
+      if (this.ltcTotales && this.ltcTotales.length > 0) {
+        // TotalesPeriodo = totales LTC previos + delta de este AJUSTE
+        const acumulado = this._acumularResumen(this.ltcTotales, this.resumen);
+        const savedResumen = this.resumen;
+        this.resumen = acumulado;
+        const periodoXml = this._renderResumenSection('ResumenPeriodo', 'TotalesPeriodo');
+        this.resumen = savedResumen;
+        return segmentoXml + periodoXml;
+      }
+      // Sin LTC guardado: ambas secciones con los mismos datos (ajuste inicial)
+      return segmentoXml +
+             this._renderResumenSection('ResumenPeriodo', 'TotalesPeriodo');
+    }
+
+    const useSegmento = tipoEnvio === 'PARCIAL';
+    return this._renderResumenSection(
+      useSegmento ? 'ResumenSegmento' : 'ResumenPeriodo',
+      useSegmento ? 'TotalesSegmento' : 'TotalesPeriodo'
+    );
+  }
+
+  _renderResumenSection(resumenTag, totalesTag) {
+    // TotalesPeriodo y TotalesSegmento tienen ordenamientos XSD distintos para FctProp:
+    //   Periodo:  FctProp viene al final, después de TotImpVehiculo
+    //   Segmento: FctProp viene antes de TotMntTotal, después de TotIVAUsoComun
+    //             y no incluye TotImpVehiculo en la secuencia post-TotMntTotal
+    const isSegmento = totalesTag === 'TotalesSegmento';
+    // TotalesSegmento (AJUSTE/PARCIAL): FctProp/TotCredIVAUsoComun no existen en ese tipo XSD.
+    // TotalesPeriodo: orden original validado por el SII — FctProp inmediatamente después de TotIVAUsoComun.
+    const order = isSegmento ? [
+      'TpoDoc', 'TpoImp', 'TotDoc', 'TotAnulado', 'TotOpExe', 'TotMntExe',
+      'TotMntNeto', 'TotOpIVARec', 'TotMntIVA', 'TotOpActivoFijo',
+      'TotMntActivoFijo', 'TotMntIVAActivoFijo', 'TotIVANoRec',
+      'TotOpIVAUsoComun', 'TotIVAUsoComun',
+      'TotIVAFueraPlazo', 'TotIVAPropio', 'TotIVATerceros', 'TotLey18211',
+      'TotOtrosImp', 'TotImpSinCredito', 'TotOpIVARetTotal', 'TotIVARetTotal',
+      'TotOpIVARetParcial', 'TotIVARetParcial', 'TotCredEC', 'TotDepEnvase',
+      'TotLiquidaciones', 'TotMntTotal', 'TotOpIVANoRetenido', 'TotIVANoRetenido',
+      'TotMntNoFact', 'TotMntPeriodo', 'TotPsjNac', 'TotPsjInt', 'TotTabPuros',
+      'TotTabCigarrillos', 'TotTabElaborado',
+    ] : [
       'TpoDoc', 'TpoImp', 'TotDoc', 'TotAnulado', 'TotOpExe', 'TotMntExe',
       'TotMntNeto', 'TotOpIVARec', 'TotMntIVA', 'TotOpActivoFijo',
       'TotMntActivoFijo', 'TotMntIVAActivoFijo', 'TotIVANoRec',
@@ -82,7 +133,7 @@ class LibroCompraVenta extends LibroBase {
       'TotMntNoFact', 'TotMntPeriodo', 'TotPsjNac', 'TotPsjInt', 'TotTabPuros',
       'TotTabCigarrillos', 'TotTabElaborado', 'TotImpVehiculo',
     ];
-    
+
     let xml = `<${resumenTag}>`;
     for (const r of this.resumen) {
       const normalized = { ...r };
@@ -94,12 +145,12 @@ class LibroCompraVenta extends LibroBase {
       ) {
         normalized.TotMntExe = 0;
       }
-      
+
       xml += `<${totalesTag}>`;
       order.forEach((key) => {
         const value = normalized[key];
         if (value === undefined || value === null || value === '') return;
-        
+
         if (Array.isArray(value)) {
           value.forEach((item) => {
             if (item && typeof item === 'object') {
@@ -132,9 +183,77 @@ class LibroCompraVenta extends LibroBase {
     return xml;
   }
 
-  _renderDetalle() {
+  /**
+   * Acumula dos arrays de resumen (base LTC + delta AJUSTE) sumando campos numéricos por TpoDoc.
+   * @private
+   */
+  _acumularResumen(base, delta) {
+    const map = new Map();
+    for (const item of base) {
+      map.set(item.TpoDoc, { ...item });
+    }
+
+    // Key field per array element type — used to match base vs delta items
+    const ARRAY_KEY_FIELDS = {
+      TotIVANoRec: 'CodIVANoRec',
+      TotOtrosImp: 'CodImp',
+    };
+    // Rate/factor fields — keep existing value (don't sum), set from delta if absent
+    const RATE_KEYS = new Set(['TpoDoc', 'TpoImp', 'FctProp']);
+
+    // Merge two arrays of sub-objects: sum all numeric fields except the key field
+    const _mergeArrayField = (baseArr, deltaArr, keyField) => {
+      const m = new Map();
+      for (const item of (baseArr || [])) m.set(item[keyField], { ...item });
+      for (const item of (deltaArr || [])) {
+        if (m.has(item[keyField])) {
+          const acc = m.get(item[keyField]);
+          for (const [k, v] of Object.entries(item)) {
+            if (k === keyField) continue;
+            const n = Number(v);
+            if (!Number.isNaN(n) && v !== '' && v !== null && v !== undefined) {
+              acc[k] = (Number(acc[k] || 0)) + n;
+            }
+          }
+        } else {
+          m.set(item[keyField], { ...item });
+        }
+      }
+      return Array.from(m.values());
+    };
+
+    for (const item of delta) {
+      if (map.has(item.TpoDoc)) {
+        const acc = map.get(item.TpoDoc);
+        for (const [key, val] of Object.entries(item)) {
+          if (RATE_KEYS.has(key)) {
+            // Keep existing value; propagate from delta only if absent in base
+            if (acc[key] === undefined || acc[key] === null) acc[key] = val;
+            continue;
+          }
+          if (Array.isArray(val)) {
+            const keyField = ARRAY_KEY_FIELDS[key];
+            if (keyField) {
+              acc[key] = _mergeArrayField(acc[key], val, keyField);
+            }
+            continue;
+          }
+          const numVal = Number(val);
+          if (!Number.isNaN(numVal) && val !== '' && val !== null && val !== undefined) {
+            acc[key] = (Number(acc[key] || 0)) + numVal;
+          }
+        }
+      } else {
+        map.set(item.TpoDoc, { ...item });
+      }
+    }
+    return Array.from(map.values());
+  }
+
+  // isAjuste: cuando true, agrega Operacion=1 (agrega) a cada ítem que no la tenga
+  _renderDetalle(isAjuste = false) {
     if (!this.detalle.length) return '';
-    
+
     const order = [
       'TpoDoc', 'Emisor', 'IndFactCompra', 'NroDoc', 'Anulado', 'Operacion',
       'TpoImp', 'TasaImp', 'NumInt', 'IndServicio', 'IndSinCosto', 'FchDoc',
@@ -146,11 +265,16 @@ class LibroCompraVenta extends LibroBase {
       'MntNoFact', 'MntPeriodo', 'PsjNac', 'PsjInt', 'TabPuros', 'TabCigarrillos',
       'TabElaborado', 'ImpVehiculo',
     ];
-    
+
     let xml = '';
     for (const d of this.detalle) {
       const normalized = { ...d };
-      
+
+      // AJUSTE: Operacion=1 (agrega) por defecto si no está explícito
+      if (isAjuste && (normalized.Operacion === undefined || normalized.Operacion === null || normalized.Operacion === '')) {
+        normalized.Operacion = 1;
+      }
+
       // Calcular TasaImp si no existe
       if (
         (normalized.TasaImp === undefined || normalized.TasaImp === null || normalized.TasaImp === '') &&
@@ -164,12 +288,12 @@ class LibroCompraVenta extends LibroBase {
           normalized.TasaImp = tasa.toFixed(2).replace(/\.00$/, '.0');
         }
       }
-      
+
       xml += '<Detalle>';
       order.forEach((key) => {
         const value = normalized[key];
         if (value === undefined || value === null || value === '') return;
-        
+
         if (Array.isArray(value)) {
           value.forEach((item) => {
             if (item && typeof item === 'object') {

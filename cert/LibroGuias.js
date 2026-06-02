@@ -46,6 +46,7 @@ class LibroGuias {
     this.periodo = config.periodo;
     this.certificado = config.certificado;
     this.folioNotificacion = config.folioNotificacion || FOLIO_NOTIFICACION_DEFAULT;
+    this.tipoEnvio = config.tipoEnvio || 'TOTAL';
   }
 
   /**
@@ -82,7 +83,7 @@ class LibroGuias {
       FchResol: this.emisor.fch_resol,
       NroResol: this.emisor.nro_resol,
       TipoLibro: 'ESPECIAL',
-      TipoEnvio: 'TOTAL',
+      TipoEnvio: this.tipoEnvio,
       FolioNotificacion: this.folioNotificacion,
     });
     libro.setDetalle(detalles);

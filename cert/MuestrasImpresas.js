@@ -20,7 +20,6 @@ const fs = require('fs');
 const path = require('path');
 const { XMLParser, XMLBuilder } = require('fast-xml-parser');
 const bwipjs = require('bwip-js');
-const { launchBrowser } = require('../utils/browser');
 
 // Usar constantes del core
 const {
@@ -571,47 +570,6 @@ class MuestrasImpresas {
    * Genera PDF desde HTML y lo escribe a disco.
    * @private
    */
-  async _generarPdf({ html, outputPath, browser }) {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    await page.pdf({
-      path: outputPath,
-      printBackground: true,
-      width: '215mm',
-      height: '280mm',
-      margin: { top: '5mm', right: '5mm', bottom: '5mm', left: '5mm' },
-    });
-    await page.close();
-  }
-
-  /**
-   * Genera un PDF desde HTML y devuelve el contenido como Buffer (sin escribir a disco).
-   * Útil para servir el PDF directamente desde una respuesta HTTP.
-   *
-   * @param {string} html - HTML a convertir a PDF
-   * @param {object} [opts]
-   * @param {string} [opts.width='215mm']
-   * @param {string} [opts.height='280mm']
-   * @returns {Promise<Buffer>}
-   */
-  async generarPdfBuffer(html, opts = {}) {
-    const browser = await launchBrowser();
-    try {
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'networkidle0' });
-      const pdfBuffer = await page.pdf({
-        printBackground: true,
-        width: opts.width ?? '215mm',
-        height: opts.height ?? '280mm',
-        margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' },
-      });
-      await page.close();
-      return Buffer.from(pdfBuffer);
-    } finally {
-      await browser.close();
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════
   // Helpers internos para generarPDFBuffer (pdf-lib, sin Chromium)
   // ═══════════════════════════════════════════════════════════════
@@ -729,7 +687,7 @@ class MuestrasImpresas {
       const match = this.logoDataUri.match(/^data:image\/(png|jpe?g);base64,(.+)$/i);
       if (!match) return null;
       const buf = Buffer.from(match[2], 'base64');
-      return /jpe?g/i.test(match[1]) ? pdfDoc.embedJpg(buf) : pdfDoc.embedPng(buf);
+      return /jpe?g/i.test(match[1]) ? await pdfDoc.embedJpg(buf) : await pdfDoc.embedPng(buf);
     } catch {
       return null;
     }
@@ -1262,7 +1220,7 @@ class MuestrasImpresas {
     const totalesH   = this._pdfCalcTotalesHeight(doc);
     const acuseH     = needsAcuse ? this._pdfCalcAcuseHeight(leyendaLines.length) + PDF_LAYOUT.gap.section : 0;
     const tedH       = doc.tedXml
-      ? PDF_LAYOUT.gap.section + PDF_LAYOUT.ted.minHeight + PDF_LAYOUT.ted.legendGap + PDF_LAYOUT.lineH.legal * 3 + M
+      ? PDF_LAYOUT.gap.section + PDF_LAYOUT.ted.maxHeight + PDF_LAYOUT.ted.legendGap + PDF_LAYOUT.lineH.legal * 3 + M
       : M;
 
     const totalH =
@@ -1338,122 +1296,64 @@ class MuestrasImpresas {
    * @returns {Promise<Object>} Resultado con estadísticas y archivos generados
    */
   async generarMuestras({ xmlFiles, outDir, generarCedible = false }) {
-    fs.mkdirSync(outDir, { recursive: true });
-
-    // Crear subdirectorios según requisitos del SII
-    const pruebasDir = path.join(outDir, 'SET-PRUEBAS');
+    const pruebasDir    = path.join(outDir, 'SET-PRUEBAS');
     const simulacionDir = path.join(outDir, 'SET-SIMULACION');
-    fs.mkdirSync(pruebasDir, { recursive: true });
+    fs.mkdirSync(pruebasDir,    { recursive: true });
     fs.mkdirSync(simulacionDir, { recursive: true });
 
-    console.log('\n' + '═'.repeat(60));
-    console.log('GENERACIÓN DE MUESTRAS IMPRESAS');
-    console.log('═'.repeat(60));
-    console.log(` SET-PRUEBAS: ${pruebasDir}`);
-    console.log(` SET-SIMULACION: ${simulacionDir}`);
-
-    const browser = await launchBrowser();
     const resultado = {
-      success: true,
-      totalDocs: 0,
-      totalPdfs: 0,
-      archivos: [],
-      errores: [],
-      setPruebas: 0,
-      setSimulacion: 0,
+      success: true, totalDocs: 0, totalPdfs: 0,
+      archivos: [], errores: [], setPruebas: 0, setSimulacion: 0,
     };
 
-    try {
-      for (const filePath of xmlFiles) {
-        console.log(`\n Procesando: ${path.basename(filePath)}`);
-        const xml = fs.readFileSync(filePath, 'utf8');
-        
-        let documentos;
+    for (const filePath of xmlFiles) {
+      const sourceFile = path.basename(filePath).toLowerCase();
+      const isPruebas  = /envio-set-(basico|guia|exenta|compra)\.xml/i.test(sourceFile);
+      const targetDir  = isPruebas ? pruebasDir : simulacionDir;
+
+      let docs;
+      try {
+        docs = this.parseEnvioDTE(fs.readFileSync(filePath, 'utf8'));
+      } catch (e) {
+        resultado.errores.push({ file: filePath, error: e.message });
+        continue;
+      }
+
+      for (const doc of docs) {
+        resultado.totalDocs++;
+        const base = `muestra_${doc.tipoDte}_${doc.folio}`;
+
         try {
-          documentos = this.parseEnvioDTE(xml);
+          const buf = await this.generarPDFBuffer(doc, { cedible: false });
+          const out = path.join(targetDir, `${base}.pdf`);
+          fs.writeFileSync(out, buf);
+          resultado.totalPdfs++;
+          resultado.archivos.push(out);
+          if (isPruebas) resultado.setPruebas++; else resultado.setSimulacion++;
+          console.log(`   ✓ ${base}.pdf  (${buf.length} bytes)`);
         } catch (e) {
-          console.log(` [!] Error parseando: ${e.message}`);
-          resultado.errores.push({ file: filePath, error: e.message });
-          continue;
+          resultado.errores.push({ tipo: doc.tipoDte, folio: doc.folio, error: e.message });
+          console.error(`   ✗ ${base}.pdf  →  ${e.message}`);
         }
 
-        if (!documentos.length) {
-          console.log(' [!] Sin documentos');
-          continue;
-        }
-
-        // Determinar directorio de salida según archivo fuente
-        const sourceFile = path.basename(filePath).toLowerCase();
-        const isPruebas = /envio-set-(basico|guia|exenta|compra)\.xml/i.test(sourceFile);
-        const targetDir = isPruebas ? pruebasDir : simulacionDir;
-        const categoria = isPruebas ? 'PRUEBAS' : 'SIMULACION';
-        console.log(` Categoria: SET-${categoria}`);
-
-        for (const doc of documentos) {
-          resultado.totalDocs++;
-          
+        if (generarCedible && CEDIBLE_TIPOS.has(doc.tipoDte) && !this._esGuiaInterna(doc)) {
           try {
-            const tedDataUri = await this.generarPdf417(doc.tedXml);
-            
-            // Generar ejemplar tributario (sin cedible)
-            const html = this._buildHtml({ doc, esCedible: false, tedDataUri });
-
-            // PDFs organizados en subdirectorios según categoría SII
-            const outputName = `muestra_${doc.tipoDte}_${doc.folio}.pdf`;
-            const outputPath = path.join(targetDir, outputName);
-
-            await this._generarPdf({ html, outputPath, browser });
+            const buf = await this.generarPDFBuffer(doc, { cedible: true });
+            const out = path.join(targetDir, `${base}_cedible.pdf`);
+            fs.writeFileSync(out, buf);
             resultado.totalPdfs++;
-            resultado.archivos.push(outputPath);
-            if (isPruebas) resultado.setPruebas++;
-            else resultado.setSimulacion++;
-            console.log(` ✓ ${outputName}`);
-
-            // Generar copia cedible si corresponde
-            if (generarCedible && CEDIBLE_TIPOS.has(doc.tipoDte)) {
-              // Guía de traslado interno no tiene cedible
-              if (doc.tipoDte === 52 && [5, 6].includes(doc.indTraslado)) {
-                console.log(' Guia traslado interno - sin cedible');
-                continue;
-              }
-
-              const htmlCedible = this._buildHtml({ doc, esCedible: true, tedDataUri });
-              const outputNameCedible = `muestra_${doc.tipoDte}_${doc.folio}_cedible.pdf`;
-              const outputPathCedible = path.join(targetDir, outputNameCedible);
-
-              await this._generarPdf({ html: htmlCedible, outputPath: outputPathCedible, browser });
-              resultado.totalPdfs++;
-              resultado.archivos.push(outputPathCedible);
-              if (isPruebas) resultado.setPruebas++;
-              else resultado.setSimulacion++;
-              console.log(` ✓ ${outputNameCedible}`);
-            }
-
+            resultado.archivos.push(out);
+            if (isPruebas) resultado.setPruebas++; else resultado.setSimulacion++;
+            console.log(`   ✓ ${base}_cedible.pdf  (${buf.length} bytes)`);
           } catch (e) {
-            console.log(` [ERR] Error: ${e.message}`);
-            resultado.errores.push({ tipo: doc.tipoDte, folio: doc.folio, error: e.message });
+            resultado.errores.push({ tipo: doc.tipoDte, folio: doc.folio, cedible: true, error: e.message });
+            console.error(`   ✗ ${base}_cedible.pdf  →  ${e.message}`);
           }
         }
       }
-    } finally {
-      await browser.close();
     }
 
-    // Resumen
-    console.log('\n' + '═'.repeat(60));
-    console.log('[OK] MUESTRAS IMPRESAS GENERADAS');
-    console.log('═'.repeat(60));
-    console.log(` Documentos procesados: ${resultado.totalDocs}`);
-    console.log(` PDFs generados: ${resultado.totalPdfs}`);
-    console.log(` SET-PRUEBAS: ${resultado.setPruebas} PDFs`);
-    console.log(` SET-SIMULACION: ${resultado.setSimulacion} PDFs`);
-    console.log(` Directorio base: ${outDir}`);
-
-    if (resultado.errores.length > 0) {
-      resultado.success = false;
-      console.log(` [!] Errores: ${resultado.errores.length}`);
-    }
-
+    if (resultado.errores.length > 0) resultado.success = false;
     return resultado;
   }
 
