@@ -197,7 +197,13 @@ class CafSolicitor {
   async solicitar({ tipoDte, cantidad = 1 }) {
     const { numero: rut, dv } = splitRut(this.rutEmisor);
     const debugDir = this._getDebugDir(tipoDte);
-    
+
+    // Rate limiting: mínimo 1001ms entre solicitudes para no saturar el portal SII.
+    const _now = Date.now();
+    const _elapsed = _now - CafSolicitor._lastSolicitudAt;
+    if (_elapsed < 1001) await new Promise(r => setTimeout(r, 1001 - _elapsed));
+    CafSolicitor._lastSolicitudAt = Date.now();
+
     console.log('─'.repeat(60));
     console.log(`[CafSolicitor] Solicitando CAF tipo ${tipoDte} x${cantidad}`);
     console.log(` RUT: ${this.rutEmisor} | Ambiente: ${this.ambiente}`);
@@ -233,14 +239,27 @@ class CafSolicitor {
       // Guardar respuesta final
       this._saveDebug(debugDir, 'caf-final.html', response.body || '');
 
+      // Detectar bloqueo WAAP/firewall del SII antes de cualquier check de negocio
+      if (response.status === 403 ||
+          (response.body && (
+            response.body.includes('acceso restringido') ||
+            response.body.toLowerCase().includes('recaptcha')
+          ))) {
+        return { success: false, errorCode: 'WAAP_BLOCKED', error: 'IP bloqueada por el firewall del SII. Espera antes de reintentar.' };
+      }
+
       // Verificar si obtuvimos el CAF
       if (response.body && response.body.includes('<AUTORIZACION')) {
         const cafPath = this._saveCafOrganized(response.body, tipoDte);
         return { success: true, cafPath, xml: response.body, maxAutor: this._lastMaxAutor ?? cantidad };
       }
 
+      if (response.body && response.body.includes('NO SE AUTORIZA')) {
+        return { success: false, errorCode: 'TIMBRAJE_BLOQUEADO', error: 'SII: No se autoriza timbraje. Folios acumulados excesivos o situaciones tributarias pendientes. Revisa el portal SII → Factura Electrónica → Solicitud de Timbraje.' };
+      }
+
       if (response.body && response.body.includes('Autenticaci')) {
-        return { success: false, error: 'El SII devolvió página de autenticación' };
+        return { success: false, errorCode: 'SESSION_EXPIRED', error: 'El SII devolvió página de autenticación' };
       }
 
       // Detectar error de MAX_AUTOR: "La cantidad de documentos a timbrar debe ser menor o igual al máximo autorizado"
@@ -255,7 +274,7 @@ class CafSolicitor {
           this.runStamp = new Date().toISOString().replace(/[:.]/g, '-');
           return this.solicitar({ tipoDte, cantidad: 1 });
         }
-        return { success: false, error: 'Cantidad de folios excede el máximo que SII autoriza por solicitud para este tipo de documento (MAX_AUTOR). Verifica el estado de timbraje de tu empresa en el portal SII.' };
+        return { success: false, errorCode: 'MAX_AUTOR_EXCEEDED', error: 'Cantidad de folios excede el máximo que SII autoriza por solicitud para este tipo de documento (MAX_AUTOR). Verifica el estado de timbraje de tu empresa en el portal SII.' };
       }
 
       // Detectar rango ya autorizado — el CAF existe en SII pero no fue capturado
@@ -300,16 +319,17 @@ class CafSolicitor {
         const rangoStr = desde != null && hasta != null ? ` ${desde}-${hasta}` : '';
         return {
           success: false,
+          errorCode: 'RANGO_YA_AUTORIZADO',
           rangoYaAutorizado: desde != null && hasta != null ? { folioDesde: desde, folioHasta: hasta } : null,
           error: `SII: Ya existe CAF autorizado para el rango${rangoStr}. El XML fue aprobado por SII en una solicitud previa pero no se pudo recuperar automáticamente. Descárgalo manualmente desde el portal SII (Factura Electrónica → Solicitud de Timbraje).`,
         };
       }
 
-      return { success: false, error: 'No se obtuvo CAF en la respuesta' };
+      return { success: false, errorCode: 'UNKNOWN', error: 'No se obtuvo CAF en la respuesta' };
 
     } catch (err) {
       console.error(`[CafSolicitor] Error: ${err.message}`);
-      return { success: false, error: err.message };
+      return { success: false, errorCode: 'NETWORK_ERROR', error: err.message };
     }
   }
 
@@ -334,6 +354,12 @@ class CafSolicitor {
       response = await this.session.submitForm(formAction, step2Fields);
       currentHtml = response.body || '';
       this._saveDebug(debugDir, 'step2.html', currentHtml);
+
+      // Rechazo duro antes del check de COD_DOCTO: la página de rechazo también contiene
+      // "COD_DOCTO" en su JavaScript, lo que causaría un POST innecesario con datos vacíos.
+      if (currentHtml.includes('NO SE AUTORIZA')) {
+        return response; // solicitar() detectará el bloqueo en response.body
+      }
 
       // Selección de tipo de documento
       if (currentHtml.includes('COD_DOCTO')) {
@@ -552,5 +578,7 @@ class CafSolicitor {
     }
   }
 }
+
+CafSolicitor._lastSolicitudAt = 0; // ms timestamp of last solicitar() call — for rate limiting
 
 module.exports = CafSolicitor;

@@ -4,3 +4,4 @@ node_modules/
 test-output/
 test-muestras.js
 docs/hars_portal_sii
+*.har
