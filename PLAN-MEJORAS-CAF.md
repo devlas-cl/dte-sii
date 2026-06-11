@@ -45,7 +45,7 @@ Antes de implementar, confirmar que esto NO se toca (ya funciona):
 > - `docs/obtencionfolios_hastamaxautorizado_28.har` — 6 bloqueos iniciales, anulación (folio 69), debloqueo en FOLIOS_DISP=22, 6 sesiones exitosas, 2.º bloqueo
 > - `docs/obtencionfolios_hastamaxautorizado_.har` — **HAR definitivo del ciclo completo**: 5 bloqueos → 6 anulaciones controladas (70, 71, 72 + 3 más) → debloqueo → 6 sesiones exitosas (folios 84–89) → bloqueo. Confirma aritmética +1/−1 y umbral debloqueo=22
 >
-> RUT 78206276-K — Devlas SpA (Luciano Alberto Saavedra Reyes, representante legal)
+> RUT empresa de prueba — Devlas SpA
 
 ### FOLIOS_DISP — umbral de advertencia y bloqueo duro (confirmado HAR)
 
@@ -381,8 +381,7 @@ Códigos mínimos a implementar:
 
 #### 4. Headers completos de Chrome — extraídos del HAR real
 
-> **Fuente de verdad:** `docs/obtencionfolios.har` — sesión real de Luciano Saavedra Reyes
-> en palena.sii.cl el 10/06/2026 con Chrome 122 en Windows 10.
+> **Fuente de verdad:** `docs/obtencionfolios.har` — sesión real en palena.sii.cl el 10/06/2026 con Chrome 122 en Windows 10.
 
 Diferencias con el código actual:
 - Chrome version: código dice v124 → real es **v122**
