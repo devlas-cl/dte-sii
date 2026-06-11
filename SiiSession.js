@@ -157,10 +157,57 @@ class SiiSession {
    * @returns {Promise<Object>}
    */
   async request(url, options = {}) {
+    const isPost = (options.method || 'GET').toUpperCase() === 'POST';
+    const RETRY_DELAYS = [2000, 4000, 8000];
+    const RETRYABLE_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'TimeoutError']);
+    const RETRYABLE_STATUS = new Set([502, 503, 504]);
+
+    let lastErr;
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+      if (attempt > 0) {
+        const delay = RETRY_DELAYS[attempt - 1];
+        log.warn(`[SiiSession] request timeout/5xx — reintentando en ${delay / 1000}s (intento ${attempt}/${RETRY_DELAYS.length})...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+      try {
+        const result = await this._doRequest(url, options, isPost);
+        if (RETRYABLE_STATUS.has(result.status)) {
+          lastErr = new Error(`HTTP ${result.status}`);
+          continue;
+        }
+        return result;
+      } catch (err) {
+        const code = err.code || err.constructor?.name || '';
+        if (RETRYABLE_CODES.has(code)) { lastErr = err; continue; }
+        throw err; // error no retriable — propagar inmediatamente
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Realiza la petición HTTP sin retry. Llamado desde request().
+   * @private
+   */
+  async _doRequest(url, options, isPost) {
     const res = await got(url, {
       method: options.method || 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'es-419,es-US;q=0.9,es;q=0.8,en;q=0.7',
+        'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+        ...(isPost ? {
+          'Cache-Control': 'max-age=0',
+          'Origin': `https://${this.baseHost}`,
+        } : {}),
         ...(this.cookieJar ? { Cookie: this.cookieJar } : {}),
         ...(options.headers || {}),
       },
@@ -168,29 +215,21 @@ class SiiSession {
       followRedirect: false,
       throwHttpErrors: false,
       https: this.tlsOptions || { rejectUnauthorized: false },
-      responseType: 'buffer', // Obtener como buffer para manejar encoding
+      responseType: 'buffer',
+      timeout: { request: options.timeoutMs ?? 20000 },
     });
 
     this.cookieJar = this._mergeCookies(this.cookieJar, res.headers['set-cookie']);
-    
-    // Detectar encoding del Content-Type y convertir correctamente
-    let bodyStr;
+
     const contentType = res.headers['content-type'] || '';
     const buffer = res.body;
-    
-    // El SII de Chile usa ISO-8859-1 para TODO su contenido (HTML, XML, text/plain, octet-stream, etc.)
-    // Forzar ISO-8859-1 para cualquier respuesta de sii.cl que no especifique UTF-8
     const isSiiUrl = url.includes('sii.cl');
     const hasUtf8 = contentType.toLowerCase().includes('utf-8');
-    const forceIso = contentType.toLowerCase().includes('iso-8859-1') || 
+    const forceIso = contentType.toLowerCase().includes('iso-8859-1') ||
                      contentType.toLowerCase().includes('latin1');
-    
-    // Aplicar ISO-8859-1 si:
-    // 1. El Content-Type especifica ISO-8859-1/latin1, O
-    // 2. Es una URL del SII y NO especifica UTF-8 (incluyendo octet-stream, text/*, xml, etc.)
+
+    let bodyStr;
     if (forceIso || (isSiiUrl && !hasUtf8)) {
-      // SII usa ISO-8859-1, convertir cada byte a su codepoint Unicode correspondiente
-      // ISO-8859-1 es un subconjunto directo de Unicode (codepoints 0-255)
       bodyStr = '';
       for (let i = 0; i < buffer.length; i++) {
         bodyStr += String.fromCharCode(buffer[i]);
@@ -198,12 +237,12 @@ class SiiSession {
     } else {
       bodyStr = buffer.toString('utf8');
     }
-    
+
     return {
       status: res.statusCode,
       headers: res.headers,
       body: bodyStr,
-      rawBody: res.body, // Buffer original por si se necesita
+      rawBody: res.body,
       url: res.url,
       cookieJar: this.cookieJar,
     };
