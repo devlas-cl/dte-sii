@@ -19,7 +19,8 @@ const { certError, ERROR_CODES } = require('./error');
  * @property {forge.pki.PrivateKey} privateKey - Clave privada
  * @property {forge.pki.Certificate} certificate - Certificado
  * @property {string} privateKeyPem - Clave privada en formato PEM
- * @property {string} certificatePem - Certificado en formato PEM
+ * @property {string} certificatePem - Certificado hoja en formato PEM (solo leaf, para firma XML)
+ * @property {string} certificateChainPem - Cadena completa PEM: hoja → intermedios → raíz (para TLS mTLS)
  * @property {Object} subject - Campos del subject del certificado
  * @property {string} rut - RUT extraído del certificado (si existe)
  * @property {string} cn - Common Name del certificado
@@ -40,7 +41,7 @@ function loadPfxFromBuffer(pfxBuffer, password) {
   }
 
   let p12Asn1, p12;
-  
+
   try {
     p12Asn1 = forge.asn1.fromDer(pfxBuffer.toString('binary'));
   } catch (err) {
@@ -56,38 +57,74 @@ function loadPfxFromBuffer(pfxBuffer, password) {
     throw certError(`Error descifrando PFX: ${err.message}`, ERROR_CODES.CERT_INVALID, { originalError: err });
   }
 
-  // Extraer certificado y clave privada
-  const certBags = p12.getBags({ bagType: forge.pki.oids.certBag });
-  const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
+  // Extraer todos los certificados y la clave privada
+  const certBagsRaw = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
+  let keyBagRaw = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag] || [];
+  // Fallback: keyBag sin cifrado (formato legacy)
+  if (!keyBagRaw.length) {
+    keyBagRaw = p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag] || [];
+  }
 
-  const certBag = certBags[forge.pki.oids.certBag];
-  const keyBag = keyBags[forge.pki.oids.pkcs8ShroudedKeyBag];
-
-  if (!certBag || !certBag.length) {
+  if (!certBagsRaw.length) {
     throw certError('No se encontró certificado en el archivo PFX', ERROR_CODES.CERT_INVALID);
   }
 
-  if (!keyBag || !keyBag.length) {
+  if (!keyBagRaw.length) {
     throw certError('No se encontró clave privada en el archivo PFX', ERROR_CODES.CERT_INVALID);
   }
 
-  const certificate = certBag[0].cert;
-  const privateKey = keyBag[0].key;
+  const allCerts = certBagsRaw.map(b => b.cert).filter(Boolean);
+  const privateKey = keyBagRaw[0].key;
 
-  // Extraer información del subject
-  const subject = extractSubjectFields(certificate);
-  const rut = extractRutFromCertificate(certificate);
+  // ── Identificar el certificado hoja (leaf) ───────────────────────────────
+  // Estrategia 1: cert cuya clave pública coincide con la clave privada (RSA)
+  let leafCert = null;
+  try {
+    const pubFromKey = forge.pki.setRsaPublicKey(privateKey.n, privateKey.e);
+    if (pubFromKey) {
+      const pubPem = forge.pki.publicKeyToPem(pubFromKey);
+      leafCert = allCerts.find(c => forge.pki.publicKeyToPem(c.publicKey) === pubPem) ?? null;
+    }
+  } catch (_) { /* EC u otro tipo de clave */ }
+
+  // Estrategia 2: primer cert cuyo basicConstraints no marca cA=true
+  if (!leafCert) {
+    leafCert = allCerts.find(c => {
+      const bc = c.getExtension('basicConstraints');
+      return !bc || bc.cA !== true;
+    }) ?? allCerts[0];
+  }
+
+  // ── Ordenar cadena: hoja → intermedios → raíz ────────────────────────────
+  // SII (palena.sii.cl) requiere la cadena completa en el TLS handshake mutuo.
+  // Sin los intermedios, el servidor devuelve SSL alert 48 (unknown_ca).
+  const remaining = allCerts.filter(c => c !== leafCert);
+  const chain = [leafCert];
+  let current = leafCert;
+  while (remaining.length > 0) {
+    const issuerHash = current.issuer.hash;
+    const idx = remaining.findIndex(c => c.subject.hash === issuerHash);
+    if (idx < 0) break;
+    current = remaining.splice(idx, 1)[0];
+    if (chain.includes(current)) break;
+    chain.push(current);
+  }
+  chain.push(...remaining);
+
+  const subject = extractSubjectFields(leafCert);
+  const rut = extractRutFromCertificate(leafCert);
 
   return {
     privateKey,
-    certificate,
+    certificate: leafCert,
     privateKeyPem: forge.pki.privateKeyToPem(privateKey),
-    certificatePem: forge.pki.certificateToPem(certificate),
+    certificatePem: forge.pki.certificateToPem(leafCert),
+    certificateChainPem: chain.map(c => forge.pki.certificateToPem(c)).join(''),
     subject,
     rut,
     cn: subject.CN || null,
-    notBefore: certificate.validity.notBefore,
-    notAfter: certificate.validity.notAfter,
+    notBefore: leafCert.validity.notBefore,
+    notAfter: leafCert.validity.notAfter,
   };
 }
 
@@ -186,8 +223,7 @@ function getDaysUntilExpiry(notAfter) {
 function createTlsOptions(pfxData) {
   return {
     key: pfxData.privateKeyPem,
-    cert: pfxData.certificatePem,
-    certificate: pfxData.certificatePem,
+    cert: pfxData.certificateChainPem || pfxData.certificatePem,
     rejectUnauthorized: false,
   };
 }

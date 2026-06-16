@@ -300,7 +300,10 @@ export interface PfxData {
   privateKey: object;
   certificate: object;
   privateKeyPem: string;
+  /** Leaf certificate PEM only — use for XML signing */
   certificatePem: string;
+  /** Full chain PEM (leaf → intermediates → root) — use for TLS mutual auth */
+  certificateChainPem: string;
   subject: Record<string, string>;
   rut: string;
   cn: string;
