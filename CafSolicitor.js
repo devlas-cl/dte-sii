@@ -328,8 +328,24 @@ class CafSolicitor {
       return { success: false, errorCode: 'UNKNOWN', error: 'No se obtuvo CAF en la respuesta' };
 
     } catch (err) {
-      console.error(`[CafSolicitor] Error: ${err.message}`);
-      return { success: false, errorCode: 'NETWORK_ERROR', error: err.message };
+      const msg = err.message || '';
+      const isUnknownCa = msg.includes('unknown ca') || msg.includes('CERT_UNTRUSTED') || msg.includes('unknown_ca');
+      const isCertExpired = msg.includes('certificate has expired') || msg.includes('CERT_HAS_EXPIRED');
+      const isSslError = isUnknownCa || isCertExpired || msg.includes('SSL') || msg.includes('TLS');
+
+      const errorCode = isUnknownCa ? 'SSL_CERT_CHAIN'
+        : isCertExpired ? 'SSL_CERT_EXPIRED'
+        : isSslError ? 'SSL_ERROR'
+        : 'NETWORK_ERROR';
+
+      const friendlyError = isUnknownCa
+        ? 'SII rechazó el certificado PFX (cadena de CA incompleta — falta certificado intermedio).'
+        : isCertExpired
+        ? 'El certificado digital PFX está vencido. El cliente debe renovarlo.'
+        : msg;
+
+      console.error(`[CafSolicitor] Error (${errorCode}): ${friendlyError}`);
+      return { success: false, errorCode, error: friendlyError };
     }
   }
 
