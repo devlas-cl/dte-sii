@@ -601,4 +601,8 @@ class CafSolicitor {
 
 CafSolicitor._lastSolicitudAt = 0; // ms timestamp of last solicitar() call — for rate limiting
 
+/** Retorna la sesión SII cacheada para un ambiente+rut, o null si no existe. */
+CafSolicitor.getSession = (ambiente, rutEmisor) =>
+  _sessionRegistry.get(`${ambiente.toLowerCase()}::${rutEmisor}`) ?? null;
+
 module.exports = CafSolicitor;
