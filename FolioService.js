@@ -57,14 +57,22 @@ class FolioService {
     this.cafDir = options.cafDir || path.join(this.baseDir, 'debug', 'auto-caf');
     this.debugDir = options.debugDir || path.join(this.baseDir, 'debug');
     
-    // Sesión SII
-    this.session = new SiiSession({
-      ambiente: this.ambiente,
-      certificado: options.certificado,
-      pfxPath: options.pfxPath,
-      pfxBuffer: options.pfxBuffer,
-      pfxPassword: options.pfxPassword,
-    });
+    // Sesión SII — priorizar reutilización para evitar bans del SII
+    // Orden: (1) sesión explícita, (2) registro de CafSolicitor, (3) nueva sesión
+    const cachedSession = CafSolicitor.getSession(this.ambiente, this.rutEmisor);
+    if (options.session) {
+      this.session = options.session;
+    } else if (cachedSession) {
+      this.session = cachedSession;
+    } else {
+      this.session = new SiiSession({
+        ambiente: this.ambiente,
+        certificado: options.certificado,
+        pfxPath: options.pfxPath,
+        pfxBuffer: options.pfxBuffer,
+        pfxPassword: options.pfxPassword,
+      });
+    }
 
     // Cargar sesión compartida si está disponible
     this.sessionPath = options.sessionPath || process.env.SII_SESSION_PATH;
@@ -352,7 +360,7 @@ class FolioService {
    * @param {string} [params.motivo]
    * @returns {Promise<{ok:boolean, anulados:Array, rechazados:Array, totalAnulados:number, totalRechazados:number}>}
    */
-  async anularFolios({ tipoDte, folioDesde = null, folioHasta = null, motivo = 'Folios no utilizados' }) {
+  async anularFolios({ tipoDte, folioDesde = null, folioHasta = null, motivo = 'Folios no utilizados', maxRangos = 50 }) {
     const debugStampA = new Date().toISOString().replace(/[:.]/g, '-');
     const debugDirA = path.join(this.debugDir, 'auto-caf', 'anulacion', debugStampA);
     fs.mkdirSync(debugDirA, { recursive: true });
@@ -374,6 +382,9 @@ class FolioService {
         }
         return !vistos.has(`${r.folioDesde}-${r.folioHasta}`);
       });
+
+      // Limitar a los más recientes para evitar operaciones masivas
+      if (rangos.length > maxRangos) rangos = rangos.slice(-maxRangos);
 
       if (rangos.length === 0) {
         console.log(`[FolioService] Pasada ${pasada + 1}: sin rangos nuevos, finalizando`);
