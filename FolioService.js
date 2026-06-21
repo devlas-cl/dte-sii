@@ -62,6 +62,7 @@ class FolioService {
       ambiente: this.ambiente,
       certificado: options.certificado,
       pfxPath: options.pfxPath,
+      pfxBuffer: options.pfxBuffer,
       pfxPassword: options.pfxPassword,
     });
 
