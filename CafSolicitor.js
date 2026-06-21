@@ -395,6 +395,10 @@ class CafSolicitor {
         response = await this.session.submitForm('/cvc_cgi/dte/of_solicita_folios_dcto', selectFields);
         currentHtml = response.body || '';
         this._saveDebug(debugDir, 'select.html', currentHtml);
+
+        if (currentHtml.includes('NO SE AUTORIZA')) {
+          return response; // solicitar() detectará el bloqueo en response.body
+        }
       }
 
       // Paso 3: Solicitar numeración
