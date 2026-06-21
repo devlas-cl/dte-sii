@@ -86,7 +86,7 @@ class DTE {
           TipoDTE: d.tipo,
           Folio: d.folio,
           FchEmis: d.fechaEmision,
-          IndServicio: d.indServicio || 3,
+          IndServicio: d.indServicio,
         },
         Emisor: d.emisor,
         Receptor: {
