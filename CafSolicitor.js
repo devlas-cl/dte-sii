@@ -325,6 +325,15 @@ class CafSolicitor {
         };
       }
 
+      // Si la respuesta final sigue siendo una redirección de auth, el cookieJar en memoria
+      // está inválido (sesión stale en _sessionRegistry). Eliminar del registro y hacer logout
+      // best-effort para que el próximo intento cree sesión fresca desde SiiPortalAuth.
+      if (this._requiresAuthentication(finalBody)) {
+        _sessionRegistry.delete(`${this.ambiente}::${this.rutEmisor}`);
+        try { await this.session.logout() } catch (_) {}
+        return { success: false, errorCode: 'SESSION_EXPIRED', error: 'Sesión SII inválida — registro limpiado, el próximo intento reautenticará.' };
+      }
+
       return { success: false, errorCode: 'UNKNOWN', error: 'No se obtuvo CAF en la respuesta' };
 
     } catch (err) {
