@@ -48,31 +48,27 @@ function buildReceptor(config) {
     rut,
     razonSocial,
     giro,
+    contacto,
+    correo,
     direccion,
     comuna,
     ciudad,
-    correo,
+    cdgIntRecep,
   } = config;
 
-  const receptor = {
-    RUTRecep: formatRutSii(rut),
-    RznSocRecep: sanitizeSiiText(razonSocial),
-  };
+  const receptor = { RUTRecep: formatRutSii(rut) };
 
-  if (giro) {
-    receptor.GiroRecep = sanitizeGiroRecep(giro);
-  }
+  if (cdgIntRecep) receptor.CdgIntRecep = cdgIntRecep;
 
-  receptor.DirRecep = sanitizeSiiText(direccion);
+  receptor.RznSocRecep = sanitizeSiiText(razonSocial);
+
+  if (giro)     receptor.GiroRecep  = sanitizeGiroRecep(giro);
+  if (contacto) receptor.Contacto   = contacto;
+  if (correo)   receptor.CorreoRecep = correo;
+
+  receptor.DirRecep  = sanitizeSiiText(direccion);
   receptor.CmnaRecep = comuna;
-
-  if (ciudad) {
-    receptor.CiudadRecep = ciudad;
-  }
-
-  if (correo) {
-    receptor.CorreoRecep = correo;
-  }
+  if (ciudad) receptor.CiudadRecep = ciudad;
 
   return receptor;
 }
@@ -134,11 +130,14 @@ function normalizeReceptor(receptor, esBoleta = false) {
     : undefined;
 
   return {
-    RUTRecep: receptor.RUTRecep,
+    RUTRecep:    receptor.RUTRecep,
+    ...(receptor.CdgIntRecep ? { CdgIntRecep: receptor.CdgIntRecep } : {}),
     RznSocRecep: sanitizeSiiText(receptor.RznSocRecep),
     ...(giroRecep ? { GiroRecep: giroRecep } : {}),
-    DirRecep: sanitizeSiiText(receptor.DirRecep),
-    CmnaRecep: receptor.CmnaRecep,
+    ...(receptor.Contacto   ? { Contacto:    receptor.Contacto }                   : {}),
+    ...(receptor.CorreoRecep ? { CorreoRecep: receptor.CorreoRecep }               : {}),
+    DirRecep:    sanitizeSiiText(receptor.DirRecep),
+    CmnaRecep:   receptor.CmnaRecep,
     ...(receptor.CiudadRecep ? { CiudadRecep: receptor.CiudadRecep } : {}),
   };
 }
