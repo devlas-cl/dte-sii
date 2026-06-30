@@ -202,7 +202,8 @@ class DTE {
         Encabezado: { IdDoc: idDoc, Emisor: emisor, Receptor: receptor, Totales: enc.Totales },
         Detalle: detalle,
         ...(this.datos.DscRcgGlobal ? { DscRcgGlobal: this.datos.DscRcgGlobal } : {}),
-        ...(this.datos.Referencia ? { Referencia: this.datos.Referencia } : {}),
+        ...(this.datos.Referencia  ? { Referencia:  this.datos.Referencia  } : {}),
+        ...(this.datos.SubTotInfo  ? { SubTotInfo:  this.datos.SubTotInfo  } : {}),
         TED: null,
       }
     };
