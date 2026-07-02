@@ -199,7 +199,7 @@ class DTE {
     this.documento = {
       Documento: {
         '@_ID': this.id,
-        Encabezado: { IdDoc: idDoc, Emisor: emisor, Receptor: receptor, Totales: enc.Totales },
+        Encabezado: { IdDoc: idDoc, Emisor: emisor, Receptor: receptor, ...(enc.Transporte ? { Transporte: enc.Transporte } : {}), Totales: enc.Totales },
         Detalle: detalle,
         ...(this.datos.DscRcgGlobal ? { DscRcgGlobal: this.datos.DscRcgGlobal } : {}),
         ...(this.datos.Referencia  ? { Referencia:  this.datos.Referencia  } : {}),
