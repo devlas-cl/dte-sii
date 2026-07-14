@@ -456,6 +456,22 @@ class SiiSession {
       }
     }
 
+    // Pantalla "ESCOJA COMO DESEA INGRESAR" — aparece cuando el certificado está
+    // habilitado para representación electrónica de otros RUT. No es un fallo de
+    // autenticación (aunque su <title> genérico "Autenticación" coincida con el
+    // check de más arriba y por eso el caller podría malinterpretarlo como tal):
+    // hay que seguir el link "Continuar" (GET al mismo recurso) para llegar al
+    // formulario real.
+    if (response.body && response.body.includes('ESCOJA COMO DESEA INGRESAR')) {
+      const continuarMatch = response.body.match(/<a\s+href="([^"]+)"[^>]*>\s*Continuar\s*<\/a>/i);
+      if (continuarMatch) {
+        const continuarUrl = new URL(continuarMatch[1], targetUrl).toString();
+        const continuado = await this.request(continuarUrl, { method: 'GET' });
+        const continuadoResult = await this.followRedirects(continuado);
+        response = continuadoResult.response;
+      }
+    }
+
     // Si hay redirección a af_anular1
     if (response.body && response.body.includes('/cvc_cgi/dte/af_anular1')) {
       const continued = await this.request(targetUrl, { method: 'GET' });
