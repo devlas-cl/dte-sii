@@ -209,7 +209,6 @@ class CafSolicitor {
     console.log(` RUT: ${this.rutEmisor} | Ambiente: ${this.ambiente}`);
 
     try {
-      // Paso 1: POST inicial a of_solicita_folios
       const fields = {
         RUT_EMP: rut,
         DV_EMP: dv,
@@ -217,20 +216,28 @@ class CafSolicitor {
         CANTIDAD: cantidad,
       };
 
-      let response = await this.session.submitForm('/cvc_cgi/dte/of_solicita_folios', fields);
+      // Paso 1: asegurar sesión con un GET real ANTES de cualquier POST.
+      // El SII liga la cookie de sesión al GET que la originó (Tivoli/F5); un POST
+      // que no fue precedido de un GET fresco al mismo path en la misma sesión es
+      // tratado como fuera de contexto y redirige a autInicioDTE aunque las cookies
+      // sean válidas. Replicamos el flujo real de un browser: GET formulario →
+      // parsear <form action> + hidden fields → submit con esos campos + los propios.
+      const authResponse = await this.session.ensureSession('/cvc_cgi/dte/of_solicita_folios');
 
-      // Manejar autenticación si es necesaria (incluye 302 a autInicioDTE)
-      if (this._requiresAuthentication(response.body)) {
-        const authResult = await this.session.ensureSession('/cvc_cgi/dte/of_solicita_folios');
-        if (authResult.body) {
-          // Reintentar después de autenticación
-          response = await this.session.submitForm('/cvc_cgi/dte/of_solicita_folios', fields);
-        }
-        
-        // Guardar sesión para reutilización
-        if (this.sessionPath) {
-          this.session.saveSession(this.sessionPath);
-        }
+      let response;
+      if (this._requiresAuthentication(authResponse.body)) {
+        // Sesión sigue inválida tras ensureSession — el chequeo de más abajo
+        // detectará esto sobre el body final y retornará SESSION_EXPIRED.
+        response = authResponse;
+      } else {
+        const formAction = SiiSession.extractFormAction(authResponse.body) || '/cvc_cgi/dte/of_solicita_folios';
+        const hiddenFields = SiiSession.extractInputValues(authResponse.body);
+        response = await this.session.submitForm(formAction, { ...hiddenFields, ...fields });
+      }
+
+      // Guardar sesión para reutilización
+      if (this.sessionPath) {
+        this.session.saveSession(this.sessionPath);
       }
 
       // Procesar flujo multi-paso del SII
