@@ -224,6 +224,8 @@ class CafSolicitor {
       // parsear <form action> + hidden fields → submit con esos campos + los propios.
       const authResponse = await this.session.ensureSession('/cvc_cgi/dte/of_solicita_folios');
 
+      this._saveDebug(debugDir, 'step0-ensureSession.html', authResponse.body || '');
+
       let response;
       if (this._requiresAuthentication(authResponse.body)) {
         // Sesión sigue inválida tras ensureSession — el chequeo de más abajo
@@ -234,6 +236,8 @@ class CafSolicitor {
         const hiddenFields = SiiSession.extractInputValues(authResponse.body);
         response = await this.session.submitForm(formAction, { ...hiddenFields, ...fields });
       }
+
+      this._saveDebug(debugDir, 'step1-submit.html', response.body || '');
 
       // Guardar sesión para reutilización
       if (this.sessionPath) {
@@ -371,6 +375,19 @@ class CafSolicitor {
    */
   async _processMultiStepFlow(response, rut, dv, tipoDte, cantidad, debugDir) {
     let currentHtml = response.body || '';
+    const realFormAction = SiiSession.extractFormAction(currentHtml);
+
+    // Si el <form> real ya apunta a of_confirma_folio, el SII preseleccionó
+    // COD_DOCTO server-side (coincide con el tipoDte enviado en el paso 1) y no
+    // hace falta pasar por of_solicita_folios_dcto. Ese endpoint solo se dispara
+    // vía JS (changeRegregion) si el usuario cambia el <select> a mano — su sola
+    // presencia como string dentro de un <script> no significa que sea el
+    // próximo paso real. Ir directo a _processStep3, que ya arma COD_DOCTO/
+    // CANT_DOCTOS explícitamente (extractInputValues no lee <select>, así que
+    // dejarlo entrar a la rama de abajo pierde el tipo de documento).
+    if (realFormAction && realFormAction.includes('of_confirma_folio')) {
+      return this._processStep3(response, rut, dv, tipoDte, cantidad, debugDir);
+    }
 
     // Paso 2: of_solicita_folios_dcto
     if (currentHtml.includes('of_solicita_folios_dcto')) {
