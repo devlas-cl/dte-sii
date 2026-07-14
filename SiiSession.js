@@ -14,6 +14,8 @@ const {
   loadPfxFromBuffer,
   loadPfxFromFile,
   createTlsOptions,
+  createTlsAgent,
+  createTlsAgentFromPem,
   validateAmbiente,
   getHost,
   createScopedLogger,
@@ -44,6 +46,10 @@ class SiiSession {
     this.baseHost = getHost(this.ambiente);
     this.cookieJar = '';
     this.tlsOptions = null;
+    // Agent nativo con el certificado + flags TLS legacy del SII. got no reenvía
+    // secureOptions/maxVersion a través de su opción `https` bajo ningún nombre de
+    // clave, así que estos flags solo se pueden aplicar vía un https.Agent nativo.
+    this.tlsAgent = null;
 
     // Configurar TLS desde certificado
     if (options.certificado) {
@@ -61,15 +67,19 @@ class SiiSession {
    */
   _configureTlsFromCertificado(certificado) {
     try {
+      const keyPem = certificado.getPrivateKeyPEM();
+      const certPem = certificado.getCertificatePEM();
       this.tlsOptions = {
-        key: certificado.getPrivateKeyPEM(),
-        cert: certificado.getCertificatePEM(),
-        certificate: certificado.getCertificatePEM(),
+        key: keyPem,
+        cert: certPem,
+        certificate: certPem,
         rejectUnauthorized: false,
       };
+      this.tlsAgent = createTlsAgentFromPem(keyPem, certPem);
     } catch (error) {
       log.error('Error configurando TLS desde certificado:', error.message);
       this.tlsOptions = null;
+      this.tlsAgent = null;
     }
   }
 
@@ -81,9 +91,11 @@ class SiiSession {
     try {
       const pfxData = loadPfxFromBuffer(pfxBuffer, password);
       this.tlsOptions = createTlsOptions(pfxData);
+      this.tlsAgent = createTlsAgent(pfxData);
     } catch (error) {
       log.error('Error configurando TLS desde PFX:', error.message);
       this.tlsOptions = null;
+      this.tlsAgent = null;
     }
   }
 
@@ -95,9 +107,11 @@ class SiiSession {
     try {
       const pfxData = loadPfxFromFile(pfxPath, password);
       this.tlsOptions = createTlsOptions(pfxData);
+      this.tlsAgent = createTlsAgent(pfxData);
     } catch (error) {
       log.error('Error configurando TLS desde archivo PFX:', error.message);
       this.tlsOptions = null;
+      this.tlsAgent = null;
     }
   }
 
@@ -215,6 +229,11 @@ class SiiSession {
       followRedirect: false,
       throwHttpErrors: false,
       https: this.tlsOptions || { rejectUnauthorized: false },
+      // got remapea `https` a un set fijo de claves y NO reenvía secureOptions/
+      // maxVersion bajo ningún nombre — sin el Agent nativo aquí, el certificado
+      // cliente se autentica con handshake TLS incompleto contra el SII (ver
+      // utils/pfx.js createTlsAgent).
+      ...(this.tlsAgent ? { agent: { https: this.tlsAgent } } : {}),
       responseType: 'buffer',
       timeout: { request: options.timeoutMs ?? 20000 },
     });

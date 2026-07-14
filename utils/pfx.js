@@ -10,8 +10,23 @@
  */
 
 const fs = require('fs');
+const https = require('https');
+const crypto = require('crypto');
 const forge = require('node-forge');
 const { certError, ERROR_CODES } = require('./error');
+
+/**
+ * Flags TLS que la infraestructura legacy del SII requiere para completar la
+ * autenticación con certificado cliente (mismo set que SiiPortalAuth.SII_TLS_OPTS).
+ * Sin `maxVersion: 'TLSv1.2'` + renegociación insegura habilitada, el handshake
+ * de client-cert contra los servidores del SII no se completa correctamente.
+ */
+const SII_LEGACY_TLS_FLAGS = {
+  maxVersion: 'TLSv1.2',
+  secureOptions:
+    crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION |
+    crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+};
 
 /**
  * Resultado de cargar un PFX
@@ -217,15 +232,54 @@ function getDaysUntilExpiry(notAfter) {
 
 /**
  * Crear opciones TLS desde datos PFX
+ *
+ * IMPORTANTE: `got` (usado por SiiSession) remapea su opción `https` a un set
+ * fijo de claves y solo reconoce `certificate` para el certificado cliente —
+ * NO `cert` (ver got/dist/source/core/index.js, "HTTPS options remapping").
+ * Se incluyen ambas claves (`cert` para consumidores que usan `https` nativo,
+ * `certificate` para got) para que el certificado se envíe en ambos casos.
+ *
  * @param {PfxData} pfxData - Datos del PFX
  * @returns {Object} Opciones TLS para https/got
  */
 function createTlsOptions(pfxData) {
+  const certPem = pfxData.certificateChainPem || pfxData.certificatePem;
   return {
     key: pfxData.privateKeyPem,
-    cert: pfxData.certificateChainPem || pfxData.certificatePem,
+    cert: certPem,
+    certificate: certPem,
     rejectUnauthorized: false,
   };
+}
+
+/**
+ * Crea un https.Agent nativo con el certificado cliente + los flags TLS legacy
+ * que el SII requiere. `got` no reenvía `secureOptions`/`maxVersion` a través de
+ * su opción `https` bajo ningún nombre de clave — la única forma de aplicarlos
+ * es con un Agent nativo pasado como `agent.https` en las opciones de got.
+ *
+ * @param {PfxData} pfxData - Datos del PFX
+ * @returns {https.Agent}
+ */
+function createTlsAgent(pfxData) {
+  return createTlsAgentFromPem(pfxData.privateKeyPem, pfxData.certificateChainPem || pfxData.certificatePem);
+}
+
+/**
+ * Crea un https.Agent nativo desde un par key/cert PEM ya extraído (ej. desde
+ * una instancia de Certificado), con los mismos flags legacy que createTlsAgent.
+ *
+ * @param {string} keyPem
+ * @param {string} certPem
+ * @returns {https.Agent}
+ */
+function createTlsAgentFromPem(keyPem, certPem) {
+  return new https.Agent({
+    ...SII_LEGACY_TLS_FLAGS,
+    key: keyPem,
+    cert: certPem,
+    rejectUnauthorized: false,
+  });
 }
 
 module.exports = {
@@ -236,4 +290,6 @@ module.exports = {
   isCertificateExpired,
   getDaysUntilExpiry,
   createTlsOptions,
+  createTlsAgent,
+  createTlsAgentFromPem,
 };
