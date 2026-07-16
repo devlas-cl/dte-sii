@@ -799,6 +799,18 @@ class EnviadorSII {
       timeoutMs: 30000,
     });
 
+    // El SII (maullín especialmente) a veces responde 5xx/503 en vez del XML de estado.
+    // Distinguirlo explícitamente para no reportarlo como "estado no encontrado" genérico
+    // — es una caída transitoria del SII, no un problema del envío ni del parseo.
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `SII no disponible (HTTP ${response.status})`,
+        httpStatus: response.status,
+        respuesta: response.text,
+      };
+    }
+
     // Usar decodeXmlEntities centralizado
     const decoded = decodeXmlEntities(response.text).replace(/&#xd;/g, '\n');
     
