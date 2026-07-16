@@ -179,7 +179,7 @@ function extractSubjectFields(cert) {
 }
 
 /**
- * Extraer RUT del certificado (desde serialNumber o CN)
+ * Extraer RUT del certificado (desde serialNumber, OU o CN)
  * @param {forge.pki.Certificate} cert - Certificado
  * @returns {string|null} RUT o null
  */
@@ -189,6 +189,16 @@ function extractRutFromCertificate(cert) {
   // Intentar desde serialNumber (más confiable)
   if (subject.serialNumber) {
     const clean = subject.serialNumber.replace(/\./g, '').toUpperCase();
+    if (/^\d{7,8}-[\dK]$/.test(clean)) {
+      return clean;
+    }
+  }
+
+  // Intentar desde OU — algunas CAs (ej. Signapis) codifican el RUN de la
+  // persona natural acá en vez de serialNumber, y el CN es solo el nombre
+  // sin dígitos (ninguna de las dos otras estrategias lo detecta).
+  if (subject.OU) {
+    const clean = subject.OU.replace(/\./g, '').toUpperCase();
     if (/^\d{7,8}-[\dK]$/.test(clean)) {
       return clean;
     }
