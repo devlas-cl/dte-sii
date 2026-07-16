@@ -18,6 +18,23 @@
 const SiiSession = require('./SiiSession.js');
 const { STEPS, emitProgress } = require('./utils/progress');
 
+/** Decodifica entidades HTML latinas (el portal SII las usa en vez de UTF-8 crudo) y limpia
+ * tags/whitespace, para poder aplicar regex de texto sobre las respuestas de forma confiable. */
+function limpiarTextoPortal(html) {
+  const decodificar = (s) => s
+    .replace(/&aacute;/gi, 'á').replace(/&eacute;/gi, 'é').replace(/&iacute;/gi, 'í')
+    .replace(/&oacute;/gi, 'ó').replace(/&uacute;/gi, 'ú').replace(/&ntilde;/gi, 'ñ')
+    .replace(/&Aacute;/g, 'Á').replace(/&Eacute;/g, 'É').replace(/&Iacute;/g, 'Í')
+    .replace(/&Oacute;/g, 'Ó').replace(/&Uacute;/g, 'Ú').replace(/&Ntilde;/g, 'Ñ')
+    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+  return decodificar(
+    html.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+  ).replace(/\s+/g, ' ').trim();
+}
+
 /**
  * Etapas de certificacion DTE
  */
@@ -989,13 +1006,21 @@ class SiiCertificacion {
 
       const formHtml = formResponse.body || '';
 
-      // 3. Enviar formulario de avance final
-      // El botón "Avanzar Siguiente Paso" cambia la acción a /pe_avance4
+      // 3. Enviar formulario de avance final.
+      // El botón "Avanzar Siguiente Paso" del portal es <input type="button" onclick="avanzar()">,
+      // y avanzar() SOLO cambia el action del form a /pe_avance4 y lo submitea — no toca ningún
+      // campo. TOTREG y PASO vienen en inputs hidden que YA trae el form de pe_avance2, y PASO
+      // varía según la etapa actual (ej. "P01" para SET DE PRUEBAS, "P05" para DOCUMENTOS
+      // IMPRESOS). Antes se hardcodeaba PASO:'P01' → solo funcionaba en la primera transición;
+      // en cualquier otra etapa el SII lo ignoraba silenciosamente y respondía "la empresa ya
+      // se encuentra en el paso X" (no avanzaba nada, pero tampoco reportaba error).
+      const totregMatch = formHtml.match(/name="TOTREG"[^>]*value="([^"]*)"/i);
+      const pasoMatch    = formHtml.match(/name="PASO"[^>]*value="([^"]*)"/i);
       const formData = {
         RUT_EMP: this.rutEmpresa,
         DV_EMP: this.dvEmpresa,
-        TOTREG: '0',
-        PASO: 'P01',
+        TOTREG: totregMatch ? totregMatch[1] : '0',
+        PASO: pasoMatch ? pasoMatch[1] : 'P01',
         ACEPTAR: 'Avanzar Siguiente Paso',
       };
 
@@ -1037,11 +1062,29 @@ class SiiCertificacion {
         console.log(' [DEBUG] Respuesta avanzar guardada en:', debugPath);
       }
 
-      const hasError = body.toLowerCase().includes('error') && !body.includes('Error de Sesión');
-      const hasSuccess = body.includes('exitosamente') || body.includes('Avance declarado') || body.includes('actualizado');
+      // El botón real (avanzar()) solo cambia el action y submitea — no valida nada del lado
+      // cliente. La respuesta del SII distingue estos casos por texto, no por status HTTP
+      // (siempre 200) ni por la palabra "error" (aparece en el <script> de todas las páginas
+      // del portal):
+      //   "ha pasado al paso X"                    → avance REAL a otro paso intermedio
+      //   "ha finalizado con la certificación..."   → avance REAL — llegó al paso final,
+      //                                               queda pendiente declarar cumplimiento
+      //                                               (pe_avance7→8, ver declararCumplimiento())
+      //   "ya se encuentra en el paso X"            → no-op: no avanzó nada (PASO no
+      //                                               coincidía, o el SII aún no habilita el
+      //                                               siguiente paso) — NO es un error
+      //   cualquier otro texto                      → error real
+      const texto = limpiarTextoPortal(body);
+      const RE_AVANZO = /ha pasado al paso|ha finalizado con la certificaci/i;
+      const avanzo    = RE_AVANZO.test(texto);
+      const sinCambio = /ya se encuentra en el paso/i.test(texto);
+      const frases = texto.split(/(?<=\.)\s+/);
+      const mensaje = (frases.find(f => RE_AVANZO.test(f) || /ya se encuentra en el paso/i.test(f)) || '').trim() || null;
 
       return {
-        success: !hasError || hasSuccess,
+        success: avanzo,
+        sinCambio,
+        mensaje,
         rawHtml: body,
       };
 
@@ -1172,10 +1215,30 @@ class SiiCertificacion {
       );
 
       const body = formResponse.body || '';
-      const hasError = body.includes('Error') || body.includes('error');
+
+      // El chequeo anterior (body.includes('error')) era demasiado laxo: cualquier página con
+      // la palabra "error" (incluso dentro de un <script>) daba falso negativo, y no detectaba
+      // el caso REAL de bloqueo, que el SII devuelve con HTTP 200 y texto explícito:
+      //   "El contribuyente ... no ha finalizado su certificación, encontrándose en el paso
+      //    DOCUMENTOS IMPRESOS, por lo que no podrá efectuar la Declaración de Cumplimiento."
+      // Eso pasa mientras el SII no haya APROBADO las muestras impresas (quedan "Por revisar").
+      const texto = limpiarTextoPortal(body);
+
+      const RE_BLOQUEO = /no ha finalizado su certificaci|no podr[aá] efectuar la Declaraci/i;
+      const bloqueado  = RE_BLOQUEO.test(texto);
+
+      // Tomar la FRASE que contiene el motivo — no el primer "El contribuyente..." que aparezca
+      // (la página arranca con un párrafo descriptivo que también empieza así, y antes se
+      // devolvía ese texto genérico en vez del motivo real del bloqueo).
+      const frases = texto.split(/(?<=\.)\s+/);
+      const mensaje = bloqueado
+        ? (frases.find(f => RE_BLOQUEO.test(f)) || '').trim() || null
+        : (frases.find(f => /declaraci[oó]n de cumplimiento|ha finalizado|certificad[ao]/i.test(f)) || '').trim() || null;
 
       return {
-        success: !hasError,
+        success: !bloqueado,
+        bloqueado,
+        mensaje,
         rawHtml: body,
       };
 
@@ -1362,7 +1425,11 @@ class SiiCertificacion {
    * @returns {Promise<Object>} { success, estados, timedOut }
    */
   async waitForApproval(setsAEsperar = [], options = {}) {
-    const { maxIntentos = 30, intervalo = 10000, onProgress } = options;
+    // maxIntentos bajado de 30 a 5 (10s c/u = 50s tope, antes 5 min): evidencia real de hoy
+    // (~10 corridas) muestra que esto SIEMPRE resuelve en el intento 1-3 (10-30s) — si tarda
+    // más que eso, algo anda mal en vez de ser una demora normal del SII, y esperar 5 min
+    // solo posterga descubrirlo.
+    const { maxIntentos = 5, intervalo = 10000, onProgress } = options;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     for (let intento = 1; intento <= maxIntentos; intento++) {

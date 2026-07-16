@@ -34,8 +34,9 @@ const STEPS = {
   BOOK_SKIPPED:       'BOOK_SKIPPED',     // data: { book }
   BOOK_ERROR:         'BOOK_ERROR',       // data: { book, error }
   BOOKS_DECLARING:    'BOOKS_DECLARING',
-  BOOKS_DONE:         'BOOKS_DONE',
+  BOOKS_DONE:         'BOOKS_DONE',       // data: { libros, success } al terminar la fase completa
   BOOK_PERIOD_RETRY:  'BOOK_PERIOD_RETRY', // data: { periodo, intento }
+  LIBROS_AVANZADOS:   'LIBROS_AVANZADOS', // data: { etapaActual } — tras avanzarSiguientePaso() post-libros
   // Avance (Fase 5)
   ADVANCE_WAITING:    'ADVANCE_WAITING',
   ADVANCE_DONE:       'ADVANCE_DONE',
@@ -47,13 +48,14 @@ const STEPS = {
   SIM_POLLING:        'SIM_POLLING',      // data: { intento, max }
   SIM_DONE:           'SIM_DONE',
   // Intercambio (Fase 7)
-  INTERCAMBIO_START:  'INTERCAMBIO_START',
-  INTERCAMBIO_DONE:   'INTERCAMBIO_DONE',
+  INTERCAMBIO_START:       'INTERCAMBIO_START',
+  INTERCAMBIO_DESCARGADO:  'INTERCAMBIO_DESCARGADO', // set de intercambio obtenido (leído de disco o descargado)
+  INTERCAMBIO_DONE:        'INTERCAMBIO_DONE',       // data: { uploaded }
   // Muestras impresas (Fase 8)
   MUESTRAS_START:     'MUESTRAS_START',
   MUESTRAS_PDFS:      'MUESTRAS_PDFS',
-  MUESTRAS_UPLOADING: 'MUESTRAS_UPLOADING',
-  MUESTRAS_DONE:      'MUESTRAS_DONE',
+  MUESTRAS_UPLOADING: 'MUESTRAS_UPLOADING', // data: { count }
+  MUESTRAS_DONE:      'MUESTRAS_DONE',      // data: { success }
   // Boleta electronica
   BOLETA_START:       'BOLETA_START',
   BOLETA_SET_DOWNLOAD: 'BOLETA_SET_DOWNLOAD',

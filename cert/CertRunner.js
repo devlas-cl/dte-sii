@@ -168,6 +168,20 @@ class CertRunner {
    * @returns {Promise<Object>} { success, estructuras, error }
    */
   async obtenerSets(options = {}) {
+    if (options.hydrateOnly) {
+      // Solo hidrata this._estructuras desde memoria o disco — NUNCA llama al SII. Necesario
+      // como modo aparte porque el resto de esta función SIEMPRE pide un set nuevo al SII
+      // (forceRefresh: true, ver abajo), lo que REINICIA la postulación real completa. Un
+      // llamado pensado solo para "popular estado" no puede arriesgarse a tocar esa rama.
+      if (!this._estructuras) {
+        const estructurasPath = path.join(this.debugDir, 'estructuras.json');
+        if (fs.existsSync(estructurasPath)) {
+          this._estructuras = JSON.parse(fs.readFileSync(estructurasPath, 'utf8'));
+        }
+      }
+      return { success: !!this._estructuras, estructuras: this._estructuras, hydrated: true };
+    }
+
     const resultado = await this.setsProvider.obtenerSets({
       setsOpcionales: options.setsOpcionales || {
         SET03: 'S',  // SET GUIA DE DESPACHO
@@ -197,6 +211,28 @@ class CertRunner {
     }
 
     return { success: true, estructuras: resultado.estructuras };
+  }
+
+  /**
+   * Inyecta estructuras ya descargadas (desde BD/caché) sin pedirlas al SII. Formaliza lo que
+   * hoy hacen los callers a mano (`runner._estructuras = JSON.parse(...)`) con acceso directo
+   * a un campo "privado". Útil para reanudar en una fase posterior (libros, simulación) sin
+   * volver a llamar obtenerSets() — que SIEMPRE resetea la postulación real (forceRefresh).
+   * @param {Object} estructurasJson
+   */
+  setEstructuras(estructurasJson) {
+    this._estructuras = estructurasJson;
+  }
+
+  /**
+   * Inyecta resultados previos (trackIds de sets ya enviados) en this.resultados sin
+   * re-ejecutar los envíos. Hace merge — no borra resultados ya presentes que no vengan en
+   * resultadosJson. Formaliza `runner.resultados[k] = {...}` (acceso directo hoy en
+   * run-certificacion.js) con un método explícito.
+   * @param {Object} resultadosJson
+   */
+  setResultados(resultadosJson) {
+    Object.assign(this.resultados, resultadosJson);
   }
 
   /**
@@ -437,13 +473,18 @@ class CertRunner {
    * Declara avance de los sets ejecutados con reintentos automáticos
    * @param {Object} [resultadosExt] - Resultados externos (usa this.resultados si no se pasa)
    * @param {Object} [estructurasExt] - Estructuras externas (usa this._estructuras si no se pasa)
-   * @param {Object} [options] - { maxIntentos, intervalo }
+   * @param {Object} [options] - { maxIntentos, intervalo, ignorarVacio }
+   * @param {boolean} [options.ignorarVacio] - Si this.resultados no tiene trackIds (runner
+   *   recién creado, sin hidratar), en vez de devolver el error genérico "No hay sets para
+   *   declarar" consulta el estado real del portal: si la etapa ya avanzó más allá de SET DE
+   *   PRUEBAS, los sets YA fueron declarados y aprobados en una ejecución anterior — no hay
+   *   nada que hacer y no es un error. Default false — comportamiento previo sin cambios.
    * @returns {Promise<Object>} Resultado de la declaración
    */
   async declararAvance(resultadosExt, estructurasExt, options = {}) {
     const resultados = resultadosExt || this.resultados;
     const estructuras = estructurasExt || this._estructuras;
-    const { maxIntentos = 10, intervalo = 5000 } = options;
+    const { maxIntentos = 10, intervalo = 5000, ignorarVacio = false } = options;
 
     if (!estructuras) {
       throw new Error('No hay estructuras. Ejecutar obtenerSets() primero.');
@@ -470,6 +511,13 @@ class CertRunner {
     }
 
     if (Object.keys(sets).length === 0) {
+      if (ignorarVacio) {
+        const avance = await this.consultarAvance().catch(() => null);
+        const etapa = avance?.etapaActual;
+        if (etapa && etapa !== 'SET DE PRUEBAS') {
+          return { success: true, yaDeclarado: true, etapaActual: etapa };
+        }
+      }
       return { success: false, error: 'No hay sets para declarar' };
     }
 
@@ -519,6 +567,11 @@ class CertRunner {
    * @returns {Promise<Object>} Resultado con todos los libros
    */
   async ejecutarFase4Libros(options = {}) {
+    // Permite pasar las estructuras explícitamente (ej. runner recién creado, hidratado desde
+    // BD/caché en vez de obtenerSets()) — igual que ejecutarSimulacion(). Si no vienen, cae al
+    // estado interno (comportamiento previo, sin cambios para callers existentes).
+    const estructuras = options.estructuras || this._estructuras;
+
     // NOTA: Ya NO decrementamos aquí - cada libro decrementa su propio período
     emitProgress(STEPS.BOOKS_START);
     console.log('\n' + '═'.repeat(60));
@@ -580,8 +633,8 @@ class CertRunner {
     // con el mes de esas fechas. Usar currentMonth-1 causa "ENVIO CON ERRORES O REPAROS".
     let _periodoBase = null;
     const _fchDocMuestra =
-      this._estructuras?.libroCompras?.detalle?.[0]?.FchDoc ||
-      this._estructuras?.libroComprasExentos?.detalle?.[0]?.FchDoc;
+      estructuras?.libroCompras?.detalle?.[0]?.FchDoc ||
+      estructuras?.libroComprasExentos?.detalle?.[0]?.FchDoc;
     if (_fchDocMuestra) {
       const _dt = new Date(_fchDocMuestra);
       if (!isNaN(_dt.getTime())) {
@@ -729,7 +782,7 @@ class CertRunner {
     }
 
     // 4. Libro de Compras para Exentos (solo si el SII lo entregó y no está ya aprobado)
-    if (this._estructuras?.libroComprasExentos) {
+    if (estructuras?.libroComprasExentos) {
       try {
         if (_estaConforme('LIBRO DE COMPRAS PARA EXENTOS')) {
           emitProgress(STEPS.BOOK_SKIPPED, { book: 'libroComprasExentos' });
@@ -867,7 +920,7 @@ class CertRunner {
       // NO es un error de período. Solo LNC/LRH son errores reales que requieren acción.
       const _esperarAprobacion = async (librosAVerificar) => {
         const _todosCandidatos = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
-        if (this._estructuras?.libroComprasExentos) _todosCandidatos.push('LIBRO DE COMPRAS PARA EXENTOS');
+        if (estructuras?.libroComprasExentos) _todosCandidatos.push('LIBRO DE COMPRAS PARA EXENTOS');
         const _librosAVerif = librosAVerificar || _todosCandidatos.filter(n => !_estaConforme(n));
         console.log(`\nEsperando aprobacion del SII para: ${_librosAVerif.join(', ')}`);
         let _ss = {};
@@ -914,6 +967,27 @@ class CertRunner {
           if (_pendientesAun.length > 0 && (_i + 1) % 4 === 0) {
             console.log(` [...] Aún esperando (${Math.round((_i + 1) * 15 / 60)} min): ${_pendientesAun.join(', ')}`);
           }
+          // Cross-check SOAP: el portal se queda en S21 ("declarado") para un envío que el
+          // SOAP ya reporta RECHAZADO (LNC = período ocupado → "ENVIO CON ERRORES O REPAROS"
+          // en pe_avance3). Ese estado NUNCA pasa a REVISADO CONFORME; sin este chequeo se
+          // espera el timeout completo (10 min) al pedo. Consultar SOAP cada 2 intentos (~30s):
+          // si algún pendiente está rechazado, cortar y dejar que phase b reintente período.
+          // Solo se corta ante un rechazo POSITIVO (ok && esRechazado); errores de red/503 se
+          // ignoran para no cortar una espera legítima.
+          if (_enviadorSoap && _pendientesAun.length > 0 && (_i + 1) % 2 === 0) {
+            for (const _n of _pendientesAun) {
+              const _k = _SII_NOMBRE_A_KEY[_n];
+              const _tid = _k && resultados[_k]?.trackId;
+              if (!_tid) continue;
+              try {
+                const _soap = await _enviadorSoap.consultarEstadoSoap(_tid, _rutEmisor);
+                if (_soap.ok && _soap.esRechazado) {
+                  console.log(`\n [SOAP] ${_n} (${_tid}): ${_soap.estado} — ${_soap.glosa || 'rechazado'}. No llegará a CONFORME → reintentando período.`);
+                  return { ok: false, estadosFinal: _ss };
+                }
+              } catch { /* SOAP inestable (503) — ignorar y seguir con el portal */ }
+            }
+          }
         }
         console.log('\n[!] Timeout (10 min). El SII aún no responde. Verifica con --avance más tarde.');
         return { ok: false, estadosFinal: _ss };
@@ -932,16 +1006,22 @@ class CertRunner {
       const _enviadorSoap = this._createLibroEnviador();
       const _rutEmisor = this.config.emisor.rut;
 
-      // Polling hasta 30 minutos (120 intentos × 15s).
-      // LSO (schema OK, procesando contenido) y otros intermedios esperan hasta LOK o rechazo.
-      const _MAX_SOAP_POLLS = 120;
+      // Polling corto (3 intentos × 15s = 45s). Se declara igual después sin importar cómo
+      // termine este poll (ver más abajo "Declarando igual") — nunca bloquea. Evidencia real
+      // de hoy: en NINGUNA corrida este poll llegó a ver LOK ni LNC antes de agotarse, ni con
+      // 20 intentos (5 min) ni con 120 (30 min, el valor original) — maullín deja los libros
+      // en LSO mucho más tiempo del que tiene sentido esperar acá. El único caso que este poll
+      // puede capturar a tiempo es un rechazo de schema INMEDIATO (rápido por naturaleza); el
+      // LNC por período ocupado se detecta más tarde, en el retry de _reenviarLibros (poll
+      // aparte, sin cambios). Se deja en 3 intentos en vez de 0 por si ese caso rápido ocurre.
+      const _MAX_SOAP_POLLS = 3;
       const _SOAP_INTERVAL_MS = 15000;
       let _soapPendientes = new Set(_librosParaConsultar.map(l => l.key));
       const _soapFinalStates = {}; // key → resultado SOAP terminal (LOK/LNC/LRH/etc.)
       const _soapErrCount = {};    // key → contador de errores SOAP consecutivos (ok:false o throw)
       const _MAX_SOAP_ERR = 10;    // reintentos antes de desistir por errores transitorios
 
-      console.log('\n[SOAP] Consultando estado de envíos (espera hasta 15 min)...');
+      console.log('\n[SOAP] Consultando estado de envíos (espera hasta 45s)...');
       await sleep(15000); // espera inicial — SII tarda al menos 15s en validar schema
       for (let _pi = 0; _pi < _MAX_SOAP_POLLS && _soapPendientes.size > 0; _pi++) {
         for (const { key, nombre } of _librosParaConsultar) {
@@ -957,9 +1037,9 @@ class CertRunner {
               _soapErrCount[key] = (_soapErrCount[key] || 0) + 1;
               if (_soapErrCount[key] >= _MAX_SOAP_ERR) {
                 _soapPendientes.delete(key);
-                console.log(` [SOAP] ${nombre} (${_tid}): [?] demasiados errores — desistiendo`);
+                console.log(` [SOAP] ${nombre} (${_tid}): [?] demasiados errores — desistiendo (${_detalle})`);
               } else {
-                console.log(` [SOAP] ${nombre} (${_tid}): [?] error transitorio (${_soapErrCount[key]}/${_MAX_SOAP_ERR}) — reintentando...`);
+                console.log(` [SOAP] ${nombre} (${_tid}): [?] error transitorio (${_soapErrCount[key]}/${_MAX_SOAP_ERR}) — reintentando... (${_detalle})`);
               }
             } else {
               _soapErrCount[key] = 0; // reset en cualquier respuesta válida
@@ -988,7 +1068,7 @@ class CertRunner {
       }
       if (_soapPendientes.size > 0) {
         const _nombresTimeout = _librosParaConsultar.filter(l => _soapPendientes.has(l.key)).map(l => l.nombre);
-        console.log(` [SOAP] ${_nombresTimeout.join(', ')} siguen en proceso tras 15 min. Declarando igual — verifica correos del SII.`);
+        console.log(` [SOAP] ${_nombresTimeout.join(', ')} siguen en proceso tras 45s. Declarando igual — verifica correos del SII.`);
       }
 
       // 4. Declarar + retry automático:
@@ -1045,7 +1125,7 @@ class CertRunner {
 
           // Construir la lista inicial de libros a verificar
           const _todosLibrosNombres = ['LIBRO DE VENTAS', 'LIBRO DE COMPRAS', 'LIBRO DE GUIAS'];
-          if (this._estructuras?.libroComprasExentos) _todosLibrosNombres.push('LIBRO DE COMPRAS PARA EXENTOS');
+          if (estructuras?.libroComprasExentos) _todosLibrosNombres.push('LIBRO DE COMPRAS PARA EXENTOS');
           let _librosAVerificar = _todosLibrosNombres.filter(n => !_estaConforme(n));
 
           // Si SOAP detectó LNC/LRH para algún libro → excluirlos de la espera portal.
@@ -1166,6 +1246,11 @@ class CertRunner {
     } else {
       console.log(`\n[!] Solo ${librosEnviados}/3 libros enviados. Errores: ${errores.join('; ')}`);
     }
+
+    const _librosProcesados = Object.keys(resultados)
+      .filter(k => k.startsWith('libro'))
+      .map(k => k.slice('libro'.length).replace(/^./, c => c.toLowerCase()));
+    emitProgress(STEPS.BOOKS_DONE, { libros: _librosProcesados, success: librosEnviados === 3 });
 
     return {
       success: librosEnviados === 3,
@@ -1641,6 +1726,42 @@ class CertRunner {
   }
 
   /**
+   * Cierre final de la certificación DTE, en un solo paso:
+   *   1. "Avanzar Siguiente Paso" (pe_avance4) — solo funciona si el SII ya APROBÓ las muestras
+   *      impresas. Mientras estén "Por revisar" el portal responde "ya se encuentra en el paso
+   *      DOCUMENTOS IMPRESOS" y no avanza (no es un error: hay que esperar al SII).
+   *   2. "Declaración de Cumplimiento de Requisitos" (pe_avance7 → pe_avance8).
+   *
+   * Reemplaza los 3 pasos manuales que el usuario debía hacer a mano en el portal del SII.
+   * @returns {Promise<Object>} { success, bloqueado, mensaje, avance, declaracion }
+   */
+  async declararCumplimientoFinal() {
+    console.log('\n' + '═'.repeat(60));
+    console.log('CIERRE FINAL: AVANZAR PASO + DECLARAR CUMPLIMIENTO');
+    console.log('═'.repeat(60));
+
+    console.log('\n → Avanzando al siguiente paso (pe_avance4)...');
+    const avance = await this.avanzarSiguientePaso().catch(e => ({ success: false, error: e.message }));
+    console.log(avance?.success ? ' ✓ Avance enviado' : ` [!] Avance no aplicado: ${avance?.error || 'sin cambios'}`);
+
+    console.log('\n → Declarando cumplimiento de requisitos (pe_avance7 → pe_avance8)...');
+    const declaracion = await this.siiCert.declararCumplimiento();
+
+    if (declaracion.bloqueado) {
+      console.log(`\n [!] El SII NO permite declarar todavía: ${declaracion.mensaje || 'certificación no finalizada'}`);
+      console.log('     Las muestras impresas siguen pendientes de revisión del SII.');
+      return { success: false, bloqueado: true, mensaje: declaracion.mensaje, avance, declaracion };
+    }
+    if (!declaracion.success) {
+      console.log(`\n [ERR] Error declarando cumplimiento: ${declaracion.error || 'desconocido'}`);
+      return { success: false, bloqueado: false, mensaje: declaracion.error, avance, declaracion };
+    }
+
+    console.log('\n [OK] DECLARACIÓN DE CUMPLIMIENTO EFECTUADA');
+    return { success: true, bloqueado: false, mensaje: declaracion.mensaje, avance, declaracion };
+  }
+
+  /**
    * Espera a que los libros sean aprobados y luego avanza al siguiente paso
    * @param {Object} [options] - { maxIntentos, intervalo }
    * @returns {Promise<Object>} Resultado del avance
@@ -1693,7 +1814,10 @@ class CertRunner {
 
       if (todosAprobados) {
         console.log('\n ¡Todos los libros aprobados!');
-        return await this.avanzarSiguientePaso();
+        const resultadoAvance = await this.avanzarSiguientePaso();
+        const avanceActual = await this.consultarAvance().catch(() => null);
+        emitProgress(STEPS.LIBROS_AVANZADOS, { etapaActual: avanceActual?.etapaActual ?? null });
+        return resultadoAvance;
       }
 
       await sleep(intervalo);
@@ -2044,6 +2168,7 @@ class CertRunner {
     const intercambioDir = path.join(this.debugDir, 'intercambio');
     fs.mkdirSync(intercambioDir, { recursive: true });
 
+    emitProgress(STEPS.INTERCAMBIO_START);
     console.log('\n' + '═'.repeat(60));
     console.log('FASE 7: INTERCAMBIO DE INFORMACIÓN');
     console.log('═'.repeat(60));
@@ -2085,6 +2210,8 @@ class CertRunner {
       }
     }
 
+    emitProgress(STEPS.INTERCAMBIO_DESCARGADO);
+
     // ── PASO 2: Generar XMLs de respuesta ─────────────────────
     console.log('\nGenerando respuestas firmadas...');
     const intercambioCert = new IntercambioCert({
@@ -2112,6 +2239,7 @@ class CertRunner {
     });
 
     if (uploadResult.success) {
+      emitProgress(STEPS.INTERCAMBIO_DONE, { uploaded: true });
       console.log('\n' + '═'.repeat(60));
       console.log('[OK] INTERCAMBIO COMPLETADO');
       console.log('═'.repeat(60));
@@ -2305,9 +2433,11 @@ class CertRunner {
     const { cookies, makeReq } = await this._autenticarPfeInternet();
 
     const [empRut, empDv] = this.config.emisor.rut.replace(/\./g, '').split('-');
-    // Extraer RUT del certificado desde la ruta del PFX (e.g. "11444555-6.pfx")
-    const certBase = path.basename(this.config.certificado.path, '.pfx');
-    const [certRut, certDv = '0'] = certBase.includes('-') ? certBase.split('-') : [certBase, '0'];
+    // RUT del titular del certificado — desde el objeto Certificado (parsea el PFX), NO del
+    // nombre de archivo: cuando la API inyecta un PFX temporal (p.ej. "1-<ts>-cert.pfx") el
+    // nombre no contiene el RUT → certRut salía basura → validarUsuario "No hay usuario a validar".
+    const certRutFull = (this.certificado?.rut || path.basename(this.config.certificado.path, '.pfx')).replace(/\./g, '');
+    const [certRut, certDv = '0'] = certRutFull.includes('-') ? certRutFull.split('-') : [certRutFull, '0'];
 
     const gwtHeaders = {
       'Content-Type': 'text/x-gwt-rpc; charset=UTF-8',
@@ -2386,7 +2516,10 @@ class CertRunner {
       ].join(CRLF);
 
       console.log(` → Subiendo ${archivo.filename}...`);
-      const uploadResp = await makeReq(`${PFE_BASE}uploadFile${archivo.uploadN}`, {
+      // El portal SII exige el RUT de la empresa como query params (?re={rut}&dve={dv}),
+      // igual que downloadFile. Sin ellos responde HTTP 200 con "no vienen los parametros
+      // necesarios" y el envío no se registra → la etapa nunca avanza a DOCUMENTOS IMPRESOS.
+      const uploadResp = await makeReq(`${PFE_BASE}uploadFile${archivo.uploadN}?re=${empRut}&dve=${empDv}`, {
         method: 'POST',
         body: multipartBody,
         headers: {
@@ -2403,19 +2536,54 @@ class CertRunner {
       }
 
       const respLow = respBody.toLowerCase();
-      const hasError = uploadResp.status >= 400
-        || (respLow.includes('error') && !respLow.includes('procesado'))
+      // La página de error del portal GWT devuelve HTTP 200 con "no vienen los parametros
+      // necesarios" / <title>ERROR</title> → NO es éxito aunque el status sea 200. Antes se
+      // tomaba status===200 como éxito y se marcaba el intercambio confirmado en falso.
+      const esPaginaError = respLow.includes('no vienen los parametros')
+        || respLow.includes('<title>error')
         || respLow.includes('rechaz');
-      const hasSuccess = respLow.includes('procesado') || respLow.includes('exitosamente')
-        || respLow.includes('cargado') || uploadResp.status === 200;
+      const hasError = uploadResp.status >= 400 || esPaginaError;
 
-      if (hasError && !hasSuccess) {
+      if (hasError) {
         throw new Error(`Error al subir ${archivo.filename}: HTTP ${uploadResp.status} — ${respBody.substring(0, 200)}`);
       }
       console.log(` ✓ ${archivo.filename} subido (HTTP ${uploadResp.status})`);
     }
 
-    return { success: true, resultado: 'Los 3 archivos XML de intercambio subidos correctamente' };
+    // === PASO 3: Confirmar el intercambio (GWT RPC) — el "commit" que avanza a DOCUMENTOS
+    // IMPRESOS. Sin esto los 3 XML quedan subidos pero la postulación NO avanza. Secuencia
+    // capturada del portal real (F12): validarSetContriPostSeguimiento + updatePostulacion-
+    // Seguimiento ×3 (una por cada documento subido, ids 40/41/43). Antes hacíamos solo una
+    // (43) → por eso no avanzaba: faltaban las otras dos + la validación previa.
+    console.log(' → pfeInternet: validarSetContriPostSeguimiento...');
+    const validSetPayload =
+      `7|0|7|${PFE_BASE}|${PFE_POLICY}|${PFE_SVC}|validarSetContriPostSeguimiento|` +
+      `java.lang.Integer/3438268394|java.lang.String/2004016611|${empDv}|` +
+      `1|2|3|4|2|5|6|5|${empRut}|7|`;
+    const validSetResp = await makeReq(`${PFE_BASE}facade`, {
+      method: 'POST', body: validSetPayload, headers: gwtHeaders, cookies,
+    });
+    if (debugDir) fs.writeFileSync(path.join(debugDir, 'pfe-validarset-resp.txt'), (validSetResp.body || '').substring(0, 800), 'utf8');
+
+    // updatePostulacionSeguimiento × 3 (ids 40, 41, 43 — uno por documento de intercambio)
+    const SEGUIMIENTO_IDS = [40, 41, 43];
+    for (const seguimientoId of SEGUIMIENTO_IDS) {
+      console.log(` → pfeInternet: updatePostulacionSeguimiento (id=${seguimientoId})...`);
+      const segPayload =
+        `7|0|7|${PFE_BASE}|${PFE_POLICY}|${PFE_SVC}|updatePostulacionSeguimiento|` +
+        `cl.sii.sdi.dim.pfe.to.PostulacionSeguimientoTo/3921005560|java.lang.Integer/3438268394|${empDv}|` +
+        `1|2|3|4|1|5|5|6|${seguimientoId}|0|0|0|0|7|6|${empRut}|`;
+      const segResp = await makeReq(`${PFE_BASE}facade`, {
+        method: 'POST', body: segPayload, headers: gwtHeaders, cookies,
+      });
+      if (debugDir) fs.writeFileSync(path.join(debugDir, `pfe-seguimiento-${seguimientoId}-resp.txt`), (segResp.body || '').substring(0, 500), 'utf8');
+      if (!/\/\/OK/.test(segResp.body || '')) {
+        throw new Error(`updatePostulacionSeguimiento(${seguimientoId}) no confirmó: ${(segResp.body || '').substring(0, 200)}`);
+      }
+    }
+    console.log(' ✓ Intercambio confirmado (3 seguimientos) — postulación avanza a DOCUMENTOS IMPRESOS');
+
+    return { success: true, resultado: 'Los 3 archivos XML de intercambio subidos y confirmados (avanza a DOCUMENTOS IMPRESOS)' };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2646,7 +2814,10 @@ class CertRunner {
     console.log(`FASE 8: MUESTRAS IMPRESAS (${pdfPaths.length} PDFs)`);
     console.log('═'.repeat(60));
 
-    return this._subirMuestrasImpresasPortal({ pdfPaths, debugDir: pdfDir });
+    emitProgress(STEPS.MUESTRAS_UPLOADING, { count: pdfPaths.length });
+    const result = await this._subirMuestrasImpresasPortal({ pdfPaths, debugDir: pdfDir });
+    emitProgress(STEPS.MUESTRAS_DONE, { success: result.success });
+    return result;
   }
 
   /**
@@ -2717,11 +2888,18 @@ class CertRunner {
       (() => { const m = leeResp.body.match(/"(El estado de la postulacion[^"\\]*(?:\\.[^"\\]*)*)"/i); return m ? m[1].replace(/\\x27/g, "'").replace(/\\x22/g, '"') : null; })()
     );
     if (errorEstadoMsg) {
+      // OJO: el SII devuelve "El estado de la postulacion NO es: 'DOCUMENTOS IMPRESOS'" en DOS
+      // situaciones distintas, y el mensaje no las distingue:
+      //   a) la postulación TODAVÍA NO llegó a DOCUMENTOS IMPRESOS (falta completar intercambio)
+      //   b) la postulación YA PASÓ esa etapa (p.ej. DECLARACION EFECTUADA = certificación
+      //      terminada) → subir muestras de nuevo ya no aplica, no hay nada que esperar.
+      // Por eso el hint sugiere verificar la etapa con --avance en vez de asumir que hay una
+      // revisión en curso.
       console.log(` → Portal SII bloqueado: ${errorEstadoMsg}`);
       return {
         success: false, blocked: true, estado: 'BLOQUEADO',
         error: errorEstadoMsg,
-        hint: 'Espere a que el SII procese la revisión en curso (APROBADO/RECHAZADO) antes de re-subir.',
+        hint: 'La postulación no está en DOCUMENTOS IMPRESOS: puede que aún no haya llegado a esa etapa, o que YA la haya superado (certificación terminada). Verifica la etapa real con --avance.',
       };
     }
 

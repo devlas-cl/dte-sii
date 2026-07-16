@@ -106,3 +106,62 @@ const { Certificado, CAF, DTE } = _require('@devlas/dte-sii') as Record<string, 
 
 > WsReclamo is not re-exported from the main `index.js` — import directly:
 > `_require('@devlas/dte-sii/WsReclamo')`
+
+---
+
+## Notas para deploy en producción (cualquier consumidor de esta librería)
+
+Dos variables de entorno del **proceso Node que corre esta librería** son necesarias en
+producción — no son de la librería en sí, pero su ausencia rompe la certificación/emisión
+silenciosamente. Aplican a cualquier consumidor, sin importar dónde/cómo se hostee.
+
+### 1. `TZ=America/Santiago` obligatorio
+
+`CertRunner._getFechaHoy()` (usada por `declararAvance`/`declararLibros`/`ejecutarSimulacion`,
+duplicada en dos lugares del archivo — está pendiente deduplicarla) construye la fecha con
+`new Date().getDate()/getMonth()/getFullYear()`, dependientes del timezone del **proceso**, sin
+ninguna conversión explícita a Chile.
+
+Si el contenedor corre en UTC (default de la mayoría de plataformas cloud si no se configura
+`TZ`), hay una ventana real todas las noches — aprox. 20:00 a 00:00 hora Chile (UTC-3/-4) — en
+la que `new Date()` ya reporta el día siguiente en UTC mientras en Chile sigue siendo el día
+anterior. El SII puede rechazar la declaración de avance por fecha inconsistente durante esa
+ventana. Fix: setear `TZ=America/Santiago` en las variables de entorno del proceso — no requiere
+Docker ni orquestador de por medio, alcanza con la variable de entorno del servicio que sea.
+
+### 2. Persistencia de sesión SII (`DATADIR` / `SII_SESSION_PATH`)
+
+`SiiPortalAuth` cachea las cookies de sesión en disco para evitar el error "máximo de sesiones
+autenticadas" del SII:
+
+```js
+// SiiPortalAuth.js
+const SESSION_CACHE_PATH = path.join(
+  process.env.DATADIR || path.join(os.homedir(), 'AppData', 'Roaming', 'POS'),
+  'sii_session_cache.json'
+);
+```
+
+El fallback (`AppData/Roaming/POS`) es una convención de Windows — tiene sentido para el POS
+Electron (que sí corre en Windows), **no** para un servidor Linux. Si `DATADIR` no está seteado
+en un servidor Linux, igual se crea esa ruta (Node no valida el formato), pero:
+
+- Si el filesystem del contenedor es efímero (se resetea en cada redeploy/restart, como es
+  default en la mayoría de PaaS), la sesión se pierde en cada deploy → cada redeploy fuerza un
+  re-login completo contra el SII. Deploys frecuentes pueden disparar el bloqueo de "máximo de
+  sesiones autenticadas" para el RUT.
+- **Nota aparte, incluso con `DATADIR` persistente**: el cache guarda **una sola sesión a la
+  vez** (compara `certHash` contra lo guardado — `SiiPortalAuth.js` método `_cargarSesionCache`).
+  En un servidor multi-tenant (muchos comercios, cada uno con su propio certificado), el cache
+  se pisa cada vez que se usa un certificado distinto al último guardado. El beneficio real de
+  persistirlo en un volumen no es "evitar todo re-login" (eso ya no aplica con múltiples
+  certificados activos) — es evitar perderlo **en cada redeploy** para el comercio que más lo usa.
+
+`FolioService`/`CafSolicitor` tienen un mecanismo relacionado pero separado vía
+`process.env.SII_SESSION_PATH` (ruta a un archivo, no a un directorio) — mismo riesgo de
+persistencia si el proceso corre en un filesystem efímero.
+
+**Fix conceptual** (genérico — adaptar a la infraestructura real de cada consumidor, sea cual sea):
+1. Montar un volumen/disco persistente en la plataforma de hosting que corresponda.
+2. Apuntar `DATADIR` (y `SII_SESSION_PATH` si se usa) a una ruta dentro de ese volumen.
+3. Confirmar que el volumen sobrevive redeploys, no solo restarts.
