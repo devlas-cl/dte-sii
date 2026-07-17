@@ -241,9 +241,13 @@ class SiiPortalAuth {
         res.on('end', () => {
           const buf = Buffer.concat(chunks);
           const ct = res.headers['content-type'] || '';
-          // Todos los hosts *.sii.cl sirven páginas ISO-8859-1; a veces no incluyen charset en Content-Type.
+          // La mayoría de hosts *.sii.cl sirven páginas ISO-8859-1 sin declarar charset — pero
+          // algunos servicios más nuevos (ej. complementoscvui) sí declaran "charset=UTF-8"
+          // explícito, y hay que respetarlo o se corrompen tildes/ñ (RaÃ­ces, ComÃºn, etc.).
           const isSiiHost = url.hostname.endsWith('.sii.cl');
-          const encoding = (isSiiHost || /iso-8859|latin-1|windows-1252/i.test(ct)) ? 'latin1' : 'utf8';
+          const encoding = /charset=utf-?8/i.test(ct)
+            ? 'utf8'
+            : (isSiiHost || /iso-8859|latin-1|windows-1252/i.test(ct)) ? 'latin1' : 'utf8';
           resolve({ status: res.statusCode, headers: res.headers, body: buf.toString(encoding), cookieJar });
         });
       });
@@ -611,15 +615,26 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
     };
   }
 
-  // ─── Consemitidos (www4.sii.cl/consemitidosinternetui) ───────────────────────
+  // ─── Consemitidos (www4.sii.cl/consemitidosinternetui, o www4c.sii.cl en certificación) ─────
+
+  /**
+   * Host del portal RCV/consemitidos según ambiente. `www4c.sii.cl` es el equivalente de
+   * certificación de `www4.sii.cl` — sin este mapeo, todo `_callConsemitidos` apuntaba siempre a
+   * producción sin importar el ambiente real del comercio (DTEs de certificación jamás aparecían).
+   * @private
+   */
+  _hostConsemitidos(ambiente) {
+    return ambiente === 'certificacion' ? 'www4c.sii.cl' : 'www4.sii.cl';
+  }
 
   /**
    * Navega a consemitidosinternetui para obtener el TOKEN de sesión.
    * El TOKEN es el mismo valor que CSESSIONID y va como conversationId en el body.
    * @private
    */
-  async _obtenerTokenConsemitidos(cookieJar) {
-    await this._request('https://www4.sii.cl/consemitidosinternetui/', { cookieJar });
+  async _obtenerTokenConsemitidos(cookieJar, ambiente = 'produccion') {
+    const host = this._hostConsemitidos(ambiente);
+    await this._request(`https://${host}/consemitidosinternetui/`, { cookieJar });
     const token = cookieJar['TOKEN'] || cookieJar['CSESSIONID'];
     if (!token) {
       throw new Error('SiiPortalAuth: no se pudo obtener TOKEN de sesión de consemitidosinternetui');
@@ -631,7 +646,8 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
    * Llama a un endpoint JSON de la API consemitidosinternetui.
    * @private
    */
-  async _callConsemitidos(method, data, token, cookieJar) {
+  async _callConsemitidos(method, data, token, cookieJar, ambiente = 'produccion') {
+    const host = this._hostConsemitidos(ambiente);
     const body = JSON.stringify({
       metaData: {
         namespace:      `cl.sii.sdi.lob.diii.consemitidos.data.api.interfaces.FacadeService/${method}`,
@@ -642,7 +658,7 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
       data,
     });
     const res = await this._request(
-      `https://www4.sii.cl/consemitidosinternetui/services/data/facadeService/${method}`,
+      `https://${host}/consemitidosinternetui/services/data/facadeService/${method}`,
       {
         method:  'POST',
         body,
@@ -650,8 +666,8 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
         headers: {
           'Content-Type': 'application/json',
           'Accept':       'application/json, text/plain, */*',
-          'Origin':       'https://www4.sii.cl',
-          'Referer':      'https://www4.sii.cl/consemitidosinternetui/',
+          'Origin':       `https://${host}`,
+          'Referer':      `https://${host}/consemitidosinternetui/`,
         },
       }
     );
@@ -663,18 +679,19 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
   }
 
   /**
-   * Obtiene el detalle de DTEs emitidos o recibidos desde www4.sii.cl.
+   * Obtiene el detalle de DTEs emitidos o recibidos desde el portal RCV del SII.
    *
    * @param {string} rut       - RUT sin DV (ej: "12345678")
    * @param {string} dv        - DV (ej: "K")
    * @param {string} periodo   - Período YYYY-MM (ej: "2026-05")
    * @param {number} operacion - 1 = compras / recibidos, 2 = ventas / emitidos
    * @param {Object} [cookieJar] - Sesión ya autenticada (opcional)
+   * @param {string} [ambiente] - 'produccion' (www4.sii.cl, default) o 'certificacion' (www4c.sii.cl)
    * @returns {Promise<{ resumen: Array, detalles: Array }>}
    */
-  async obtenerDetalleDtes(rut, dv, periodo, operacion = 2, cookieJar = null) {
+  async obtenerDetalleDtes(rut, dv, periodo, operacion = 2, cookieJar = null, ambiente = 'produccion') {
     const jar   = cookieJar || await this.autenticar();
-    const token = await this._obtenerTokenConsemitidos(jar);
+    const token = await this._obtenerTokenConsemitidos(jar, ambiente);
 
     // Mapeo de convención interna → convención SII:
     //   interno: 1 = compras/recibidos,  2 = ventas/emitidos
@@ -688,7 +705,7 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
       rutContribuyente: rut,
       dvContribuyente:  dv,
       operacion: siiOperacion,
-    }, token, jar);
+    }, token, jar, ambiente);
 
     const resumen = resumenResp.data?.resumenDte ?? [];
     if (resumen.length === 0) return { resumen: [], detalles: [] };
@@ -708,7 +725,7 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
           operacion:  siiOperacion,
           derrCodigo: String(t.tipoDoc),
           refNCD:     '0',
-        }, token, jar);
+        }, token, jar, ambiente);
         const items = resp.dataResp?.detalles ?? [];
         // Completar tipoDoc y tipoDocDesc desde el resumen si no vienen en el detalle
         return items.map((d) => ({
@@ -720,6 +737,237 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
     );
 
     return { resumen, detalles: detallesArr.flat() };
+  }
+
+  // ─── Complementos CV (www4.sii.cl/complementoscvui) — reclasificación de compras ──────────
+  // Reverse-engineered desde un HAR capturado navegando el portal SII: al abrir una compra
+  // recibida en la pestaña "Registro > Compra" y usar "Cambiar tipo de compra", el browser
+  // llama a estos 3 endpoints. El conversationId que exige el servidor es el mismo TOKEN de
+  // sesión que usa consemitidos/consdcvinternetui (cookie TOKEN/CSESSIONID) — se obtiene
+  // visitando consdcvinternetui/ una vez.
+
+  /**
+   * Token de sesión para complementoscvui — mismo mecanismo que _obtenerTokenConsemitidos
+   * pero navegando consdcvinternetui/ (la SPA "Registro de Compras y Ventas"), que es donde
+   * se originó el conversationId observado en el HAR.
+   * @private
+   */
+  async _obtenerTokenPortalCV(cookieJar, ambiente = 'produccion') {
+    const host = this._hostConsemitidos(ambiente);
+    await this._request(`https://${host}/consdcvinternetui/`, { cookieJar });
+    const token = cookieJar['TOKEN'] || cookieJar['CSESSIONID'];
+    if (!token) {
+      throw new Error('SiiPortalAuth: no se pudo obtener TOKEN de sesión de consdcvinternetui');
+    }
+    return token;
+  }
+
+  /**
+   * Llama a un endpoint JSON de la API complementoscvui (FacadeServiceCompCompra).
+   * @private
+   */
+  async _callComplementoscvui(method, data, token, cookieJar, ambiente = 'produccion') {
+    const host = this._hostConsemitidos(ambiente);
+    const body = JSON.stringify({
+      metaData: {
+        namespace:      `cl.sii.sdi.lob.diii.dcv.data.api.interfaces.compcompra.FacadeServiceCompCompra/${method}`,
+        conversationId: token,
+        transactionId:  '1',
+        page:           { pageSize: 1, pageIndex: 1 },
+      },
+      data,
+    });
+    const res = await this._request(
+      `https://${host}/complementoscvui/services/data/facadeServiceCompCompraService/${method}`,
+      {
+        method:  'POST',
+        body,
+        cookieJar,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept':       'application/json, text/plain, */*',
+          'Origin':       `https://${host}`,
+          'Referer':      `https://${host}/complementoscvui/`,
+        },
+      }
+    );
+    try {
+      return JSON.parse(res.body);
+    } catch {
+      throw new Error(`SiiPortalAuth: respuesta no-JSON de ${method}: ${res.body.slice(0, 300)}`);
+    }
+  }
+
+  /**
+   * Lista las categorías de "tipo de compra" que el SII permite declarar sobre un documento
+   * recibido (Del Giro, Supermercados, Bienes Raíces, Activo Fijo, IVA Uso Común,
+   * IVA no Recuperable, No Corresp. Incluir). `intercambiable: true` = el usuario puede
+   * cambiarla; las demás son asignadas automáticamente por el SII según el tipo de documento.
+   *
+   * @param {Object} [cookieJar] - Sesión ya autenticada (opcional)
+   * @param {string} [ambiente] - 'produccion' (default) o 'certificacion'
+   * @returns {Promise<Array<{ id: string, descripcion: string, intercambiable: boolean }>>}
+   */
+  async obtenerTiposTransaccionCompra(cookieJar = null, ambiente = 'produccion') {
+    const jar   = cookieJar || await this.autenticar();
+    const token = await this._obtenerTokenPortalCV(jar, ambiente);
+    const resp  = await this._callComplementoscvui('obtieneTiposTransaccionCompra', null, token, jar, ambiente);
+    return resp.data ?? [];
+  }
+
+  /**
+   * Detalle completo de un documento de compra tal como lo tiene registrado el SII
+   * (incluye `det_tipo_transaccion`, la clasificación de tipo de compra vigente).
+   *
+   * @param {Object} params
+   * @param {string} params.rut - RUT del contribuyente (receptor), sin DV
+   * @param {string} params.dv
+   * @param {number|string} params.tipoDocumento - Código SII (33=Factura, 46=Factura de Compra, etc.)
+   * @param {number|string} params.numeroDocumento - Folio
+   * @param {string} params.periodoTributario - "AAAAMM" (ej: "202607")
+   * @param {string} params.rutContraparte - RUT del emisor, sin DV
+   * @param {string} params.dvContraparte
+   * @param {Object} [cookieJar]
+   * @param {string} [ambiente]
+   */
+  async obtenerDetalleDocumentoCompra(params, cookieJar = null, ambiente = 'produccion') {
+    const jar   = cookieJar || await this.autenticar();
+    const token = await this._obtenerTokenPortalCV(jar, ambiente);
+    const resp  = await this._callComplementoscvui('obtieneDetalleDocumento', {
+      rut: params.rut, dv: params.dv, operacion: 'COMPRA',
+      tipoDocumento: String(params.tipoDocumento), numeroDocumento: String(params.numeroDocumento),
+      periodoTributario: params.periodoTributario,
+      rutContraparte: params.rutContraparte, dvContraparte: params.dvContraparte,
+    }, token, jar, ambiente);
+    return resp.data ?? null;
+  }
+
+  /**
+   * Cambia el "tipo de compra" declarado ante el SII para un documento recibido — la misma
+   * acción que hace el portal web al usar "Cambiar tipo de compra" en la pestaña Registro.
+   * Lanza si el SII no confirma con `{ data: "OK" }`.
+   *
+   * @param {Object} params - Mismos campos que obtenerDetalleDocumentoCompra más:
+   * @param {number|string} params.tipoCompra - id de obtenerTiposTransaccionCompra (ej: "4" = Activo Fijo)
+   * @param {Object} [cookieJar]
+   * @param {string} [ambiente]
+   * @returns {Promise<true>}
+   */
+  async cambiarTipoCompra(params, cookieJar = null, ambiente = 'produccion') {
+    const jar   = cookieJar || await this.autenticar();
+    const token = await this._obtenerTokenPortalCV(jar, ambiente);
+    const resp  = await this._callComplementoscvui('cambiaTipoCompra', {
+      rut: params.rut, dv: params.dv, operacion: 'COMPRA',
+      tipoDocumento: String(params.tipoDocumento), numeroDocumento: String(params.numeroDocumento),
+      periodoTributario: params.periodoTributario, tipoCompra: String(params.tipoCompra),
+      rutContraparte: params.rutContraparte, dvContraparte: params.dvContraparte,
+    }, token, jar, ambiente);
+    if (resp.data !== 'OK') {
+      throw new Error(`SiiPortalAuth: cambiaTipoCompra no confirmó OK — respuesta: ${JSON.stringify(resp)}`);
+    }
+    return true;
+  }
+
+  /**
+   * Mueve parte del IVA de un documento de "Recuperable" a "Uso Común" (o el inverso).
+   * `ivaComun`/`ivaRec` son los montos finales de cada bucket tras el cambio (no un delta) —
+   * así los captura el portal: al mover todo a Uso Común, ivaRec queda en "" y ivaComun con
+   * el monto total; al revertir, ivaComun queda en "0" e ivaRec recupera el monto total.
+   *
+   * @param {Object} params - Mismos campos identificadores que cambiarTipoCompra más:
+   * @param {string|number} params.ivaComun - Monto final en el bucket "Uso Común"
+   * @param {string|number} params.ivaRec - Monto final en el bucket "Recuperable"
+   * @param {Object} [cookieJar]
+   * @param {string} [ambiente]
+   * @returns {Promise<true>}
+   */
+  async cambiarIvaRecuperableAUsoComun(params, cookieJar = null, ambiente = 'produccion') {
+    return this._cambiarIva('cambiaIvaRec2Comun', params, cookieJar, ambiente);
+  }
+
+  /** Inverso de cambiarIvaRecuperableAUsoComun — mueve el IVA de vuelta a "Recuperable". */
+  async cambiarIvaUsoComunARecuperable(params, cookieJar = null, ambiente = 'produccion') {
+    return this._cambiarIva('cambiaIvaComun2Recuperable', params, cookieJar, ambiente);
+  }
+
+  /** @private */
+  async _cambiarIva(metodo, params, cookieJar, ambiente) {
+    const jar   = cookieJar || await this.autenticar();
+    const token = await this._obtenerTokenPortalCV(jar, ambiente);
+    const resp  = await this._callComplementoscvui(metodo, {
+      rut: params.rut, dv: params.dv, operacion: 'COMPRA',
+      tipoDocumento: String(params.tipoDocumento), numeroDocumento: String(params.numeroDocumento),
+      periodoTributario: params.periodoTributario,
+      ivaComun: String(params.ivaComun ?? ''), ivaRec: String(params.ivaRec ?? ''),
+      rutContraparte: params.rutContraparte, dvContraparte: params.dvContraparte,
+    }, token, jar, ambiente);
+    if (resp.data !== 'OK') {
+      throw new Error(`SiiPortalAuth: ${metodo} no confirmó OK — respuesta: ${JSON.stringify(resp)}`);
+    }
+    return true;
+  }
+
+  // ─── consdcvinternetui — resumen "oficial" del RCV, filtrado por estado contable ───────────
+  // Distinto de consemitidos: expone el estado real (Registro/No Incluir/Pendiente/Reclamado)
+  // mediante `estadoContab`, en vez de listar todo sin distinguir si el SII lo consideró
+  // parte del registro tributario oficial. getDetalleCompra/getDetalleVenta de este mismo
+  // servicio exigen reCAPTCHA v3 (tokenRecaptcha) — no se automatizan aquí. getResumen no lo
+  // exige y sí se puede llamar.
+
+  /**
+   * Resumen "oficial" del RCV (consdcvinternetui) para un período, filtrado por estado
+   * contable — a diferencia de `obtenerDetalleDtes` (consemitidos), permite saber con certeza
+   * si un documento quedó en el Registro tributario oficial o fue excluido por el SII.
+   *
+   * @param {string} rutEmisor - RUT del contribuyente autenticado (sin DV)
+   * @param {string} dvEmisor
+   * @param {string} periodo - "AAAA-MM" (se convierte a "AAAAMM")
+   * @param {'COMPRA'|'VENTA'} operacion
+   * @param {'REGISTRO'|'PENDIENTE'|'NO_INCLUIR'|'RECLAMADO'} [estadoContab] - default 'REGISTRO'
+   * @param {Object} [cookieJar]
+   * @param {string} [ambiente]
+   * @returns {Promise<{ resumen: Array, cabecera: Object|null }>}
+   */
+  async obtenerResumenRegistro(rutEmisor, dvEmisor, periodo, operacion, estadoContab = 'REGISTRO', cookieJar = null, ambiente = 'produccion') {
+    const jar   = cookieJar || await this.autenticar();
+    const token = await this._obtenerTokenPortalCV(jar, ambiente);
+    const host  = this._hostConsemitidos(ambiente);
+    const body = JSON.stringify({
+      metaData: {
+        namespace:      'cl.sii.sdi.lob.diii.consdcv.data.api.interfaces.FacadeService/getResumen',
+        conversationId: token,
+        transactionId:  crypto.randomUUID(),
+        page:           null,
+      },
+      data: {
+        rutEmisor, dvEmisor,
+        ptributario: periodo.replace('-', ''),
+        estadoContab,
+        operacion,
+        busquedaInicial: true,
+      },
+    });
+    const res = await this._request(
+      `https://${host}/consdcvinternetui/services/data/facadeService/getResumen`,
+      {
+        method:  'POST',
+        body,
+        cookieJar: jar,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept':       'application/json, text/plain, */*',
+          'Origin':       `https://${host}`,
+          'Referer':      `https://${host}/consdcvinternetui/`,
+        },
+      }
+    );
+    let parsed;
+    try {
+      parsed = JSON.parse(res.body);
+    } catch {
+      throw new Error(`SiiPortalAuth: respuesta no-JSON de getResumen (consdcvinternetui): ${res.body.slice(0, 300)}`);
+    }
+    return { resumen: parsed.data ?? [], cabecera: parsed.dataCabecera ?? null };
   }
 
   /**

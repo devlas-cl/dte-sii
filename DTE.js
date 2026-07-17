@@ -102,8 +102,12 @@ class DTE {
     };
     
     if (d.referencia) {
+      // Orden fijo exigido por el XSD del SII: NroLinRef, TpoDocRef, FolioRef, FchRef, CodRef, RazonRef.
       resultado.Referencia = {
         NroLinRef: d.referencia.NroLinRef || 1,
+        ...(d.referencia.TpoDocRef != null ? { TpoDocRef: d.referencia.TpoDocRef } : {}),
+        ...(d.referencia.FolioRef != null ? { FolioRef: d.referencia.FolioRef } : {}),
+        ...(d.referencia.FchRef ? { FchRef: d.referencia.FchRef } : {}),
         CodRef: d.referencia.CodRef || d.referencia.codigo,
         RazonRef: d.referencia.RazonRef || d.referencia.razon,
       };
