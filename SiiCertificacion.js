@@ -1194,17 +1194,51 @@ class SiiCertificacion {
   }
 
   /**
-   * Declara cumplimiento de requisitos (etapa final)
+   * Guarda un HTML de debug del flujo de declaración de cumplimiento.
+   * @private
+   */
+  _saveDeclaracionDebug(filename, body) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
+      if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+      fs.writeFileSync(path.join(debugDir, filename), body || '', 'utf8');
+    } catch (_e) { /* debug best-effort, no bloquear el flujo real */ }
+  }
+
+  /**
+   * Declara cumplimiento de requisitos (etapa final).
+   *
+   * Es un wizard de 4 pasos en el portal SII, no uno solo:
+   *   1. GET  pe_avance7               → formulario "ingrese RUT de la empresa"
+   *   2. POST pe_avance8 (RUT/DV)      → pantalla intermedia con hidden OK_MSG=S
+   *   3. POST pe_avance8 (OK_MSG=S)    → formulario real: 8 checkboxes de compromisos,
+   *                                       action="pe_avance9"
+   *   4. POST pe_avance9 (checkboxes)  → declaración efectuada (acción legal/irreversible)
+   *
+   * La versión anterior de este método solo hacía el paso 2 y devolvía `success: true`
+   * si el texto no calzaba con el regex de bloqueo — pero el resultado del paso 2 es
+   * SIEMPRE la pantalla intermedia del paso 3, nunca una confirmación real. Eso producía
+   * un falso positivo: la declaración jurada real (paso 4) nunca se enviaba al SII, pero
+   * quedaba registrada como completada en la base de datos del caller.
+   *
    * @returns {Promise<Object>} Resultado de la declaración
    */
   async declararCumplimiento() {
+    const RE_BLOQUEO = /no ha finalizado su certificaci|no podr[aá] efectuar la Declaraci/i;
+    const extraerBloqueo = (texto) => {
+      const frases = texto.split(/(?<=\.)\s+/);
+      return (frases.find(f => RE_BLOQUEO.test(f)) || '').trim() || null;
+    };
+
     try {
-      // 1. Acceder a la página de declarar cumplimiento
+      // Paso 1: acceder a la página de declarar cumplimiento
       let response = await this.session.ensureSession('/cvc_cgi/dte/pe_avance7');
       response = await this._handleRepresentacionPage(response);
 
-      // 2. Enviar formulario
-      const formResponse = await this.session.submitForm(
+      // Paso 2: enviar RUT/DV — primer submit del wizard
+      let formResponse = await this.session.submitForm(
         '/cvc_cgi/dte/pe_avance8',
         {
           RUT_EMP: this.rutEmpresa,
@@ -1214,30 +1248,78 @@ class SiiCertificacion {
         'https://maullin.sii.cl/cvc_cgi/dte/pe_avance7'
       );
 
-      const body = formResponse.body || '';
+      let body = formResponse.body || '';
+      this._saveDeclaracionDebug('pe_avance8-paso2.html', body);
 
-      // El chequeo anterior (body.includes('error')) era demasiado laxo: cualquier página con
-      // la palabra "error" (incluso dentro de un <script>) daba falso negativo, y no detectaba
-      // el caso REAL de bloqueo, que el SII devuelve con HTTP 200 y texto explícito:
-      //   "El contribuyente ... no ha finalizado su certificación, encontrándose en el paso
-      //    DOCUMENTOS IMPRESOS, por lo que no podrá efectuar la Declaración de Cumplimiento."
-      // Eso pasa mientras el SII no haya APROBADO las muestras impresas (quedan "Por revisar").
-      const texto = limpiarTextoPortal(body);
+      // El chequeo de bloqueo (SII no aprobó aún las muestras impresas) puede aparecer en
+      // cualquiera de los pasos — se revisa después de cada submit.
+      let texto = limpiarTextoPortal(body);
+      if (RE_BLOQUEO.test(texto)) {
+        return { success: false, bloqueado: true, mensaje: extraerBloqueo(texto), rawHtml: body };
+      }
 
-      const RE_BLOQUEO = /no ha finalizado su certificaci|no podr[aá] efectuar la Declaraci/i;
-      const bloqueado  = RE_BLOQUEO.test(texto);
+      // Paso 3: la respuesta del paso 2 es una pantalla intermedia con hidden OK_MSG=S —
+      // hay que reenviarla para llegar al formulario real de checkboxes (action=pe_avance9).
+      const hiddenPaso2 = SiiSession.extractInputValues(body);
+      if (hiddenPaso2.OK_MSG) {
+        formResponse = await this.session.submitForm(
+          '/cvc_cgi/dte/pe_avance8',
+          { ...hiddenPaso2, Aceptar: 'Continuar con la Declaración' },
+          'https://maullin.sii.cl/cvc_cgi/dte/pe_avance8'
+        );
+        body = formResponse.body || '';
+        this._saveDeclaracionDebug('pe_avance8-paso3.html', body);
 
-      // Tomar la FRASE que contiene el motivo — no el primer "El contribuyente..." que aparezca
-      // (la página arranca con un párrafo descriptivo que también empieza así, y antes se
-      // devolvía ese texto genérico en vez del motivo real del bloqueo).
-      const frases = texto.split(/(?<=\.)\s+/);
-      const mensaje = bloqueado
-        ? (frases.find(f => RE_BLOQUEO.test(f)) || '').trim() || null
-        : (frases.find(f => /declaraci[oó]n de cumplimiento|ha finalizado|certificad[ao]/i.test(f)) || '').trim() || null;
+        texto = limpiarTextoPortal(body);
+        if (RE_BLOQUEO.test(texto)) {
+          return { success: false, bloqueado: true, mensaje: extraerBloqueo(texto), rawHtml: body };
+        }
+      }
+
+      // Paso 4: formulario final de checkboxes de compromisos (action=pe_avance9).
+      // Es la declaración jurada real — marcar todos los OPC* y confirmar.
+      const formAction = SiiSession.extractFormAction(body);
+      if (formAction && formAction.includes('pe_avance9')) {
+        const hiddenPaso3 = SiiSession.extractInputValues(body);
+        const opcFields = {};
+        for (const key of Object.keys(hiddenPaso3)) {
+          if (/^OPC\d+$/.test(key)) opcFields[key] = 'S';
+        }
+
+        formResponse = await this.session.submitForm(
+          formAction,
+          { ...hiddenPaso3, ...opcFields, CONFIRMAR: 'Confirmar Declaración' },
+          'https://maullin.sii.cl/cvc_cgi/dte/pe_avance8'
+        );
+        body = formResponse.body || '';
+        this._saveDeclaracionDebug('pe_avance9-final.html', body);
+
+        texto = limpiarTextoPortal(body);
+        if (RE_BLOQUEO.test(texto)) {
+          return { success: false, bloqueado: true, mensaje: extraerBloqueo(texto), rawHtml: body };
+        }
+      }
+
+      // Verificación de éxito real: si la respuesta final TODAVÍA muestra el formulario de
+      // checkboxes (OPC1) o el de ingreso de RUT inicial, el submit no se procesó como se
+      // esperaba (ej. faltó un campo obligatorio) — no asumir éxito solo por ausencia de bloqueo.
+      const siguePendiente = /NAME="OPC1"|name="RUT_EMP"[^>]*type=\s*text/i.test(body);
+      if (siguePendiente) {
+        return {
+          success: false,
+          bloqueado: false,
+          mensaje: 'El SII no confirmó la declaración de cumplimiento — la respuesta final no coincide con lo esperado. Revisar el HTML de debug (pe_avance9-final.html) manualmente.',
+          rawHtml: body,
+        };
+      }
+
+      const mensaje = (texto.split(/(?<=\.)\s+/).find(f =>
+        /declaraci[oó]n de cumplimiento|ha finalizado|certificad[ao]|efectuada/i.test(f)
+      ) || '').trim() || null;
 
       return {
-        success: !bloqueado,
-        bloqueado,
+        success: true,
+        bloqueado: false,
         mensaje,
         rawHtml: body,
       };
