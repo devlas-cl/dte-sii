@@ -51,7 +51,33 @@ chileno de firma electrónica (Ley 19.799 y normativa técnica asociada) — a d
 de `serialNumber`/`OU`/`CN`, que son convención de cada CA (por eso ya hay 3 formatos
 distintos observados con solo 3 CAs).
 
-## Propuesta (no implementada aún — solo documentada)
+## Implementado (2026-07-20)
+
+La propuesta de abajo se implementó tal como estaba documentada, más dos fixes
+adicionales encontrados al revisar todos los consumidores de `certificado.rut`
+dentro de este repo (`el consumidor` ya tenía fallback en los 6 puntos
+donde lo usa, así que no requirió cambios):
+
+- **`cert/BoletaCert.js`** (líneas 217, 231, 294, 361): `RutEnvia` no tenía
+  fallback a `this.emisor.rut`, a diferencia de `LibroVentas.js`,
+  `LibroCompras.js`, `LibroGuias.js` y `Simulacion.js`. Es justamente lo que
+  causó el bug de la CA Signapis. Se agregó `|| this.emisor.rut` en los 4
+  puntos.
+- **`EnviadorSII.js:1177`** (`enviarConsumoFolios`, envío de RCOF): hacía
+  `this.certificado.rut.split('-')` sin chequear null — con un RUT no
+  extraíble esto no da RutEnvia vacío, **lanza un `TypeError`** no controlado.
+  Se agregó fallback a `rutEmisor` (ya extraído y validado del XML unas
+  líneas antes).
+- Test de regresión en `test/pfx.test.js` (ejecutar con `npm test`), con
+  certs sintéticos que cubren: SAN+serialNumber coincidentes (caso
+  Acepta/IDOK), solo OU sin SAN (caso Signapis histórico), sin ningún campo
+  (debe devolver `null`, no reventar), y SAN vs. serialNumber en conflicto
+  (el SAN debe ganar por ser la fuente primaria).
+
+No se requirió migración: `certificado.rut` nunca se persiste en BD, se
+recalcula en cada carga del PFX.
+
+## Propuesta (ya implementada — ver sección de arriba)
 
 Reordenar `extractRutFromCertificate` para que el SAN OID sea la fuente **primaria**,
 dejando `serialNumber` → `OU` → `CN` como fallback heurístico si el SAN no está presente:

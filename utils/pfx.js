@@ -179,11 +179,48 @@ function extractSubjectFields(cert) {
 }
 
 /**
- * Extraer RUT del certificado (desde serialNumber, OU o CN)
+ * Extraer RUT desde el Subject Alternative Name (SAN) con OID
+ * 1.3.6.1.4.1.8321.1 — reservado bajo la normativa chilena de firma
+ * electrónica (Ley 19.799). A diferencia de serialNumber/OU/CN, que son
+ * convención de cada CA, este OID es consistente entre CAs (verificado
+ * contra Acepta, IDOK y Signapis — ver docs/EXTRACCION_RUT_CERTIFICADO.md).
+ * @param {forge.pki.Certificate} cert - Certificado
+ * @returns {string|null} RUT o null
+ */
+function extractRutFromSan(cert) {
+  const san = cert.getExtension('subjectAltName');
+  if (!san || !san.altNames) return null;
+
+  for (const alt of san.altNames) {
+    if (alt.type !== 0) continue; // 0 = otherName
+    try {
+      const oid = forge.asn1.derToOid(alt.value[0].value);
+      if (oid !== '1.3.6.1.4.1.8321.1') continue;
+
+      const inner = alt.value[1] && alt.value[1].value && alt.value[1].value[0];
+      if (!inner || !inner.value) continue;
+
+      const clean = inner.value.replace(/\./g, '').toUpperCase();
+      if (/^\d{7,8}-[\dK]$/.test(clean)) {
+        return clean;
+      }
+    } catch {
+      // OID no parseable en este altName — seguir con el resto y caer al fallback
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Extraer RUT del certificado (desde SAN OID, serialNumber, OU o CN)
  * @param {forge.pki.Certificate} cert - Certificado
  * @returns {string|null} RUT o null
  */
 function extractRutFromCertificate(cert) {
+  const sanRut = extractRutFromSan(cert);
+  if (sanRut) return sanRut;
+
   const subject = extractSubjectFields(cert);
 
   // Intentar desde serialNumber (más confiable)
