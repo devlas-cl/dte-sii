@@ -1174,7 +1174,11 @@ class EnviadorSII {
     log.log('XML Length:', xml.length, 'bytes');
 
     const [rutNum, dv] = rutEmisor.split('-');
-    const [rutEnviaNum, dvEnvia] = this.certificado.rut.split('-');
+    // Fallback a rutEmisor si el certificado no expone RUT (ver
+    // docs/EXTRACCION_RUT_CERTIFICADO.md) — evita un TypeError por .split
+    // sobre null cuando el PFX no tiene el RUT en ningún campo conocido.
+    const rutEnvia = this.certificado.rut || rutEmisor;
+    const [rutEnviaNum, dvEnvia] = rutEnvia.split('-');
     
     const boundary = '----WebKitFormBoundary' + Math.random().toString(36).substring(2);
     

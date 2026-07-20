@@ -214,7 +214,7 @@ class BoletaCert {
     
     const envioBoleta = new EnvioBOLETA({
       rutEmisor: this.emisor.rut,
-      rutEnvia: this.certificado.rut,
+      rutEnvia: this.certificado.rut || this.emisor.rut,
       fchResol: this.resolucion.fecha,
       nroResol: this.resolucion.numero,
       certificado: this.certificado,
@@ -228,7 +228,7 @@ class BoletaCert {
     // Carátula para certificación
     envioBoleta.setCaratula({
       RutEmisor: this.emisor.rut,
-      RutEnvia: this.certificado.rut,
+      RutEnvia: this.certificado.rut || this.emisor.rut,
       RutReceptor: '60803000-K', // SII en certificación
       FchResol: this.resolucion.fecha,
       NroResol: this.resolucion.numero,
@@ -291,7 +291,7 @@ class BoletaCert {
     // Establecer carátula
     consumoFolio.setCaratula({
       RutEmisor: this.emisor.rut,
-      RutEnvia: this.certificado.rut,
+      RutEnvia: this.certificado.rut || this.emisor.rut,
       FchResol: this.resolucion.fecha,
       NroResol: this.resolucion.numero,
       SecEnvio: options?.secEnvio || 1,
@@ -358,7 +358,7 @@ class BoletaCert {
     
     consumoFolio.setCaratula({
       RutEmisor: this.emisor.rut,
-      RutEnvia: this.certificado.rut,
+      RutEnvia: this.certificado.rut || this.emisor.rut,
       FchResol: this.resolucion.fecha,
       NroResol: this.resolucion.numero,
       SecEnvio: options.secEnvio,
