@@ -1281,6 +1281,13 @@ class SiiCertificacion {
       const formAction = SiiSession.extractFormAction(body);
       if (formAction && formAction.includes('pe_avance9')) {
         const hiddenPaso3 = SiiSession.extractInputValues(body);
+        // El HTML tiene DOS botones (CONFIRMAR="Confirmar Declaración" y Salir="No Confirmar",
+        // este último con TYPE=button). extractInputValues lee <input> sin distinguir el type,
+        // así que Salir queda en hiddenPaso3 con valor "No Confirmar". Un browser real solo
+        // envía el par name/value del botón que el usuario clickeó — nunca ambos. Si se manda
+        // Salir=No Confirmar junto con CONFIRMAR, el SII podría interpretar la presencia de ese
+        // campo como "el usuario canceló", pisando la confirmación real.
+        delete hiddenPaso3.Salir;
         const opcFields = {};
         for (const key of Object.keys(hiddenPaso3)) {
           if (/^OPC\d+$/.test(key)) opcFields[key] = 'S';
