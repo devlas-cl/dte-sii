@@ -244,6 +244,19 @@ class CafSolicitor {
         this.session.saveSession(this.sessionPath);
       }
 
+      // Rechazo duro por falta de Verificación de Actividades: debe detectarse ANTES de
+      // _processMultiStepFlow. La página de rechazo también contiene el string
+      // "of_solicita_folios_dcto" dentro del JS changeRegregion(), lo que hace que
+      // _processMultiStepFlow la confunda con el paso 2 normal y siga de largo el flujo
+      // multi-paso en vez de detectar el rechazo aquí, terminando en errorCode UNKNOWN.
+      if (response.body && response.body.includes('no registra Verificacion de Actividades')) {
+        return {
+          success: false,
+          errorCode: 'VERIFICACION_ACTIVIDADES_PENDIENTE',
+          error: 'SII: El RUT no tiene registrada la Verificación de Actividades para este tipo de documento. Solicítala en el sitio SII → Peticiones Administrativas → Verificación de actividad, o en oficinas del SII.',
+        };
+      }
+
       // Procesar flujo multi-paso del SII
       response = await this._processMultiStepFlow(response, rut, dv, tipoDte, cantidad, debugDir);
 
@@ -267,6 +280,16 @@ class CafSolicitor {
 
       if (response.body && response.body.includes('NO SE AUTORIZA')) {
         return { success: false, errorCode: 'TIMBRAJE_BLOQUEADO', error: 'SII: No se autoriza timbraje. Folios acumulados excesivos o situaciones tributarias pendientes. Revisa el portal SII → Factura Electrónica → Solicitud de Timbraje.' };
+      }
+
+      // Rechazo por Verificación de Actividades detectado en un paso posterior del flujo
+      // multi-paso (ver guarda defensiva en _processMultiStepFlow).
+      if (response.body && response.body.includes('no registra Verificacion de Actividades')) {
+        return {
+          success: false,
+          errorCode: 'VERIFICACION_ACTIVIDADES_PENDIENTE',
+          error: 'SII: El RUT no tiene registrada la Verificación de Actividades para este tipo de documento. Solicítala en el sitio SII → Peticiones Administrativas → Verificación de actividad, o en oficinas del SII.',
+        };
       }
 
       if (response.body && response.body.includes('Autenticaci')) {
@@ -375,6 +398,13 @@ class CafSolicitor {
    */
   async _processMultiStepFlow(response, rut, dv, tipoDte, cantidad, debugDir) {
     let currentHtml = response.body || '';
+
+    // Defensivo: mismo rechazo por Verificación de Actividades puede aparecer si el SII
+    // lo entrega recién en un paso posterior en vez del response inicial de solicitar().
+    if (currentHtml.includes('no registra Verificacion de Actividades')) {
+      return response; // solicitar() detectará el rechazo en response.body
+    }
+
     const realFormAction = SiiSession.extractFormAction(currentHtml);
 
     // Si el <form> real ya apunta a of_confirma_folio, el SII preseleccionó
@@ -447,7 +477,11 @@ class CafSolicitor {
    */
   async _processStep3(response, rut, dv, tipoDte, cantidad, debugDir) {
     let currentHtml = response.body || '';
-    
+
+    if (currentHtml.includes('no registra Verificacion de Actividades')) {
+      return response; // solicitar() detectará el rechazo en response.body
+    }
+
     const formAction3 = SiiSession.extractFormAction(currentHtml) || '/cvc_cgi/dte/of_confirma_folio';
     const inputs3 = SiiSession.extractInputValues(currentHtml);
 
