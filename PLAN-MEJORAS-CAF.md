@@ -645,6 +645,218 @@ debe poder subir el XML del CAF descargado manualmente desde el portal SII.
 
 ---
 
+## Racionamiento de MAX_AUTOR y bloqueo de timbraje — hallazgos 2026-07-22
+
+> **Contexto:** la fase de simulación de la certificación DTE fallaba con
+> `No hay más folios disponibles (10-10)` en `CertFolioHelper.reserveNextFolio`.
+> La causa resultó ser una cadena de cuatro defectos, todos verificados contra
+> `maullin.sii.cl` con el RUT 77967443-6.
+
+### El mecanismo del SII, medido
+
+`MAX_AUTOR` y `FOLIOS_DISP` son `<input type=text readonly>` que el SII incluye
+**en la página previa al paso 3** (la que se guarda como `step1-submit.html`, no
+`step3.html`). `SiiSession.extractInputValues` los captura correctamente — tolera
+el formato con espacios que usa el SII (`value = "1"`).
+
+Progresión medida para el tipo 33 a lo largo de 4 corridas:
+
+| corrida | `FOLIOS_DISP` | `MAX_AUTOR` | pedido → otorgado |
+|---------|---------------|-------------|-------------------|
+| 1 | 0 | **100** | 4 → 4 ✓ |
+| 2 | 0 | 4 | 4 → 4 ✓ |
+| 3 | 4 | **1** | 4 → 1 ✗ |
+| 4 | 5 | 1 | 4 → 1 ✗ |
+
+Tres propiedades no obvias:
+
+1. **El umbral es brutal.** Con `FOLIOS_DISP=0` el SII autoriza 100 folios; con
+   **2 folios sin usar** ya baja a 1. No es lineal.
+2. **No es función pura de `FOLIOS_DISP`.** En la corrida 2 había `DISP=0` pero
+   `MAX_AUTOR=4`, no 100 — el SII también pondera el consumo reciente.
+3. **`MAX_AUTOR`/`FOLIOS_DISP` solo aparecen cuando el SII está limitando ese
+   tipo.** Su ausencia significa "sin tope", no "sin dato". Verificado: tras
+   anular folios, los tipos 56 y 61 dejaron de exponerlos.
+
+**El círculo vicioso:** cada solicitud suma +1 a `FOLIOS_DISP`. Si el CAF corto
+no se usa (la simulación regenera su plan completo en cada corrida, así que los
+folios de un intento fallido son basura garantizada), el tope baja en el
+siguiente intento. Siete corridas fallidas dejaron 21 folios muertos en los tipos
+34 y 52, y llevaron a 56 y 61 a **bloqueo duro irreversible**.
+
+### Siete defectos corregidos
+
+#### 1. Clamp silencioso a `MAX_AUTOR` (`CafSolicitor._processStep3`)
+
+`cantReal = Math.min(cantidad, maxAutor)` es correcto para emisión en runtime
+(se consume lo que haya), pero **fatal para la simulación**, que necesita N
+folios exactos en una sola pasada. Se pedían 4 y se aceptaba 1 sin aviso; el
+fallo aparecía después, en `Simulacion.generar`, sin rastro de la causa.
+
+**Fix:** opción `minCantidad` en `solicitar()`. Si el `MAX_AUTOR` declarado es
+menor, se aborta **antes de enviar el form** (`errorCode: MAX_AUTOR_INSUFICIENTE`).
+Emitir un CAF condenado no solo es inútil: suma +1 a `FOLIOS_DISP` y agrava el
+tope siguiente. La ausencia del campo se distingue explícitamente de un valor
+real, para no alterar el comportamiento de los tipos sin tope (34, 52).
+
+Existía además un **retry interno preexistente** (`'menor o igual al m'` →
+reintentar con `cantidad: 1`) que bypaseaba el chequeo temprano: el `MAX_AUTOR`
+del formulario no siempre coincide con el efectivo, que el SII aplica recién al
+recibir el submit. Ahora respeta `minCantidad`.
+
+#### 2. Dos redacciones del bloqueo duro (`CafSolicitor.esBloqueoTimbraje`)
+
+El SII usa **al menos dos textos** para la misma página de rechazo:
+
+- `NO SE AUTORIZA TIMBRAJE ELECTRÓNICO` — la documentada más arriba
+- `NO AUTORIZA TIMBRAJE ELECTRÓNICA` — sin el "SE", y en femenino
+
+Detectar solo la primera hacía que la segunda cayera al genérico
+`UNKNOWN: No se obtuvo CAF en la respuesta`, **sin disparar la anulación** — que
+es justamente lo que esa página pide hacer. Ambas variantes carecen de `<form>`
+e `<input>`, así que el flujo seguía de largo hasta fallar sin diagnóstico.
+
+Reemplazado por un detector único con `/NO\s+(SE\s+)?AUTORIZA\s+TIMBRAJE/i`,
+usado en los tres puntos de detección.
+
+#### 3. Anulación previa no reconocida (`FolioService.anularFolios`)
+
+El SII responde **`"ha sido anulado anteriormente"`**, pero las cadenas buscadas
+eran `'ya ha sido efectuado'`, `'ya fue anulado'` y `'efectuado anteriormente'`
+(nótese: *efectuado*, no *anulado*). Al no matchear, el rango caía al POST de
+`af_anular` con inputs vacíos y volvía una página de error con `Error 500`,
+registrándose como fallo genérico. De ahí venían diagnósticos engañosos.
+
+#### 4. Sin limpieza preventiva (`CertRunner.solicitarCafs`)
+
+La anulación solo se disparaba **de forma reactiva**, ante un rechazo. Los tipos
+que aún funcionaban (34, 52) acumulaban folios muertos corrida tras corrida sin
+que nadie los recogiera, camino al mismo bloqueo.
+
+**Fix:** limpieza previa de folios sin utilizar para **todos** los tipos antes de
+solicitar. En la primera ejecución recuperó 43 folios; en una pasada global, 134.
+Es seguro: `consultarFolios` solo lista rangos no recepcionados, y los ya
+anulados o usados se rechazan sin efecto.
+
+### Los dos remedios del SII: medidos y acotados
+
+El SII ofrece dos vías para destrabar el timbraje —*"emitir y enviar documentos
+electrónicos al SII o anular folios"*—. Ambas funcionan y son **medibles**:
+
+| acción | efecto en el tipo intervenido |
+|--------|-------------------------------|
+| Anular 6 folios (tipo 33) | `MAX_AUTOR` 1 → 5, `FOLIOS_DISP` 6 → 0 |
+| Emitir 6 facturas (tipo 33) | `MAX_AUTOR` 1 → 3 |
+| Emitir 32 facturas (tipo 33) | `MAX_AUTOR` 3 → 7, `FOLIOS_DISP` 7 → 5 |
+
+**Pero operan estrictamente por tipo de documento.** Comprobado
+experimentalmente: anular 134 folios repartidos en todos los tipos —incluidos
+110 de boleta— y emitir 38 facturas tipo 33 **no movieron** el bloqueo de los
+tipos 56 y 61 ni un punto. No hay transferencia entre tipos por ninguna de las
+dos vías.
+
+### El estado terminal: cuándo un tipo es irrecuperable
+
+Un tipo queda **sin salida** cuando se cumplen a la vez:
+
+- Está en bloqueo duro (no se pueden pedir folios nuevos), y
+- Todos sus folios ya emitidos están o **anulados** o **recepcionados** — es
+  decir, no queda nada que anular ni nada con qué emitir.
+
+Es circular por construcción: recuperar el cupo exige emitir documentos de ese
+tipo, y emitirlos exige folios que están bloqueados. Verificado en el tipo 56
+(4 anulados + 2 recepcionados de 6 totales) también desde la UI del SII: el
+timbraje rechaza, la anulación no tiene candidatos, y la **reobtención** —que
+sigue disponible con el timbraje bloqueado— devuelve *"ya estaban anulados"*.
+
+`solicitarCafExacto` detecta este caso (`errorCode: SIN_FOLIOS_ANULABLES`) y
+corta sin reintentar, en vez de gastar un request condenado.
+
+> **Precaución operativa.** Con un tipo ya bloqueado, anular y emitir **compiten
+> por el mismo recurso**: los folios sin usar. Anularlos cierra la única vía de
+> "emitir" que quedaba. Anular funcionó para los tipos 33 y 46 porque había
+> suficiente margen; si no alcanza, se quema la munición del camino alternativo.
+> No hay forma de saberlo de antemano.
+
+#### 5. Valores de atributo sin comillas (`SiiSession.extractInputValues`)
+
+El SII **mezcla estilos dentro del mismo formulario**: unos atributos van
+entrecomillados y otros no.
+
+```html
+<INPUT NAME="RUT_EMP"     value = "77967443" >   <!-- con comillas -->
+<INPUT NAME="EXISTE_PROD" value = 1 >            <!-- SIN comillas -->
+```
+
+El extractor solo contemplaba `/value\s*=\s*"([^"]*)"/`, así que devolvía cadena
+vacía para los del segundo tipo. Al reenviarlos vacíos, el SII rebotaba a la
+misma página **sin ningún mensaje de error** — el flujo parecía funcionar pero no
+avanzaba nunca.
+
+Ahora acepta comillas dobles, simples y valores desnudos. **Cuidado con el
+fallback sin comillas:** debe exigir un separador previo
+(`/(?:^|[\s<])value\s*=\s*([^\s>"']+)/`), porque si no captura el `value=` que
+vive dentro de los handlers JS del propio SII
+(`onblur="this.value=this.value.toUpperCase()"`) y devuelve basura como valor.
+
+#### 6. La postulación nunca completaba (consumidor: `_postularEmpresa`)
+
+Combinación de dos fallos que se tapaban entre sí:
+
+1. Por el defecto anterior, `EXISTE_PROD`/`EXISTE_CERT` viajaban vacíos y el
+   flujo se quedaba dando vueltas en la pantalla de advertencia
+   (*"perderá su calidad de usuario activo del Sistema de Facturación SII"*).
+2. La comprobación de "¿llegué al formulario de datos?" buscaba el string
+   `ESFAC` **en cualquier parte del HTML** — y ese identificador aparece en el
+   JavaScript del `<head>` de esa misma pantalla de advertencia
+   (`function desmarcarFactura(){ if(form1.ESFAC.checked){...}`). Falso positivo.
+
+Resultado: el código creía haber llegado al formulario, enviaba `pe_confirma`
+desde el estado equivocado, y como el chequeo de éxito era `status < 400`,
+reportaba **postulación OK cuando nunca se registró**.
+
+**Cómo detectarlo:** el formulario real (`pe_confirma`) pesa ~6.700 bytes y trae
+**12 checkboxes**; la pantalla de advertencia pesa ~4.100 y no trae ninguno. La
+comprobación correcta exige un `<input>` de verdad
+(`/<input[^>]+name\s*=\s*["']?ESFAC/`) o un form que apunte a `pe_confirma`.
+
+**Además hacen falta DOS "Continuar"** encadenados, no uno — conviene avanzar en
+bucle hasta detectar el formulario, cortando si la página deja de cambiar. Ojo
+con reenviar el campo `SALIR` que aparece en la segunda pantalla: aborta el flujo.
+
+**Campos del formulario, verificados contra el SII real:**
+
+```
+ESFAC, FACT, CONIVA, NC, ND, SET03, SET06, SET11, SET84, SET72,
+ESBOL, BOLELE, BOLELEC, BOLEXE, BOLEXEN
+```
+
+El listado que se usaba omitía `CONIVA`, `BOLELE` y `BOLEXE`. `SET11`
+(documentos de exportación) y `SET84` (liquidación factura) no deberían marcarse
+salvo que el negocio los use: exigen trámites aparte.
+
+#### 7. Stock inicial de folios desproporcionado (consumidor)
+
+Al cerrar la certificación se pedían **80 folios** por corrida (10 para facturas,
+**20** para guías, notas de crédito y notas de débito). Las notas se emiten de
+forma ocasional, así que esos 20 quedaban ociosos por meses — exactamente el
+insumo del racionamiento descrito arriba.
+
+Bajado a **19** (5 para facturas y guías, 2 para notas). Devlas pide
+`cantidad: CASOS.length`, la cantidad exacta, por el mismo motivo. Reponer es
+automático y barato vía el job de replenish; pedir poco y reponer es lo que
+premia la fórmula del SII.
+
+### Nota de método
+
+`_saveDebug` escribe cada respuesta del SII (`step1-submit.html`, `select.html`,
+`rango-X-Y-af_anular-fail.html`, …). Esos archivos fueron la única fuente fiable
+para este diagnóstico: los mensajes de log resumidos inducían a error —los
+`Error 500` eran en realidad anulaciones previas mal detectadas—. Ante cualquier
+comportamiento raro del SII, leer el HTML crudo antes de teorizar.
+
+---
+
 ## Notas legales
 
 - La automatización del CAF **no está prohibida** por ninguna resolución exenta del SII

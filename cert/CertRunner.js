@@ -247,23 +247,64 @@ class CertRunner {
     this.folioHelper.counters.clear();
     this.folioHelper.usedFolios.clear();
     
+    // Limpieza previa de folios timbrados y nunca utilizados.
+    //
+    // Cada corrida de simulación regenera su plan de documentos completo, así que
+    // los folios que quedaron de un intento fallido NO se reutilizan jamás: son
+    // basura garantizada. Pero el SII los cuenta como "disponibles sin utilizar"
+    // (FOLIOS_DISP) y baja el tope de timbraje (MAX_AUTOR) hasta bloquearlo del
+    // todo. Observado 2026-07-22 en un RUT de certificación: 7 intentos fallidos
+    // dejaron 21 folios muertos en los tipos 34 y 52, y llevaron a los tipos 56 y
+    // 61 a bloqueo duro irreversible (sin folios anulables restantes).
+    //
+    // Limpiar ANTES de pedir rompe ese espiral. Es seguro: solo se anulan folios
+    // que el SII reporta como no recepcionados, y los que ya fueron anulados o
+    // usados se rechazan sin efecto.
+    for (const tipoDte of Object.keys(cafRequired)) {
+      try {
+        const limpieza = await this.folioService.anularFolios({ tipoDte: Number(tipoDte) });
+        if (limpieza.totalAnulados > 0) {
+          console.log(
+            ` Tipo ${tipoDte}: ${limpieza.totalAnulados} folio(s) sin usar de intentos previos anulados`
+          );
+        }
+      } catch (err) {
+        // No es fatal: si la limpieza falla, la solicitud de abajo igual puede
+        // funcionar, y si no, solicitarCafExacto reintenta anulando.
+        console.warn(`[CertRunner] Limpieza previa tipo ${tipoDte} falló: ${err.message}`);
+      }
+    }
+
     for (const [tipoDte, cantidad] of Object.entries(cafRequired)) {
       emitProgress(STEPS.CAF_REQUESTING, { tipo: Number(tipoDte) });
       console.log(` Tipo ${tipoDte}: ${cantidad} folios...`);
-      
-      // Usar solicitarCafConFallback que solicita y retorna el path
-      const cafPath = await this.folioService.solicitarCafConFallback({
+
+      // solicitarCafExacto (no ConFallback): la simulación genera un plan fijo de
+      // documentos y muere si falta un folio, así que un CAF corto no sirve. El
+      // método aborta antes de emitir si el SII no autoriza lo suficiente, anula
+      // folios sin utilizar para destrabar el tope, y reintenta.
+      const res = await this.folioService.solicitarCafExacto({
         tipoDte: Number(tipoDte),
         cantidad: Number(cantidad),
       });
-      
-      if (!cafPath) {
-        throw new Error(`No se pudo obtener CAF para tipo ${tipoDte}`);
+
+      if (!res.ok) {
+        const detalle = [
+          res.maxAutor != null ? `MAX_AUTOR=${res.maxAutor}` : null,
+          res.foliosDisp != null ? `FOLIOS_DISP=${res.foliosDisp}` : null,
+        ].filter(Boolean).join(', ');
+        throw new Error(
+          `Folios insuficientes para tipo ${tipoDte}: se requieren ${cantidad} y el SII ` +
+          `otorgó ${res.otorgados}${detalle ? ` (${detalle})` : ''}. ` +
+          `El SII limita el timbraje cuando hay folios ya autorizados sin utilizar; ` +
+          `emite o anula documentos electrónicos de este tipo y reintenta. ` +
+          `[${res.errorCode}] ${res.error || ''}`.trim()
+        );
       }
-      
-      cafs[tipoDte] = cafPath;
+
+      cafs[tipoDte] = res.cafPath;
       emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
-      console.log(` ✓ CAF tipo ${tipoDte}`);
+      console.log(` ✓ CAF tipo ${tipoDte} (${res.otorgados} folios)`);
     }
     
     return cafs;

@@ -620,8 +620,23 @@ SiiSession.extractInputValues = function(html) {
   const regex = /<input[^>]+>/gi;
   const matches = html.match(regex) || [];
   matches.forEach((tag) => {
-    const nameMatch = tag.match(/name\s*=\s*"([^"]+)"/i);
-    const valueMatch = tag.match(/value\s*=\s*"([^"]*)"/i);
+    // El SII mezcla estilos en el mismo formulario: unos atributos van con
+    // comillas y otros sin ellas (`value = 1`). Con solo el patrón entrecomillado,
+    // esos campos se enviaban vacíos y el SII rebotaba a la misma página sin
+    // explicar por qué — observado 2026-07-22 en pe_datos_empresa, donde
+    // EXISTE_PROD/EXISTE_CERT vienen sin comillas y trababan la postulación.
+    // El fallback sin comillas exige un separador antes del atributo: sin eso
+    // captura el `value=` que aparece DENTRO de handlers JS
+    // (`onblur="this.value=this.value.toUpperCase()"`), devolviendo basura
+    // como valor del campo.
+    const nameMatch =
+      tag.match(/name\s*=\s*"([^"]+)"/i) ||
+      tag.match(/name\s*=\s*'([^']+)'/i) ||
+      tag.match(/(?:^|[\s<])name\s*=\s*([^\s>"']+)/i);
+    const valueMatch =
+      tag.match(/value\s*=\s*"([^"]*)"/i) ||
+      tag.match(/value\s*=\s*'([^']*)'/i) ||
+      tag.match(/(?:^|[\s<])value\s*=\s*([^\s>"']+)/i);
     if (nameMatch) {
       inputs[nameMatch[1]] = valueMatch ? valueMatch[1] : '';
     }
