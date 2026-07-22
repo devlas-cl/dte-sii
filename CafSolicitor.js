@@ -188,15 +188,76 @@ class CafSolicitor {
   }
 
   /**
+   * Detecta la página de bloqueo duro de timbraje del SII.
+   *
+   * El SII usa al menos DOS redacciones para la misma página de rechazo:
+   *   - "NO SE AUTORIZA TIMBRAJE ELECTRÓNICO"  (la documentada en PLAN-MEJORAS-CAF.md)
+   *   - "NO AUTORIZA TIMBRAJE ELECTRÓNICA"     (observada 2026-07-22 en tipo 56)
+   *
+   * Detectar solo la primera hacía que la segunda cayera al genérico
+   * `UNKNOWN: No se obtuvo CAF en la respuesta`, sin disparar el remedio de
+   * anular folios — que es justamente lo que la página pide hacer. Ambas
+   * variantes carecen de <form> e <input>, así que sin esta detección el flujo
+   * sigue de largo hasta fallar sin diagnóstico.
+   *
+   * @param {string} html - Cuerpo de la respuesta del SII
+   * @returns {boolean}
+   */
+  /**
+   * Campos de tipo de documento del formulario de postulación (`pe_confirma`),
+   * verificados contra el form real del SII el 2026-07-22.
+   *
+   * El listado original omitía `CONIVA`, `SET11`, `BOLELE` y `BOLEXE`, que el
+   * SII sí incluye. Se exportan acá para que el consumidor no tenga que
+   * mantener la lista duplicada.
+   */
+  static get CAMPOS_POSTULACION() {
+    return {
+      // Factura electrónica
+      ESFAC: 'S',   // habilita la sección factura
+      FACT: 'S',    // Facturas
+      CONIVA: 'S',  // con IVA
+      NC: 'S',      // Notas de crédito
+      ND: 'S',      // Notas de débito
+      SET03: 'S',   // Guías de despacho
+      SET06: 'S',   // Facturas exentas
+      SET72: 'S',   // Factura de compra
+      // Boleta electrónica
+      ESBOL: 'S',   // habilita la sección boleta
+      BOLELE: 'S',
+      BOLELEC: 'S', // Boleta electrónica
+      BOLEXE: 'S',
+      BOLEXEN: 'S', // Boleta exenta electrónica
+      // NO se marcan por defecto:
+      //   SET11 → Documentos de exportación (requiere trámite aduanero aparte)
+      //   SET84 → Liquidación factura electrónica (caso de uso específico)
+    };
+  }
+
+  static esBloqueoTimbraje(html) {
+    return /NO\s+(SE\s+)?AUTORIZA\s+TIMBRAJE/i.test(String(html || ''));
+  }
+
+  /**
    * Solicita un CAF al SII
    * @param {Object} params - Parámetros
    * @param {number} params.tipoDte - Tipo de DTE (33, 34, 39, 56, 61, etc.)
    * @param {number} [params.cantidad=1] - Cantidad de folios a solicitar
-   * @returns {Promise<Object>} - { success, cafPath, xml, error }
+   * @param {number} [params.minCantidad] - Mínimo aceptable. Si el SII declara un
+   *   MAX_AUTOR menor, se aborta ANTES de emitir en vez de aceptar un rango corto
+   *   (ver `_processStep3`). Útil para flujos que necesitan N folios exactos, como
+   *   la simulación de certificación.
+   * @returns {Promise<Object>} - { success, cafPath, xml, maxAutor, foliosDisp, error, errorCode }
    */
-  async solicitar({ tipoDte, cantidad = 1 }) {
+  async solicitar({ tipoDte, cantidad = 1, minCantidad = null }) {
     const { numero: rut, dv } = splitRut(this.rutEmisor);
     const debugDir = this._getDebugDir(tipoDte);
+
+    // Estado por-solicitud leído desde el form del SII en _processStep3
+    this._lastMaxAutor = null;
+    this._lastFoliosDisp = null;
+    this._maxAutorInsuficiente = false;
+    this._minCantidad = minCantidad;
 
     // Rate limiting: mínimo 1001ms entre solicitudes para no saturar el portal SII.
     const _now = Date.now();
@@ -272,13 +333,34 @@ class CafSolicitor {
         return { success: false, errorCode: 'WAAP_BLOCKED', error: 'IP bloqueada por el firewall del SII. Espera antes de reintentar.' };
       }
 
+      // Abort temprano por MAX_AUTOR insuficiente (ver _processStep3). Se chequea antes
+      // que el resto porque en este caso no se llegó a emitir nada: el body es la página
+      // del paso previo, sin <AUTORIZACION> ni marcador de error propio.
+      if (this._maxAutorInsuficiente) {
+        return {
+          success: false,
+          errorCode: 'MAX_AUTOR_INSUFICIENTE',
+          maxAutor: this._lastMaxAutor,
+          foliosDisp: this._lastFoliosDisp,
+          error: `SII: autoriza como máximo ${this._lastMaxAutor} folio(s) para el tipo ${tipoDte} ` +
+            `y se requieren ${minCantidad} (FOLIOS_DISP=${this._lastFoliosDisp}). ` +
+            `Ocurre cuando hay folios timbrados sin utilizar — anúlalos o emite documentos de este tipo.`,
+        };
+      }
+
       // Verificar si obtuvimos el CAF
       if (response.body && response.body.includes('<AUTORIZACION')) {
         const cafPath = this._saveCafOrganized(response.body, tipoDte);
-        return { success: true, cafPath, xml: response.body, maxAutor: this._lastMaxAutor ?? cantidad };
+        return {
+          success: true,
+          cafPath,
+          xml: response.body,
+          maxAutor: this._lastMaxAutor ?? cantidad,
+          foliosDisp: this._lastFoliosDisp,
+        };
       }
 
-      if (response.body && response.body.includes('NO SE AUTORIZA')) {
+      if (response.body && CafSolicitor.esBloqueoTimbraje(response.body)) {
         return { success: false, errorCode: 'TIMBRAJE_BLOQUEADO', error: 'SII: No se autoriza timbraje. Folios acumulados excesivos o situaciones tributarias pendientes. Revisa el portal SII → Factura Electrónica → Solicitud de Timbraje.' };
       }
 
@@ -301,6 +383,26 @@ class CafSolicitor {
       // (ej: ya hay un timbraje del mismo día que consume parte del cupo diario).
       // Solución: reintentar con cantidad=1 para garantizar obtener al menos 1 folio.
       if (response.body && response.body.includes('menor o igual al m')) {
+        // Con `minCantidad` el llamador necesita N folios exactos: caer a 1 le
+        // entrega un CAF inservible Y suma +1 a FOLIOS_DISP (el folio queda sin
+        // usar), agravando el racionamiento en el próximo intento. Este retry
+        // preexistente bypaseaba el chequeo temprano de _processStep3, que solo
+        // cubre el MAX_AUTOR declarado en el formulario — no el efectivo, que el
+        // SII recién aplica al recibir el submit.
+        if (minCantidad && minCantidad > 1) {
+          console.warn(
+            `[CafSolicitor] Tipo ${tipoDte}: MAX_AUTOR efectivo insuficiente para ${cantidad} folios ` +
+            `y se requieren al menos ${minCantidad} — no se cae a 1 folio.`
+          );
+          return {
+            success: false,
+            errorCode: 'MAX_AUTOR_INSUFICIENTE',
+            maxAutor: this._lastMaxAutor,
+            foliosDisp: this._lastFoliosDisp,
+            error: `SII rechazó ${cantidad} folios para el tipo ${tipoDte} por exceder el máximo autorizado, ` +
+              `y se requieren al menos ${minCantidad}. Ocurre cuando hay folios timbrados sin utilizar.`,
+          };
+        }
         if (cantidad > 1) {
           console.warn(`[CafSolicitor] MAX_AUTOR excedido para ${cantidad} folios — reintentando con 1 folio...`);
           // No limpiar cookieJar: el error es del formulario, no de la sesión.
@@ -436,7 +538,7 @@ class CafSolicitor {
 
       // Rechazo duro antes del check de COD_DOCTO: la página de rechazo también contiene
       // "COD_DOCTO" en su JavaScript, lo que causaría un POST innecesario con datos vacíos.
-      if (currentHtml.includes('NO SE AUTORIZA')) {
+      if (CafSolicitor.esBloqueoTimbraje(currentHtml)) {
         return response; // solicitar() detectará el bloqueo en response.body
       }
 
@@ -459,7 +561,7 @@ class CafSolicitor {
         currentHtml = response.body || '';
         this._saveDebug(debugDir, 'select.html', currentHtml);
 
-        if (currentHtml.includes('NO SE AUTORIZA')) {
+        if (CafSolicitor.esBloqueoTimbraje(currentHtml)) {
           return response; // solicitar() detectará el bloqueo en response.body
         }
       }
@@ -487,9 +589,32 @@ class CafSolicitor {
 
     // CANT_DOCTOS debe enviarse con un valor <= MAX_AUTOR.
     // Si se omite o excede MAX_AUTOR, el SII rechaza devolviendo la página de inicio (rechazo silencioso).
+    //
+    // MAX_AUTOR/FOLIOS_DISP solo aparecen cuando el SII está LIMITANDO este tipo de
+    // documento (confirmado experimentalmente 2026-07-22: tras anular folios, los tipos
+    // 56 y 61 dejaron de exponerlos). Su ausencia significa "sin tope" → no se recorta.
+    const tieneMaxAutor =
+      inputs3.MAX_AUTOR !== undefined && inputs3.MAX_AUTOR !== '';
     const maxAutor = parseInt(inputs3.MAX_AUTOR || String(cantidad), 10);
+    const foliosDisp = parseInt(inputs3.FOLIOS_DISP || '0', 10);
     const cantReal = Math.min(cantidad, maxAutor);
     this._lastMaxAutor = maxAutor; // guardado para retornarlo desde solicitar()
+    this._lastFoliosDisp = tieneMaxAutor ? foliosDisp : null;
+
+    // El SII raciona MAX_AUTOR según los folios timbrados sin utilizar (FOLIOS_DISP):
+    // con FOLIOS_DISP=0 autoriza 100, con 2 ya baja a 1, y si sigue subiendo pasa a
+    // bloqueo duro ("NO SE AUTORIZA"). Aceptar un rango corto es contraproducente para
+    // quien necesita N folios exactos (ej. simulación de certificación): el CAF chico
+    // no se usa, suma +1 a FOLIOS_DISP y empeora el tope en el próximo intento.
+    // Por eso, si el llamador declaró un mínimo, se aborta ANTES de emitir.
+    if (tieneMaxAutor && this._minCantidad && maxAutor < this._minCantidad) {
+      this._maxAutorInsuficiente = true;
+      console.warn(
+        `[CafSolicitor] Tipo ${tipoDte}: MAX_AUTOR=${maxAutor} < mínimo requerido ${this._minCantidad} ` +
+        `(FOLIOS_DISP=${foliosDisp}) — abortando sin emitir para no agravar el racionamiento.`
+      );
+      return response;
+    }
 
     const step3Fields = {
       ...inputs3,

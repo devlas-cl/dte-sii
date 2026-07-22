@@ -213,7 +213,10 @@ class FolioService {
     try {
       await this.solicitarCaf({ tipoDte, cantidad });
     } catch (error) {
-      // Continuar con fallback
+      // Continuar con fallback, pero dejar rastro: sin este log era imposible
+      // diagnosticar por qué aparecían CAFs de 1 folio (el fallback de más abajo)
+      // en vez del rango pedido.
+      console.warn(`[FolioService] solicitarCaf tipo ${tipoDte} x${cantidad} falló: ${error.message} — probando fallback`);
     }
     
     let resolvedPath = this.findLatestCaf(tipoDte);
@@ -245,6 +248,143 @@ class FolioService {
     }
 
     return resolvedPath;
+  }
+
+  /**
+   * Cuenta los folios de un CAF leyendo su rango <D>/<H>.
+   * @private
+   * @returns {number} Cantidad de folios, o 0 si no se pudo parsear
+   */
+  _contarFoliosCaf(cafPath) {
+    try {
+      const xml = fs.readFileSync(cafPath, 'utf8');
+      const d = xml.match(/<D>(\d+)<\/D>/);
+      const h = xml.match(/<H>(\d+)<\/H>/);
+      if (!d || !h) return 0;
+      return Number(h[1]) - Number(d[1]) + 1;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /**
+   * Solicita un CAF garantizando una cantidad EXACTA de folios.
+   *
+   * A diferencia de `solicitarCafConFallback` — que acepta lo que el SII dé y
+   * cae a 1 folio como último recurso, algo razonable para reponer folios de
+   * emisión en runtime — este método sirve a flujos que necesitan N folios
+   * exactos en una sola pasada (ej. la simulación de certificación, que genera
+   * un plan fijo de documentos y muere si falta un folio).
+   *
+   * El SII raciona vía MAX_AUTOR según los folios timbrados sin utilizar
+   * (FOLIOS_DISP), y si se acumulan pasa a bloqueo duro. Anularlos revierte
+   * ambos estados — verificado contra maullin el 2026-07-22: anular 6 folios
+   * llevó FOLIOS_DISP 6→0 y MAX_AUTOR 1→5, y levantó los bloqueos duros de los
+   * tipos 56 y 61. Por eso acá se anula y se reintenta una vez.
+   *
+   * @param {Object} params
+   * @param {number} params.tipoDte - Tipo de DTE
+   * @param {number} params.cantidad - Folios requeridos (mínimo aceptable)
+   * @param {boolean} [params.permitirAnular=true] - Si puede anular folios sin
+   *   usar para destrabar el tope. Ponerlo en false lo deja en modo consulta.
+   * @returns {Promise<Object>} { ok, cafPath, otorgados, maxAutor, foliosDisp, errorCode, error }
+   */
+  async solicitarCafExacto({ tipoDte, cantidad, permitirAnular = true }) {
+    if (!this.cafSolicitor) {
+      throw new Error('FolioService: CafSolicitor no inicializado (se requiere pfxPath y pfxPassword)');
+    }
+
+    const pedir = () =>
+      this.cafSolicitor.solicitar({ tipoDte, cantidad, minCantidad: cantidad });
+
+    let result = await pedir();
+
+    // Ambos códigos tienen la misma causa raíz (folios sin utilizar acumulados)
+    // y el mismo remedio. MAX_AUTOR_INSUFICIENTE aborta antes de emitir;
+    // TIMBRAJE_BLOQUEADO es el estado terminal al que se llega si se ignora.
+    const recuperable =
+      result.errorCode === 'MAX_AUTOR_INSUFICIENTE' ||
+      result.errorCode === 'TIMBRAJE_BLOQUEADO';
+
+    if (!result.success && recuperable && permitirAnular) {
+      console.warn(
+        `[FolioService] Tipo ${tipoDte}: ${result.errorCode} — anulando folios sin utilizar y reintentando...`
+      );
+      try {
+        const anul = await this.anularFolios({ tipoDte });
+
+        // Desglosar los motivos reales del rechazo: no todos son "ya recepcionado"
+        // (folio consumido en un DTE enviado). También caen acá los folios ya
+        // anulados en una pasada anterior, que el SII sigue listando como
+        // candidatos pero rechaza al reintentar.
+        const motivos = (anul.rechazados || []).reduce((acc, r) => {
+          const k = r.reason || 'sin motivo';
+          acc[k] = (acc[k] || 0) + (r.count || 1);
+          return acc;
+        }, {});
+        const detalleMotivos = Object.entries(motivos)
+          .map(([k, v]) => `${v} ${k}`)
+          .join(', ');
+        console.log(
+          `[FolioService] Tipo ${tipoDte}: ${anul.totalAnulados} folio(s) anulado(s), ` +
+          `${anul.totalRechazados} rechazado(s)${detalleMotivos ? ` (${detalleMotivos})` : ''}`
+        );
+
+        if (anul.totalAnulados === 0) {
+          // Sin folios liberados, el tope del SII no se movió: reintentar es un
+          // request garantizado a fallar. Se corta acá con un diagnóstico preciso.
+          return {
+            ok: false,
+            cafPath: null,
+            otorgados: 0,
+            maxAutor: result.maxAutor ?? null,
+            foliosDisp: result.foliosDisp ?? null,
+            errorCode: 'SIN_FOLIOS_ANULABLES',
+            error:
+              `El SII tiene bloqueado el timbraje del tipo ${tipoDte} y no quedan folios anulables ` +
+              `(${anul.totalRechazados} rechazado(s)${detalleMotivos ? `: ${detalleMotivos}` : ''}). ` +
+              `Para destrabarlo hay que emitir y enviar al SII documentos de este tipo con los folios ya timbrados, ` +
+              `o esperar: el SII recalcula el tope según la emisión y las anulaciones de los últimos 6 meses.`,
+          };
+        }
+
+        result = await pedir();
+      } catch (err) {
+        console.warn(`[FolioService] Tipo ${tipoDte}: anulación falló: ${err.message}`);
+      }
+    }
+
+    const base = {
+      maxAutor: result.maxAutor ?? null,
+      foliosDisp: result.foliosDisp ?? null,
+    };
+
+    if (!result.success) {
+      return {
+        ok: false,
+        cafPath: null,
+        otorgados: 0,
+        ...base,
+        errorCode: result.errorCode || 'UNKNOWN',
+        error: result.error || `No se pudo obtener CAF para tipo ${tipoDte}`,
+      };
+    }
+
+    // Defensa final: aunque MAX_AUTOR haya dado el visto bueno, verificar que el
+    // rango realmente alcance antes de dárselo por bueno al llamador.
+    const otorgados = this._contarFoliosCaf(result.cafPath);
+    if (otorgados < Number(cantidad)) {
+      return {
+        ok: false,
+        cafPath: result.cafPath,
+        otorgados,
+        ...base,
+        errorCode: 'FOLIOS_INSUFICIENTES',
+        error: `SII otorgó ${otorgados} folio(s) de ${cantidad} requeridos para el tipo ${tipoDte}.`,
+      };
+    }
+
+    return { ok: true, cafPath: result.cafPath, otorgados, ...base };
   }
 
   /**
@@ -425,8 +565,14 @@ class FolioService {
           continue;
         }
 
+        // El SII responde "ha sido anulado anteriormente" (no "efectuado"), variante
+        // que las tres cadenas originales no cubrían: el rango caía al POST de
+        // af_anular con inputs vacíos y volvía una página de error con "Error 500",
+        // registrándose como fallo genérico en vez de "ya anulado". Verificado
+        // 2026-07-22 contra maullin, tipo 56 folios 2/4/5/6.
         if (body3.includes('ya ha sido efectuado') || body3.includes('ya fue anulado') ||
-            body3.includes('efectuado anteriormente')) {
+            body3.includes('efectuado anteriormente') ||
+            /anulad[oa]\s+anteriormente/i.test(body3)) {
           rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'ya-anulado' });
           console.warn(`[FolioService] ✗ Rango ${iniA}-${finA}: ya anulado (af_anular3)`);
           try { fs.writeFileSync(path.join(debugDirA, `rango-${iniA}-${finA}-af_anular3-error.html`), body3, 'utf8'); } catch (_) {}
