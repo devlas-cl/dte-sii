@@ -239,6 +239,37 @@ class CafSolicitor {
   }
 
   /**
+   * Detecta el rechazo genérico "no está autorizado para ingresar a esta opción" en
+   * palena (producción). A diferencia de maullin/certificación, donde el bloqueo por
+   * Verificación de Actividades sale explícito ("no registra Verificación de
+   * Actividades..."), en producción el SII solo dice esto — mismo texto para tipo 39
+   * (boleta) y 33 (factura), sin indicar la causa real. Verificado 2026-07-24 contra
+   * 78441936-3, en ambos tipos, con el mismo request real repetido dos veces.
+   *
+   * Sin esta detección caía en el genérico `UNKNOWN: No se obtuvo CAF en la
+   * respuesta`, que no distingue este caso (probable Verificación de Actividades,
+   * no confirmado por el mensaje) de un fallo real desconocido.
+   */
+  static esNoAutorizadoIngresarOpcion(html) {
+    return /no\s+est.\s+autorizado\s+para\s+ingresar\s+a\s+esta\s+opci.n/i.test(String(html || ''));
+  }
+
+  /**
+   * Detecta el rechazo por permisos del usuario (estado 106 del SII).
+   *
+   * El RUT dueño del certificado puede estar enrolado en la empresa pero sin los
+   * permisos de firmar/enviar/solicitar folios marcados — el SII responde con esta
+   * página en vez de entregar el CAF. Sin detectarla caía en el genérico
+   * `UNKNOWN: No se obtuvo CAF en la respuesta`, que no dice qué arreglar; el remedio
+   * es reenviar los permisos del usuario (Paso 5 de la inscripción) EN EL MISMO
+   * AMBIENTE donde se está pidiendo el folio.
+   */
+  static esUsuarioSinPermiso(html) {
+    return /no\s+tiene\s+permiso\s+en\s+(la\s+)?empresa|usuario\s+no\s+autorizado\s+para\s+(la\s+)?empresa|no\s+est.\s+autorizado\s+para\s+operar\s+en\s+la\s+empresa/i
+      .test(String(html || ''));
+  }
+
+  /**
    * Solicita un CAF al SII
    * @param {Object} params - Parámetros
    * @param {number} params.tipoDte - Tipo de DTE (33, 34, 39, 56, 61, etc.)
@@ -314,7 +345,7 @@ class CafSolicitor {
         return {
           success: false,
           errorCode: 'VERIFICACION_ACTIVIDADES_PENDIENTE',
-          error: 'SII: El RUT no tiene registrada la Verificación de Actividades para este tipo de documento. Solicítala en el sitio SII → Peticiones Administrativas → Verificación de actividad, o en oficinas del SII.',
+          error: 'SII: El RUT no tiene registrada la Verificación de Actividades para este tipo de documento. Realízala en https://www4.sii.cl/verificacionactividadesinternetui/?opcion=1#/ingreso (Verificación de Actividades online).',
         };
       }
 
@@ -364,13 +395,29 @@ class CafSolicitor {
         return { success: false, errorCode: 'TIMBRAJE_BLOQUEADO', error: 'SII: No se autoriza timbraje. Folios acumulados excesivos o situaciones tributarias pendientes. Revisa el portal SII → Factura Electrónica → Solicitud de Timbraje.' };
       }
 
+      if (response.body && CafSolicitor.esNoAutorizadoIngresarOpcion(response.body)) {
+        return {
+          success: false,
+          errorCode: 'NO_AUTORIZADO_INGRESAR_OPCION',
+          error: `SII (${this.ambiente}): "No está autorizado para ingresar a esta opción" — el SII no indica la causa exacta, pero el patrón coincide con la Verificación de Actividades pendiente para este RUT. Verifícala en https://www4.sii.cl/verificacionactividadesinternetui/?opcion=1#/ingreso`,
+        };
+      }
+
+      if (response.body && CafSolicitor.esUsuarioSinPermiso(response.body)) {
+        return {
+          success: false,
+          errorCode: 'USUARIO_SIN_PERMISO',
+          error: `SII (106): el RUT del certificado no tiene permisos para solicitar folios en la empresa (ambiente ${this.ambiente}). Vuelve a ejecutar la inscripción para reasignar permisos de firmar, enviar y obtener folios.`,
+        };
+      }
+
       // Rechazo por Verificación de Actividades detectado en un paso posterior del flujo
       // multi-paso (ver guarda defensiva en _processMultiStepFlow).
       if (response.body && response.body.includes('no registra Verificacion de Actividades')) {
         return {
           success: false,
           errorCode: 'VERIFICACION_ACTIVIDADES_PENDIENTE',
-          error: 'SII: El RUT no tiene registrada la Verificación de Actividades para este tipo de documento. Solicítala en el sitio SII → Peticiones Administrativas → Verificación de actividad, o en oficinas del SII.',
+          error: 'SII: El RUT no tiene registrada la Verificación de Actividades para este tipo de documento. Realízala en https://www4.sii.cl/verificacionactividadesinternetui/?opcion=1#/ingreso (Verificación de Actividades online).',
         };
       }
 

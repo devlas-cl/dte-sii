@@ -311,7 +311,11 @@ class FolioService {
         `[FolioService] Tipo ${tipoDte}: ${result.errorCode} — anulando folios sin utilizar y reintentando...`
       );
       try {
-        const anul = await this.anularFolios({ tipoDte });
+        // Acotado: acá sí interesan los folios viejos (son los que inflan
+        // FOLIOS_DISP), pero sin barrer el historial entero — anular de a
+        // cientos satura al SII y suma al contador de "anulados últimos 6
+        // meses", que también juega en contra del cupo.
+        const anul = await this.anularFolios({ tipoDte, maxRangos: 20 });
 
         // Desglosar los motivos reales del rechazo: no todos son "ya recepcionado"
         // (folio consumido en un DTE enviado). También caen acá los folios ya
@@ -500,7 +504,53 @@ class FolioService {
    * @param {string} [params.motivo]
    * @returns {Promise<{ok:boolean, anulados:Array, rechazados:Array, totalAnulados:number, totalRechazados:number}>}
    */
-  async anularFolios({ tipoDte, folioDesde = null, folioHasta = null, motivo = 'Folios no utilizados', maxRangos = 50 }) {
+  /**
+   * @param {number} [params.soloUltimosDias] - Si se indica, solo se anulan los
+   *   rangos timbrados dentro de esos días. Sirve para limpiar los sobrantes de
+   *   una corrida reciente sin tocar el historial de la empresa: sin este filtro
+   *   la función barre TODOS los rangos sin utilizar, lo que en un RUT con
+   *   volumen real significa cientos de anulaciones contra el SII — y, peor, el
+   *   propio SII cuenta los folios anulados de los últimos 6 meses en contra del
+   *   cupo de timbraje. Verificado 2026-07-22: una limpieza sin acotar anuló 296
+   *   folios de un RUT antes de detenerla.
+   */
+  /**
+   * Ruta del registro de rangos ya anulados, por RUT y tipo de DTE.
+   *
+   * El SII sigue listando un folio anulado como "sin utilizar" —anulado es, en
+   * efecto, sin usar— así que `consultarFolios` lo devuelve para siempre y cada
+   * limpieza vuelve a intentarlo. Sin memoria entre corridas eso son
+   * round-trips al SII que solo pueden fallar, y peor: van comiendo el cupo de
+   * `maxRangos`, hasta dejar fuera a los sobrantes que sí hay que anular.
+   */
+  _anuladosPath(tipoDte) {
+    const rutLimpio = String(this.rutEmisor || '').replace(/[^0-9kK]/g, '');
+    return path.join(this.debugDir, `folios-anulados-${rutLimpio}-${tipoDte}.json`);
+  }
+
+  /** Set de claves "desde-hasta" que el SII ya reportó como anuladas. */
+  _cargarAnulados(tipoDte) {
+    try {
+      const raw = fs.readFileSync(this._anuladosPath(tipoDte), 'utf8');
+      const arr = JSON.parse(raw);
+      return new Set(Array.isArray(arr) ? arr : []);
+    } catch (_) {
+      // Sin registro previo (o ilegible): se parte de cero. Nunca es fatal —
+      // como mucho se repite el intento una vez más.
+      return new Set();
+    }
+  }
+
+  _guardarAnulados(tipoDte, set) {
+    try {
+      fs.mkdirSync(this.debugDir, { recursive: true });
+      fs.writeFileSync(this._anuladosPath(tipoDte), JSON.stringify([...set]), 'utf8');
+    } catch (err) {
+      console.warn(`[FolioService] No se pudo persistir registro de anulados: ${err.message}`);
+    }
+  }
+
+  async anularFolios({ tipoDte, folioDesde = null, folioHasta = null, motivo = 'Folios no utilizados', maxRangos = 50, soloUltimosDias = null }) {
     const debugStampA = new Date().toISOString().replace(/[:.]/g, '-');
     const debugDirA = path.join(this.debugDir, 'auto-caf', 'anulacion', debugStampA);
     fs.mkdirSync(debugDirA, { recursive: true });
@@ -509,18 +559,38 @@ class FolioService {
     const anulados   = [];
     const rechazados = [];
     const vistos     = new Set(); // claves "folioDesde-folioHasta" ya procesadas en esta ejecución
+    // Rangos que el SII ya reportó como anulados en corridas anteriores: se
+    // saltan de entrada para no gastar el cupo de `maxRangos` en reintentos
+    // que solo pueden volver a fallar. Ver `_anuladosPath`.
+    const yaAnulados = this._cargarAnulados(tipoDte);
+    const yaAnuladosInicial = yaAnulados.size;
 
     const maxPasadas = 4;
 
     for (let pasada = 0; pasada < maxPasadas; pasada++) {
       const consulta = await this.consultarFolios({ tipoDte });
 
+      // Corte por antigüedad: `fecha` viene como DD-MM-AAAA en cada rango.
+      // Un rango sin fecha parseable se descarta cuando el filtro está activo —
+      // ante la duda, no anular.
+      const limiteMs = Number.isFinite(soloUltimosDias)
+        ? Date.now() - soloUltimosDias * 24 * 60 * 60 * 1000
+        : null;
+
       // Filtrar rangos dentro del rango solicitado y que no hayamos intentado aún
       let rangos = consulta.ranges.filter(r => {
         if (Number.isFinite(folioDesde) && Number.isFinite(folioHasta)) {
           if (r.folioDesde > folioHasta || r.folioHasta < folioDesde) return false;
         }
-        return !vistos.has(`${r.folioDesde}-${r.folioHasta}`);
+        if (limiteMs !== null) {
+          const { dia, mes, ano } = this._parseFecha(r.fecha);
+          if (!dia || !mes || !ano) return false;
+          const t = new Date(`${ano}-${mes}-${dia}T00:00:00`).getTime();
+          if (!Number.isFinite(t) || t < limiteMs) return false;
+        }
+        const clave = `${r.folioDesde}-${r.folioHasta}`;
+        if (yaAnulados.has(clave)) return false;
+        return !vistos.has(clave);
       });
 
       // Limitar a los más recientes para evitar operaciones masivas
@@ -574,6 +644,8 @@ class FolioService {
             body3.includes('efectuado anteriormente') ||
             /anulad[oa]\s+anteriormente/i.test(body3)) {
           rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'ya-anulado' });
+          // Se recuerda para que la próxima corrida no lo reintente.
+          yaAnulados.add(`${iniA}-${finA}`);
           console.warn(`[FolioService] ✗ Rango ${iniA}-${finA}: ya anulado (af_anular3)`);
           try { fs.writeFileSync(path.join(debugDirA, `rango-${iniA}-${finA}-af_anular3-error.html`), body3, 'utf8'); } catch (_) {}
           continue;
@@ -603,6 +675,11 @@ class FolioService {
                           bodyBulk.includes('SOLICITUD ANULACION DE FOLIOS');
         if (exitoBulk) {
           anulados.push({ folioDesde: iniA, folioHasta: finA, count });
+          // Un rango recién anulado sigue apareciendo en `consultarFolios` como
+          // "sin utilizar": si no se recuerda acá, la próxima corrida lo
+          // reintenta y el SII contesta "ya anulado". Ésta es la fuente
+          // principal de los rangos zombis.
+          yaAnulados.add(`${iniA}-${finA}`);
           try { fs.writeFileSync(path.join(debugDirA, `rango-${iniA}-${finA}-af_anular-ok.html`), bodyBulk, 'utf8'); } catch (_) {}
           console.log(`[FolioService] ✓ Rango ${iniA}-${finA} (${count} folios) anulado en bulk`);
           continue;
@@ -643,6 +720,7 @@ class FolioService {
           const ok = bs.includes('ha autorizado la anulaci') || bs.includes('SOLICITUD ANULACION DE FOLIOS');
           if (ok) {
             anulados.push({ folioDesde: folio, folioHasta: folio, count: 1 });
+            yaAnulados.add(`${folio}-${folio}`);
           } else {
             const razon = this._parseAnulacionResult(bs).reason || 'error';
             rechazados.push({ folioDesde: folio, folioHasta: folio, count: 1, reason: razon });
@@ -655,9 +733,16 @@ class FolioService {
       if (pasada < maxPasadas - 1) await this._sleep(1500);
     }
 
+    if (yaAnulados.size !== yaAnuladosInicial) {
+      this._guardarAnulados(tipoDte, yaAnulados);
+    }
+
     const totalAnulados   = anulados.reduce((s, r) => s + r.count, 0);
     const totalRechazados = rechazados.reduce((s, r) => s + r.count, 0);
-    console.log(`[FolioService] Completado: ${totalAnulados} anulados, ${totalRechazados} rechazados`);
+    console.log(
+      `[FolioService] Completado: ${totalAnulados} anulados, ${totalRechazados} rechazados` +
+      (yaAnulados.size ? ` (${yaAnulados.size} rango(s) en memoria, se omiten en la próxima corrida)` : '')
+    );
 
     return { ok: true, anulados, rechazados, totalAnulados, totalRechazados };
   }
