@@ -1553,7 +1553,20 @@ class SiiCertificacion {
 
       if (algunoRechazado) {
         emitProgress(STEPS.SETS_REJECTED);
-        return { success: false, error: 'Sets rechazados', estados: estadosRelevantes };
+        // El detalle va en el error, no solo en `estados`: el llamador suele
+        // interpolar `error` en el mensaje que ve el usuario, y un literal
+        // "Sets rechazados" rendía el inútil "Sets rechazados: Sets rechazados"
+        // sin decir cuál set ni con qué estado. Se nombran solo los rechazados
+        // para no ahogar el dato entre los que sí pasaron.
+        const detalle = Object.values(estadosRelevantes)
+          .filter(e => e.esRechazado)
+          .map(e => `${e.nombre}: ${e.estado}`)
+          .join('; ');
+        return {
+          success: false,
+          error: detalle || 'el SII rechazó uno o más sets',
+          estados: estadosRelevantes,
+        };
       }
     }
 

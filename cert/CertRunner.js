@@ -262,7 +262,19 @@ class CertRunner {
     // usados se rechazan sin efecto.
     for (const tipoDte of Object.keys(cafRequired)) {
       try {
-        const limpieza = await this.folioService.anularFolios({ tipoDte: Number(tipoDte) });
+        // ACOTADA a propósito. Solo interesan los folios que ESTA certificación
+        // timbró y dejó sin usar, que son de hoy. Sin el corte por antigüedad la
+        // limpieza barre el historial completo de la empresa: en un RUT con
+        // volumen real eso son cientos de anulaciones contra el SII y, peor, el
+        // SII cuenta los folios anulados de los últimos 6 meses EN CONTRA del
+        // cupo de timbraje — la limpieza terminaría provocando el bloqueo que
+        // intenta evitar. Verificado 2026-07-22: sin acotar anuló 296 folios de
+        // un RUT (rango 1851–2909) antes de detenerla a mano.
+        const limpieza = await this.folioService.anularFolios({
+          tipoDte: Number(tipoDte),
+          soloUltimosDias: 1,
+          maxRangos: 10,
+        });
         if (limpieza.totalAnulados > 0) {
           console.log(
             ` Tipo ${tipoDte}: ${limpieza.totalAnulados} folio(s) sin usar de intentos previos anulados`
@@ -3228,25 +3240,20 @@ class CertRunner {
    * @param {string} opts.correoProveedor
    * @returns {Promise<{success: boolean, mensaje?: string, error?: string}>}
    */
-  async completarDeclaracionBoletaPortal({
-    linkConsulta    = 'www.sii.cl',
-    rutProveedor    = '',
-    nombreProveedor = '',
-    correoProveedor = '',
-  } = {}) {
+  /**
+   * Constantes y helper GWT compartidos por las llamadas al portal de Certificación
+   * de Boleta Electrónica (certBolElectDteInternet — GWT-RPC, distinto de pe_avance
+   * que es HTML). Factorizado para no duplicar la construcción del request entre
+   * el chequeo de solo-lectura y la declaración real.
+   */
+  _gwtBoletaClient(cookieJar) {
     const https  = require('https');
     const crypto = require('crypto');
     const CBE_BASE   = 'https://www4.sii.cl/certBolElectDteInternet/';
     const CBE_PERM   = '0FC3D987613537E6E13E9BB93A406F13';
     const CBE_POLICY = '082D0AC4BC4D75A5DF38F116C53877D4';
     const CBE_SVC    = 'cl.sii.sdi.diii.certBolElectDte.web.client.service.Facade';
-
-    const cookieJar = await this._obtenerCookiesSII();
     const cookieStr = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
-    const [rutNum, dvChar] = this.config.emisor.rut.replace(/\./g, '').split('-');
-    const dvUp       = dvChar.toUpperCase();
-    const razonSocial = this.config.emisor.razon_social || this.config.emisor.razonSocial || '';
-
     const tlsOpts = {
       rejectUnauthorized: false,
       maxVersion: 'TLSv1.2',
@@ -3267,11 +3274,92 @@ class CertRunner {
         ...tlsOpts,
       }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
       req.on('error', reject);
-      req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE declaracion')); });
+      req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE')); });
       req.write(buf); req.end();
     });
+    return { CBE_BASE, CBE_POLICY, CBE_SVC, gwtPost };
+  }
 
-    // 1. Obtener representante legal vigente
+  /**
+   * Chequeo de SOLO LECTURA del estado de la certificación de Boleta en el portal
+   * certBolElectDteInternet. No declara nada — sirve para:
+   *  - gatear el botón "Declarar cumplimiento" (evita el viaje fallido si aún no hay P90)
+   *  - recuperar el estado de boleta cuando las banderas locales se resetearon (ese
+   *    portal NO aparece en pe_avance, así que consultarEstadoAvance no lo cubre)
+   *
+   * Verificado 2026-07-24 contra 79555666-7 con curl crudo (independiente de este
+   * código) — misma respuesta `//OK[0,[],0,7]` cuando no hay P90 todavía.
+   *
+   * @returns {Promise<{success: boolean, inscrita: boolean, listaParaDeclarar: boolean, estado: string|null, error?: string}>}
+   */
+  async consultarEstadoBoletaPortal() {
+    const cookieJar = await this._obtenerCookiesSII();
+    const [rutNum, dvChar] = this.config.emisor.rut.replace(/\./g, '').split('-');
+    const dvUp = dvChar.toUpperCase();
+    const { CBE_BASE, CBE_POLICY, CBE_SVC, gwtPost } = this._gwtBoletaClient(cookieJar);
+
+    // 1. Representante legal vigente ⇒ si hay uno, la empresa está postulada/inscrita
+    //    en el portal de boleta (aunque aún no tenga P90).
+    const reprResp = await gwtPost(
+      `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|recuperarRepresentantesVigentesUsuariosAutorizados|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|2|5|6|5|${rutNum}|7|`
+    );
+    const reprTableStr = reprResp.substring(reprResp.lastIndexOf(',[') + 1, reprResp.lastIndexOf('],0,7]') + 1);
+    let rutRepreNum = '';
+    try {
+      const reprTable = JSON.parse(reprTableStr);
+      rutRepreNum = reprTable.filter(s => /^\d{7,8}$/.test(s)).pop() || '';
+    } catch {}
+    const inscrita = !!rutRepreNum;
+    if (!inscrita) {
+      return { success: true, inscrita: false, listaParaDeclarar: false, estado: null };
+    }
+
+    // 2. Estado — P90 = SOK recibido, lista para declarar. Lista vacía = SII aún no
+    //    creó el registro (SOK pendiente). Cualquier otro P\d+ = otro estado del flujo.
+    const estadoResp = await gwtPost(
+      `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|obtenerEstadoAutorizaEmp|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|4|5|6|5|6|5|${rutNum}|7|5|90|0|`
+    );
+    const listaParaDeclarar = estadoResp.includes('P90');
+    const estadoMatch = estadoResp.match(/"(P\d+)"/);
+    const listaVacia = /\/\/OK\[0,\[\]/.test(estadoResp);
+    const estado = listaParaDeclarar ? 'P90'
+                 : estadoMatch ? estadoMatch[1]
+                 : listaVacia ? 'sin_estado_sok_pendiente'
+                 : 'desconocido';
+
+    return { success: true, inscrita: true, listaParaDeclarar, estado };
+  }
+
+  async completarDeclaracionBoletaPortal({
+    linkConsulta    = 'www.sii.cl',
+    rutProveedor    = '',
+    nombreProveedor = '',
+    correoProveedor = '',
+  } = {}) {
+    const cookieJar = await this._obtenerCookiesSII();
+    const [rutNum, dvChar] = this.config.emisor.rut.replace(/\./g, '').split('-');
+    const dvUp       = dvChar.toUpperCase();
+    const razonSocial = this.config.emisor.razon_social || this.config.emisor.razonSocial || '';
+    const { CBE_BASE, CBE_POLICY, CBE_SVC, gwtPost } = this._gwtBoletaClient(cookieJar);
+
+    // Chequeo de solo-lectura primero: evita el viaje de autorizarEmpresaBolProd
+    // (que escribe en el SII) cuando ya sabemos que no va a poder completarse.
+    const estadoActual = await this.consultarEstadoBoletaPortal();
+    if (!estadoActual.success) {
+      return { success: false, error: 'No se pudo consultar el estado en el portal de boleta.' };
+    }
+    if (!estadoActual.inscrita) {
+      return { success: false, error: 'No se pudo obtener representante vigente (facade CBE)' };
+    }
+    if (!estadoActual.listaParaDeclarar) {
+      const legible = estadoActual.estado === 'sin_estado_sok_pendiente'
+        ? 'sin estado registrado (SOK aún no emitido)'
+        : (estadoActual.estado ?? '(desconocido)');
+      return { success: false, pendingSok: true, error: `El SII aún no habilita la declaración: ${legible}. Espere el SOK del set de boleta enviado.` };
+    }
+    // Representante legal vigente. Se vuelve a pedir (no se reusa el de
+    // consultarEstadoBoletaPortal) porque autorizarEmpresaBolProd necesita el dato
+    // fresco justo antes de escribir, sin depender de estado interno de otra llamada.
     const reprResp = await gwtPost(
       `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|recuperarRepresentantesVigentesUsuariosAutorizados|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|2|5|6|5|${rutNum}|7|`
     );
@@ -3282,16 +3370,6 @@ class CertRunner {
       rutRepreNum = reprTable.filter(s => /^\d{7,8}$/.test(s)).pop() || '';
     } catch {}
     if (!rutRepreNum) return { success: false, error: 'No se pudo obtener representante vigente (facade CBE)' };
-
-    // 2. Verificar estado portal — debe ser P90 (SOK recibido, listo para declarar)
-    const estadoResp = await gwtPost(
-      `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|obtenerEstadoAutorizaEmp|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|4|5|6|5|6|5|${rutNum}|7|5|90|0|`
-    );
-    if (!estadoResp.includes('P90')) {
-      const estadoMatch = estadoResp.match(/"(P\d+)"/);
-      const estado = estadoMatch ? estadoMatch[1] : '(desconocido)';
-      return { success: false, pendingSok: true, error: `Estado portal no es P90 (es ${estado}) — espere SOK del SII` };
-    }
 
     // 3. Obtener datos de postulacion: fchAutorizacion y longCharValue
     const postulResp = await gwtPost(
