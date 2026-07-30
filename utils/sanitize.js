@@ -15,7 +15,16 @@
 /**
  * Sanitizar texto para DTE SII
  * Elimina caracteres que causan problemas de firma XML
- * 
+ *
+ * El envío al SII codifica el XML como ISO-8859-1 vía `Buffer.from(xml, 'latin1')`
+ * (EnviadorSII.js), que trunca cada code point a su byte bajo (code & 0xFF) en vez de
+ * transliterar. Cualquier caracter fuera del rango Latin-1 (ej. em dash — = U+2014)
+ * se corrompe en un byte de control arbitrario (0x2014 & 0xFF = 0x14), lo que el SII
+ * rechaza como "invalid character" a nivel de schema — un error genérico que no apunta
+ * a la causa real. Por eso se reemplazan primero los casos comunes (guiones/puntos
+ * suspensivos tipográficos) por su equivalente ASCII, y como red de seguridad se
+ * elimina cualquier otro caracter fuera de Latin-1 antes de que llegue a esa conversión.
+ *
  * @param {string} text - Texto a sanitizar
  * @returns {string} - Texto sanitizado
  */
@@ -25,6 +34,9 @@ function sanitizeSiiText(text) {
     .replace(/[''´`]/g, '')     // Eliminar apóstrofes
     .replace(/[""]/g, '')       // Eliminar comillas tipográficas
     .replace(/"/g, '')          // Eliminar comillas dobles ASCII
+    .replace(/[—–]/g, '-')      // Guion largo/corto tipográfico -> guion ASCII
+    .replace(/…/g, '...')       // Puntos suspensivos tipográficos -> ASCII
+    .replace(/[^\x00-\xFF]/g, '') // Cualquier otro caracter fuera de Latin-1 (emojis, etc.)
     .trim();
 }
 
