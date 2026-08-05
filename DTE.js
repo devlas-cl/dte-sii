@@ -350,6 +350,13 @@ class DTE {
       format: false,
     });
 
+    // NO QUITAR estos dos xmlns del <DTE>. NO son redundantes aunque el sobre
+    // <EnvioBOLETA>/<EnvioDTE> también los declare.
+    // El DigestValue de la firma se calcula en _c14nDocumento(), que lee el xmlns
+    // desde el <DTE> y lo hereda al <Documento> canonicalizado. Si se quita, se
+    // firma un <Documento> sin namespace, pero el SII lo canonicaliza CON
+    // xmlns="http://www.sii.cl/SiiDte" (lo hereda igual) → los digests no coinciden
+    // → "firma inválida" / rechazo. Tampoco stripearlos después en Envio.js.
     const dteConVersion = {
       '@_xmlns': 'http://www.sii.cl/SiiDte',
       '@_xmlns:xsi': 'http://www.w3.org/2001/XMLSchema-instance',
