@@ -3073,6 +3073,20 @@ class CertRunner {
   // ═══════════════════════════════════════════════════════════════
   // BOLETA ELECTRÓNICA — automatización portal certBolElectDteInternet
   // ═══════════════════════════════════════════════════════════════
+  //
+  // Métodos que se usan para la CERTIFICACIÓN DE BOLETAS (flujo, en orden):
+  //   1. obtenerSetBoletaPortal          → descarga el Set de Pruebas (?SET=1)
+  //   2. (BoletaCert.ejecutarCertificacion emite EnvioBOLETA + RCOF → devuelve trackId)
+  //   3. solicitarValidacionBoletaPortal → declara el trackId del envío (?SET=2)
+  //   4. completarDeclaracionBoletaPortal→ declara cumplimiento y autoriza producción
+  //
+  // Apoyo (solo lectura / recuperación de estado):
+  //   - consultarEstadoBoletaPortal      → estado en el portal GWT de boleta
+  //   - verificarAutorizacionBoleta      → confirma si la empresa ya emite tipo 39
+  //
+  // El portal de boleta usa GWT-RPC (certBolElectDteInternet), distinto del portal
+  // pe_avance usado para facturas/DTE. La certificación de boletas NO usa las fases
+  // de sets/libros/simulación/intercambio/muestras; esas son solo del track DTE.
 
   /**
    * Descarga el Set de Pruebas de Boleta Electrónica desde el portal SII.

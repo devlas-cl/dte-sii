@@ -81,6 +81,11 @@ class EnvioBase {
   
   /**
    * Extraer XML de DTEs sin declaration
+   *
+   * NO stripear el xmlns del <DTE> aquí (aunque el sobre ya lo declare). Ese
+   * namespace es parte del documento firmado: el DigestValue de la firma se
+   * calculó heredándolo al <Documento>. Si se quita, el SII recalcula el digest
+   * CON el namespace y no coincide → "firma inválida". Solo quitar el prolog XML.
    */
   _extractDTEsXml() {
     return this.dtes.map(dte => {

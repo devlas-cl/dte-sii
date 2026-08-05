@@ -12,6 +12,12 @@
  * 3. Se genera RCOF (ConsumoFolio) para reportar los folios usados
  * 4. Se envían ambos documentos al SII
  * 5. SII valida y aprueba
+ *
+ * NOTA sobre el RCOF (ConsumoFolio):
+ * El RCOF está deprecado en producción y ya no se usa en la operación normal.
+ * Solo se mantiene aquí porque este paso de certificación todavía lo exige.
+ * Al enviarlo, el SII puede devolver reparos: eso es esperado en certificación
+ * y no bloquea el avance del proceso.
  */
 
 const path = require('path');
@@ -482,6 +488,8 @@ class BoletaCert {
     }
 
     process.stderr.write(`[PROGRESS]${JSON.stringify({ step: 'BOLETA_RCOF' })}\n`);
+    // RCOF deprecado en producción: solo se envía aquí porque la certificación aún
+    // lo exige. Reparos del SII en este envío son esperados y NO bloquean el avance.
     // 5 & 6. Generar y enviar RCOF — loop hasta que SII lo acepte o se agoten intentos.
     // Estrategia: enviar → si ok, esperar 30s → consultar estado (EPR o RPR = éxito).
     // Si DUPLICADO: el SII ya tiene un RCOF para este RUT/período. El entorno de certificación

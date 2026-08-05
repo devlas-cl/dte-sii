@@ -197,6 +197,21 @@ const estadoDte = await enviador.consultarEstadoDte({
 
 ## Boletas electrónicas
 
+> **Recomendado para CERTIFICAR boletas: usar `CertRunner` + `BoletaCert`, no el camino manual.**
+>
+> Para el proceso de certificación de boletas ante el SII, use el orquestador de
+> alto nivel (`require('@devlas/dte-sii/cert')` → `CertRunner` / `BoletaCert`). Ese
+> camino descarga el set, genera y firma las boletas, arma el `EnvioBOLETA` + RCOF,
+> obtiene el TrackId y declara el cumplimiento. Es el flujo probado end-to-end.
+>
+> El camino manual de bajo nivel (`DTE` + `EnvioBOLETA` + `EnviadorSII`) que se
+> muestra más abajo funciona, pero es fácil romperlo. **Error frecuente:** "optimizar"
+> quitando los `xmlns` del `<DTE>` por parecer redundantes con el sobre. NO lo haga:
+> el `xmlns="http://www.sii.cl/SiiDte"` del `<DTE>` es parte del documento firmado
+> (se hereda al `<Documento>` al calcular el DigestValue). Si lo quita, el SII
+> recalcula el digest con el namespace y no coincide → rechazo por "firma inválida".
+> Ver [Certificación SII](#certificación-sii).
+
 > **Diferencia crítica por ambiente**
 >
 > - **Producción** → usar la API **REST** del SII (`enviarBoleta`) con los datos reales de resolución de la empresa.
