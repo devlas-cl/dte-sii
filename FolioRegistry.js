@@ -12,6 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { resolveDataDir } = require('./utils/paths');
 
 /**
  * Clase para manejar el registro de folios
@@ -28,7 +29,11 @@ class FolioRegistry {
     } else if (options.baseDir) {
       this.registryPath = path.join(options.baseDir, 'debug', 'folios.json');
     } else {
-      this.registryPath = path.resolve(__dirname, '..', '..', 'debug', 'folios.json');
+      // folios.json es estado FUNCIONAL (control de folios usados), no diagnóstico:
+      // si se pierde o se escribe en un lugar impredecible se pueden repetir folios
+      // ante el SII. Por eso el fallback es resolveDataDir() y no una ruta relativa
+      // a node_modules, que era donde caía `__dirname/../..`.
+      this.registryPath = path.join(resolveDataDir(), 'debug', 'folios.json');
     }
   }
 
@@ -414,7 +419,7 @@ class FolioRegistry {
       throw new Error(`findLatestCaf: ambiente inválido "${ambiente}"`);
     }
 
-    const base = baseDir || process.cwd();
+    const base = baseDir || resolveDataDir();
     
     // Buscar en estructura organizada: debug/caf/<ambiente>/<rut>/<tipoDte>/<fecha>/
     const rutClean = rutEmisor.replace(/\./g, '').toUpperCase();

@@ -20,6 +20,8 @@ const {
   getHost,
   createScopedLogger,
 } = require('./utils');
+const { resolveDebugDir, saveDebugFile } = require('./utils/paths');
+const { registrarHttpDebug } = require('./utils/httpDebug');
 
 const log = createScopedLogger('SiiSession');
 
@@ -34,6 +36,8 @@ class SiiSession {
    * @param {string} [options.pfxPath] - Ruta al archivo PFX
    * @param {string} [options.pfxPassword] - Contraseña del PFX
    * @param {Object} [options.certificado] - Instancia de Certificado
+   * @param {string} [options.debugDir] - Dónde escribir HTML de diagnóstico. Si no se
+   *   provee cae a `SII_DEBUG_DIR`; si tampoco existe, no se escribe nada.
    */
   constructor(options = {}) {
     // Validar parámetros obligatorios usando validador centralizado
@@ -41,9 +45,10 @@ class SiiSession {
       throw new Error('SiiSession: options.ambiente es obligatorio');
     }
     this.ambiente = validateAmbiente(options.ambiente);
-    
+
     // Usar host centralizado desde endpoints
     this.baseHost = getHost(this.ambiente);
+    this.debugDir = options.debugDir || null;
     this.cookieJar = '';
     this.tlsOptions = null;
     // Agent nativo con el certificado + flags TLS legacy del SII. got no reenvía
@@ -204,6 +209,7 @@ class SiiSession {
    * @private
    */
   async _doRequest(url, options, isPost) {
+    const _t0 = Date.now();
     const res = await got(url, {
       method: options.method || 'GET',
       headers: {
@@ -256,6 +262,21 @@ class SiiSession {
     } else {
       bodyStr = buffer.toString('utf8');
     }
+
+    // Punto único por el que pasa TODO el tráfico de SiiSession: cada salto de
+    // redirect, cada submit de formulario y cada reintento. Enganchar acá cubre a
+    // SiiCertificacion, CertRunner, CafSolicitor, FolioService, BoletaCert y
+    // SetsProvider sin tocar ninguno.
+    registrarHttpDebug({
+      url,
+      method: options.method || 'GET',
+      status: res.statusCode,
+      headers: res.headers,
+      body: bodyStr,
+      reqBody: options.body,
+      ms: Date.now() - _t0,
+      cliente: 'SiiSession',
+    });
 
     return {
       status: res.statusCode,
@@ -352,14 +373,11 @@ class SiiSession {
   async _tryForceCloseSessions(body) {
     if (!body || !body.includes('superado el m')) return false;
 
-    // Guardar HTML para diagnóstico
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const dbgDir = path.resolve(__dirname, '..', 'el consumidor', 'debug', 'sii-sessions');
-      fs.mkdirSync(dbgDir, { recursive: true });
-      fs.writeFileSync(path.join(dbgDir, `demasiadas-sesiones-${Date.now()}.html`), body, 'utf-8');
-    } catch (_) {}
+    // Guardar HTML para diagnóstico — solo si el consumidor definió dónde.
+    // Antes esto apuntaba a `../el consumidor/debug/sii-sessions`: la librería
+    // nombraba a un repo consumidor y asumía que estaba como carpeta hermana, así que
+    // en cualquier otra instalación escribía en un lugar inesperado o fallaba en silencio.
+    saveDebugFile(resolveDebugDir(this.debugDir), `demasiadas-sesiones-${Date.now()}.html`, body);
 
     // El SII a veces incluye un form o link para cerrar sesiones anteriores
     // Buscamos: action con "CierraAnt", "cerrar", "logout" o "Anular"

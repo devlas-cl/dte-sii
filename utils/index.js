@@ -52,6 +52,7 @@ const {
 // Sanitización
 const {
   sanitizeSiiText,
+  sanitizeTedText,
   truncateText,
   sanitizeGiroRecep,
   sanitizeRazonSocial,
@@ -176,6 +177,7 @@ module.exports = {
   // Sanitización
   // ─────────────────────────────────────────
   sanitizeSiiText,
+  sanitizeTedText,
   truncateText,
   sanitizeGiroRecep,
   sanitizeRazonSocial,

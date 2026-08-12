@@ -17,6 +17,7 @@
 
 const SiiSession = require('./SiiSession.js');
 const { STEPS, emitProgress } = require('./utils/progress');
+const { resolveArtifactDir } = require('./utils/paths');
 
 /** Decodifica entidades HTML latinas (el portal SII las usa en vez de UTF-8 crudo) y limpia
  * tags/whitespace, para poder aplicar regex de texto sobre las respuestas de forma confiable. */
@@ -83,11 +84,18 @@ class SiiCertificacion {
 
     this.rutEmpresa = options.rutEmpresa.replace(/\./g, '');
     this.dvEmpresa = options.dvEmpresa.toUpperCase();
-    
+
+    // Un solo lugar donde se decide dónde escribir. Antes había 7 call sites que
+    // recalculaban la ruta a mano, y no coincidían entre sí: cuatro usaban
+    // `../../debug/cert-v2` y tres `../../debug`, así que archivos de la misma
+    // operación quedaban repartidos en dos carpetas distintas.
+    this.debugDir = resolveArtifactDir(options.debugDir, options.debugDir ? '' : 'cert-v2');
+
     this.session = new SiiSession({
       pfxPath: options.pfxPath,
       pfxPassword: options.pfxPassword,
       ambiente: 'certificacion',
+      debugDir: this.debugDir,
     });
 
     // Reutilización de sesión: cargar desde archivo y guardar automáticamente tras cada login
@@ -632,7 +640,7 @@ class SiiCertificacion {
       {
         const fs = require('fs');
         const path = require('path');
-        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
+        const debugDir = this.debugDir;
         if (!fs.existsSync(debugDir)) {
           fs.mkdirSync(debugDir, { recursive: true });
         }
@@ -789,7 +797,7 @@ class SiiCertificacion {
         // Guardar respuesta de pe_avance3 para debug
         const fs = require('fs');
         const path = require('path');
-        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug');
+        const debugDir = this.debugDir;
         if (!fs.existsSync(debugDir)) {
           fs.mkdirSync(debugDir, { recursive: true });
         }
@@ -822,6 +830,38 @@ class SiiCertificacion {
         errorMsg = 'Respuesta inválida al declarar avance';
       }
 
+      // ── Datos inconsistentes: error DEFINITIVO, no "todavía no" ────────────
+      //
+      // El SII contesta 200 con una página normal que dice, entre los antecedentes del
+      // set, "FECHA NO CORRESPONDE AL ENVIO". No es un error de sesión ni de contenido,
+      // así que caía en el camino de éxito: la verificación posterior encontraba los
+      // campos vacíos, el bucle reintentaba 10 veces y después el polling seguía hasta
+      // agotar el timeout de la etapa. Minutos quemados esperando algo imposible, y sin
+      // que el mensaje real del SII llegara nunca al usuario.
+      //
+      // Esta ruta la comparten declarar avance, libros y simulación, así que detectarlo
+      // acá los cubre a los tres.
+      //
+      // La causa habitual es la zona horaria: los runners arman las fechas con
+      // `new Date().getDate()`, que usa la TZ del proceso. Corriendo en UTC, entre las
+      // 20:00 y las 00:00 de Chile ya es el día siguiente y se declara con la fecha de
+      // mañana. Por eso `TZ=America/Santiago` es obligatorio (ver CLAUDE.md).
+      const _inconsistencia = body.replace(/<[^>]*>/g, ' ')
+        .match(/((?:FECHA|RUT|FOLIO|NUMERO|N[UÚ]MERO)[^.<]{0,40}?NO\s+(?:CORRESPONDE|COINCIDE)[^.<]{0,40})/i);
+      if (_inconsistencia) {
+        const _detalle = _inconsistencia[1].replace(/\s+/g, ' ').trim();
+        return {
+          success: false,
+          datoInconsistente: true,
+          error: `El SII rechazó la declaración: ${_detalle}. Los datos declarados no coinciden con lo que el SII tiene registrado del envío; corrígelos y vuelve a declarar (esperar no lo resuelve).`,
+          status: declareResponse.status,
+          rawHtml: body,
+          formHtml,
+          setsDeclarados: Object.keys(sets),
+          formDataSent: formData,
+        };
+      }
+
       // Éxito si el form se envió sin errores de sesión/contenido.
       // El estado del envío (ERRORES O REPAROS / EN REVISION / REVISADO CONFORME)
       // NO determina el éxito de la declaración — eso se resuelve vía polling.
@@ -843,7 +883,7 @@ class SiiCertificacion {
       {
         const fs = require('fs');
         const path = require('path');
-        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
+        const debugDir = this.debugDir;
         if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
         fs.writeFileSync(path.join(debugDir, 'pe_avance3_response.html'), body, 'utf8');
 
@@ -868,7 +908,7 @@ class SiiCertificacion {
         {
           const fs = require('fs');
           const path = require('path');
-          const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
+          const debugDir = this.debugDir;
           if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
           fs.writeFileSync(path.join(debugDir, 'pe_avance2_verify.html'), verifyHtml, 'utf8');
 
@@ -1027,7 +1067,7 @@ class SiiCertificacion {
       if (process.env.DEBUG_SII) {
         const fs = require('fs');
         const path = require('path');
-        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug');
+        const debugDir = this.debugDir;
         if (!fs.existsSync(debugDir)) {
           fs.mkdirSync(debugDir, { recursive: true });
         }
@@ -1053,7 +1093,7 @@ class SiiCertificacion {
       if (process.env.DEBUG_SII) {
         const fs = require('fs');
         const path = require('path');
-        const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug');
+        const debugDir = this.debugDir;
         if (!fs.existsSync(debugDir)) {
           fs.mkdirSync(debugDir, { recursive: true });
         }
@@ -1201,7 +1241,7 @@ class SiiCertificacion {
     try {
       const fs = require('fs');
       const path = require('path');
-      const debugDir = process.env.SII_DEBUG_DIR || path.join(__dirname, '../../debug/cert-v2');
+      const debugDir = this.debugDir;
       if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
       fs.writeFileSync(path.join(debugDir, filename), body || '', 'utf8');
     } catch (_e) { /* debug best-effort, no bloquear el flujo real */ }
@@ -1475,6 +1515,13 @@ class SiiCertificacion {
           esReparos:   upper.includes('REPAROS'),
           porRealizar: upper.includes('POR REALIZAR'),
           esAnulado:   upper.includes('ANULADO'),
+          // Estados que NO se resuelven esperando: el dato declarado no cuadra con lo
+          // que el SII tiene registrado, así que hay que corregirlo y volver a declarar.
+          // Sin esta categoría caían en el limbo (ni conforme, ni en revisión, ni
+          // rechazado) y el polling seguía hasta agotar el timeout de la etapa.
+          // Caso real: "FECHA NO CORRESPONDE AL ENVIO" cuando el proceso corre en UTC
+          // y declara con la fecha del día siguiente (ver TZ en docker-compose.yml).
+          datoInconsistente: /NO CORRESPONDE|NO COINCIDE|FECHA INVALIDA/i.test(upper),
         };
       }
     }
@@ -1540,7 +1587,9 @@ class SiiCertificacion {
         : result.estados;
 
       const todosConformes = Object.values(estadosRelevantes).every(e => e.esConforme);
-      const algunoRechazado = Object.values(estadosRelevantes).some(e => e.esRechazado);
+      // `datoInconsistente` cuenta como rechazo: seguir esperando no lo arregla.
+      const algunoRechazado = Object.values(estadosRelevantes)
+        .some(e => e.esRechazado || e.datoInconsistente);
 
       if (onProgress) {
         onProgress({ intento, maxIntentos, estado: 'resultado', estados: estadosRelevantes });
@@ -1559,7 +1608,7 @@ class SiiCertificacion {
         // sin decir cuál set ni con qué estado. Se nombran solo los rechazados
         // para no ahogar el dato entre los que sí pasaron.
         const detalle = Object.values(estadosRelevantes)
-          .filter(e => e.esRechazado)
+          .filter(e => e.esRechazado || e.datoInconsistente)
           .map(e => `${e.nombre}: ${e.estado}`)
           .join('; ');
         return {

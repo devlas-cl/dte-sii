@@ -19,6 +19,7 @@ const SiiSession = require('./SiiSession');
 const SiiPortalAuth = require('./SiiPortalAuth');
 const SiiSessionStore = require('./SiiSessionStore');
 const { splitRut } = require('./utils/rut');
+const { resolveDataDir } = require('./utils/paths');
 
 /**
  * Registro global de sesiones SII (singleton por ambiente+rut).
@@ -58,7 +59,9 @@ class CafSolicitor {
 
     this.ambiente = options.ambiente.toLowerCase();
     this.rutEmisor = options.rutEmisor;
-    this.baseDir = options.baseDir || path.resolve(__dirname, '..', '..');
+    // Fallback neutral: antes era `__dirname/../..`, que en una instalación normal
+    // apunta dentro de node_modules — se escribían CAFs dentro de node_modules.
+    this.baseDir = options.baseDir || resolveDataDir();
     this.runStamp = options.runStamp || new Date().toISOString().replace(/[:.]/g, '-');
 
     // pfxBuffer tiene prioridad sobre pfxPath para evitar I/O a disco
@@ -280,7 +283,7 @@ class CafSolicitor {
    *   la simulación de certificación.
    * @returns {Promise<Object>} - { success, cafPath, xml, maxAutor, foliosDisp, error, errorCode }
    */
-  async solicitar({ tipoDte, cantidad = 1, minCantidad = null }) {
+  async solicitar({ tipoDte, cantidad = 1, minCantidad = null, soloConsultarTope = false }) {
     const { numero: rut, dv } = splitRut(this.rutEmisor);
     const debugDir = this._getDebugDir(tipoDte);
 
@@ -289,6 +292,10 @@ class CafSolicitor {
     this._lastFoliosDisp = null;
     this._maxAutorInsuficiente = false;
     this._minCantidad = minCantidad;
+    // Modo sondeo: recorre el flujo solo hasta el formulario que expone MAX_AUTOR y
+    // corta ahí, sin emitir nada. Permite saber si el SII está racionando este tipo
+    // ANTES de decidir si vale la pena anular folios.
+    this._soloConsultarTope = soloConsultarTope;
 
     // Rate limiting: mínimo 1001ms entre solicitudes para no saturar el portal SII.
     const _now = Date.now();
@@ -654,6 +661,13 @@ class CafSolicitor {
     // quien necesita N folios exactos (ej. simulación de certificación): el CAF chico
     // no se usa, suma +1 a FOLIOS_DISP y empeora el tope en el próximo intento.
     // Por eso, si el llamador declaró un mínimo, se aborta ANTES de emitir.
+    if (this._soloConsultarTope) {
+      // Se leyó lo único que interesaba (MAX_AUTOR/FOLIOS_DISP). Cortar acá es lo que
+      // hace barato el sondeo y, sobre todo, lo deja sin efectos: no se confirma folio,
+      // no se emite CAF, no sube FOLIOS_DISP.
+      return response;
+    }
+
     if (tieneMaxAutor && this._minCantidad && maxAutor < this._minCantidad) {
       this._maxAutorInsuficiente = true;
       console.warn(

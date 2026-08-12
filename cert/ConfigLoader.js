@@ -11,6 +11,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const { resolveDataDir } = require('../utils/paths');
 
 /**
  * Carga configuración desde .env y retorna objetos estructurados
@@ -21,8 +22,9 @@ const fs = require('fs');
  * @returns {Object} Configuración estructurada { EMISOR, RECEPTOR, CERT_PATH, CERT_PASS, AMBIENTE, BASE_DIR, ... }
  */
 function loadConfig(options = {}) {
-  // Determinar baseDir
-  const baseDir = options.baseDir || path.resolve(__dirname, '..', '..', '..');
+  // Determinar baseDir. El fallback era `__dirname/../../..`, que asumía el layout de
+  // directorios del consumidor original (la lib dentro de un monorepo concreto).
+  const baseDir = options.baseDir || resolveDataDir();
   
   // Cargar .env (opcional — las vars pueden venir de process.env inyectadas por el proceso padre)
   const envPath = options.envPath || path.join(baseDir, '.env');

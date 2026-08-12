@@ -15,6 +15,10 @@
  */
 
 const forge = require('node-forge');
+const { fetchRegistrado } = require('./utils/httpDebug');
+
+/** `fetchRegistrado` con el cliente ya fijado, para no repetirlo en cada llamada. */
+const fetchRegistradoWs = (url, opciones) => fetchRegistrado(url, opciones, 'WsReclamo');
 const {
   SOAP_ENDPOINTS,
   WSRECLAMO_ENDPOINTS,
@@ -82,14 +86,13 @@ class WsReclamo {
   <soapenv:Body><getSeed/></soapenv:Body>
 </soapenv:Envelope>`;
 
-    const res = await fetch(this._seedUrl, {
+    const { response: res, text: xml } = await fetchRegistradoWs(this._seedUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: '' },
       body: envelope,
     });
     if (!res.ok) throw siiError(`Error semilla: ${res.status}`, ERROR_CODES.SII_CONNECTION_FAILED);
 
-    const xml = await res.text();
     const semilla = extractTagContent(decodeXmlEntities(xml), 'SEMILLA');
     if (!semilla) throw siiError('No se obtuvo semilla del SII', ERROR_CODES.SII_INVALID_RESPONSE);
     return semilla;
@@ -114,14 +117,13 @@ class WsReclamo {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-    const res = await fetch(this._tokenUrl, {
+    const { response: res, text: xml } = await fetchRegistradoWs(this._tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: '' },
       body: envelope,
     });
     if (!res.ok) throw siiError(`Error token: ${res.status}`, ERROR_CODES.SII_CONNECTION_FAILED);
 
-    const xml = await res.text();
     const decoded = xml.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
     const token = extractTagContent(decoded, 'TOKEN');
     if (!token) throw siiError('No se obtuvo TOKEN del SII', ERROR_CODES.SII_AUTH_FAILED);
@@ -247,7 +249,7 @@ class WsReclamo {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-    const res = await fetch(this._wsUrl, {
+    const { response: res, text: xml } = await fetchRegistradoWs(this._wsUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'text/xml; charset=utf-8',
@@ -268,7 +270,6 @@ class WsReclamo {
       throw siiError(`WSRECLAMO ${metodo}: HTTP ${res.status}`, ERROR_CODES.SII_CONNECTION_FAILED);
     }
 
-    const xml = await res.text();
     return xml;
   }
 

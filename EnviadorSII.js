@@ -16,6 +16,7 @@ const https  = require('https');
 const crypto = require('crypto');
 const forge  = require('node-forge');
 const FormData = require('form-data');
+const { registrarHttpDebug, fetchRegistrado } = require('./utils/httpDebug');
 const { 
   saveEnvioArtifacts,
   siiError,
@@ -39,6 +40,9 @@ const {
 } = require('./utils');
 
 const log = createScopedLogger('EnviadorSII');
+
+/** `fetchRegistrado` con el cliente ya fijado, para no repetirlo en cada llamada. */
+const fetchRegistradoSII = (url, opciones) => fetchRegistrado(url, opciones, 'EnviadorSII');
 
 class EnviadorSII {
   /**
@@ -113,11 +117,16 @@ class EnviadorSII {
           crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION |
           crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
       };
+      const _t0 = Date.now();
       const req = https.request(opts, (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('latin1');
+          registrarHttpDebug({
+            url: urlStr, method: 'POST', status: res.statusCode, headers: res.headers,
+            body: text, reqBody: buf.toString('latin1'), ms: Date.now() - _t0, cliente: 'EnviadorSII',
+          });
           resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text });
         });
       });
@@ -138,7 +147,7 @@ class EnviadorSII {
   async getSemilla() {
     const url = this.urls[this.ambiente].semilla;
     
-    const response = await fetch(url, {
+    const { response, text: xml } = await fetchRegistradoSII(url, {
       method: 'GET',
       headers: {
         'Accept': 'application/xml',
@@ -148,8 +157,7 @@ class EnviadorSII {
     if (!response.ok) {
       throw new Error(`Error obteniendo semilla: ${response.status}`);
     }
-    
-    const xml = await response.text();
+
     // Usar parser centralizado
     const data = parseXml(xml);
     
@@ -184,7 +192,7 @@ class EnviadorSII {
     
     const url = this.urls[this.ambiente].token;
     
-    const response = await fetch(url, {
+    const { response, text: xml } = await fetchRegistradoSII(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/xml',
@@ -194,11 +202,9 @@ class EnviadorSII {
     });
     
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Error obteniendo token: ${response.status} - ${errorText}`);
+      throw new Error(`Error obteniendo token: ${response.status} - ${xml}`);
     }
-    
-    const xml = await response.text();
+
     // Usar parser centralizado con namespaces removidos
     const data = parseXmlNoNs(xml);
     
@@ -503,9 +509,17 @@ class EnviadorSII {
         },
       }, (res) => {
         let data = '';
+        const _t0 = Date.now();
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
           log.log('HTTP Status:', res.statusCode);
+          // Es LA llamada que sube el DTE/BOLETA al SII. Se registra el multipart completo
+          // (incluye el XML enviado) porque cuando el SII rechaza, el motivo está ahí.
+          registrarHttpDebug({
+            url, method: 'POST', status: res.statusCode, headers: res.headers,
+            body: data, reqBody: formBuffer.toString('latin1'),
+            ms: Date.now() - _t0, cliente: 'EnviadorSII',
+          });
           resolve({ text: data, status: res.statusCode });
         });
       });
@@ -586,9 +600,17 @@ class EnviadorSII {
         },
       }, (res) => {
         let data = '';
+        const _t0 = Date.now();
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
           log.log('HTTP Status:', res.statusCode);
+          // Es LA llamada que sube el DTE/BOLETA al SII. Se registra el multipart completo
+          // (incluye el XML enviado) porque cuando el SII rechaza, el motivo está ahí.
+          registrarHttpDebug({
+            url, method: 'POST', status: res.statusCode, headers: res.headers,
+            body: data, reqBody: formBuffer.toString('latin1'),
+            ms: Date.now() - _t0, cliente: 'EnviadorSII',
+          });
           resolve({ text: data, status: res.statusCode });
         });
       });
@@ -700,7 +722,7 @@ class EnviadorSII {
     
     log.log('Consultando estado:', url);
     
-    const response = await fetch(url, {
+    const { response, text: responseText } = await fetchRegistradoSII(url, {
       method: 'GET',
       headers: {
         'Cookie': `TOKEN=${this.token}`,
@@ -708,8 +730,6 @@ class EnviadorSII {
         'User-Agent': 'Mozilla/4.0 ( compatible; PROG 1.0; Windows NT)',
       },
     });
-    
-    const responseText = await response.text();
     log.log('Respuesta estado:', responseText);
     
     if (!response.ok) {

@@ -35,6 +35,8 @@ npm install @devlas/dte-sii
 - [Referencia de clases](#referencia-de-clases)
 - [Estructura de archivos](#estructura-de-archivos)
 - [Certificación SII](#certificación-sii)
+- [Depuración: captura de llamadas al SII](#depuración-captura-de-llamadas-al-sii)
+- [Ambientes](#ambientes)
 - [Licencia](#licencia)
 
 ---
@@ -884,6 +886,45 @@ const { CertFolioHelper } = require('@devlas/dte-sii')
 
 ---
 
+## Depuración: captura de llamadas al SII
+
+Cuando el SII rechaza algo, el motivo viene en el HTML o el XML que devuelve, y sin ese
+cuerpo guardado no hay forma de saber qué pasó. `utils/httpDebug.js` graba **todas** las
+llamadas HTTP de la librería.
+
+Está **apagado por defecto**: solo actúa si defines `SII_HTTP_DEBUG_DIR`. Sin esa variable
+el costo es una comparación por request, así que se puede dejar el código como está en
+producción.
+
+```bash
+SII_HTTP_DEBUG_DIR=/tmp/sii-debug node tu-script.js
+```
+
+Deja en ese directorio:
+
+```
+001-POST-DTEUpload-200.html          <- respuesta (cabecera con URL, status, ms, cliente)
+001-POST-DTEUpload-200-request.txt   <- cuerpo enviado, si supera 2000 caracteres
+index.jsonl                          <- una línea por llamada, para grep/jq
+```
+
+```bash
+# ¿Qué llamadas hizo y cuánto tardó cada una?
+jq -r '"\(.n) \(.method) \(.url) -> \(.status) \(.ms)ms [\(.cliente)]"' /tmp/sii-debug/index.jsonl
+```
+
+Cubre los cinco clientes HTTP de la librería, que son independientes entre sí: `SiiSession`,
+`SiiPortalAuth`, `EnviadorSII`, `CertRunner`/`BoletaCert` y `WsReclamo`.
+
+**Se redactan** `set-cookie`, `cookie`, `authorization` y `<RSASK>` (la llave privada RSA del
+CAF). Aun así, el resto del contenido son documentos tributarios: trata ese directorio como
+material sensible y púrgalo.
+
+Para dirigir la captura por etapa, redefine la variable antes de cada bloque: se lee en cada
+llamada, no una sola vez al cargar el módulo.
+
+---
+
 ## Ambientes
 
 | Ambiente | Constante | Descripción |
@@ -892,6 +933,27 @@ const { CertFolioHelper } = require('@devlas/dte-sii')
 | `'produccion'` | - | Apunta a `palena.sii.cl` - producción real |
 
 > Siempre verifica la variable de entorno `SII_AMBIENTE` (o el parámetro `ambiente`) antes de ejecutar código DTE para evitar envíos accidentales a producción.
+
+### `TZ` es obligatoria
+
+Define `TZ=America/Santiago` en el proceso que use esta librería.
+
+`CertRunner` construye fechas con la hora local al declarar avance y libros. Con el proceso
+en UTC, entre las ~20:00 y medianoche de Chile genera la fecha del **día siguiente**: un
+envío registrado el día 11 se declara como del 12 y el SII responde *"FECHA NO CORRESPONDE
+AL ENVIO"*, dejando el flujo esperando algo que nunca va a llegar.
+
+> Para comprobarlo no sirve `date`: dentro de un contenedor sin `tzdata` **miente**. Usa
+> `node -e "console.log(new Date().toString())"`.
+
+### Acentos en el timbre (TED)
+
+El lector de PDF417 del SII pierde los bytes ≥ 128: `Cajón` llega como `Cajnn` y el timbre no
+valida. Por eso `DTE` normaliza a ASCII `RznSocRecep` y `NmbItem` **solo dentro del TED**,
+antes de firmarlo.
+
+El cuerpo del DTE conserva las tildes: el documento impreso y el XML que recibe el receptor
+se ven correctos. Si generas el PDF417 por tu cuenta, respeta esa misma regla.
 
 ---
 

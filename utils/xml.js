@@ -10,6 +10,7 @@
 
 const { XMLParser, XMLBuilder } = require('fast-xml-parser');
 const { safeSegment } = require('./sanitize');
+const { resolveDataDir } = require('./paths');
 
 // ============================================
 // PARSERS SINGLETON (evita múltiples instancias)
@@ -276,8 +277,9 @@ function saveEnvioArtifacts({
     const tipoDte = meta.items.length === 1 ? meta.items[0]?.tipoDTE : 'multiple';
     const folio = meta.items.length === 1 ? meta.items[0]?.folio : null;
 
-    // Usar baseDir si se proporciona, sino raíz de static/nodejs como fallback
-    const effectiveBase = baseDir || path.resolve(__dirname, '..', '..', '..');
+    // El fallback era `__dirname/../../..`, una ruta que solo tenía sentido con un
+    // layout de directorios concreto del consumidor original.
+    const effectiveBase = baseDir || resolveDataDir();
     const historicoBaseDir = path.join(effectiveBase, 'historicos');
     const rutDir = safeSegment(meta.rutEmisor || 'sin-rut');
     const tipoDir = safeSegment(`dte-${tipoDte || 'sin-tipo'}`);

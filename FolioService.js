@@ -15,6 +15,7 @@ const SiiSession = require('./SiiSession');
 const FolioRegistry = require('./FolioRegistry');
 const CAF = require('./CAF');
 const CafSolicitor = require('./CafSolicitor');
+const { resolveDataDir } = require('./utils/paths');
 
 /**
  * Clase para gestión integral de folios
@@ -51,11 +52,28 @@ class FolioService {
 
     this.ambiente = options.ambiente;
     this.rutEmisor = options.rutEmisor;
-    this.baseDir = options.baseDir || path.resolve(__dirname, '..', '..');
+    // Fallback neutral: antes era `__dirname/../..`, que en una instalación normal
+    // apunta dentro de node_modules — se escribían artefactos dentro de la propia
+    // carpeta de dependencias.
+    this.baseDir = options.baseDir || resolveDataDir();
     
     // Directorios
     this.cafDir = options.cafDir || path.join(this.baseDir, 'debug', 'auto-caf');
     this.debugDir = options.debugDir || path.join(this.baseDir, 'debug');
+    /**
+     * Estado que debe SOBREVIVIR a la corrida, separado de `debugDir`.
+     *
+     * Acá vive el registro de folios que el SII ya reportó como anulados
+     * (`folios-anulados-{rut}-{tipo}.json`). Guardarlo en `debugDir` — que es por
+     * corrida — lo volvía inútil: nacía vacío en cada ejecución y se volvían a
+     * intentar anular los mismos folios una y otra vez.
+     *
+     * Medido el 11/08/2026 en una empresa con muchas pruebas encima: 87 intentos de
+     * anulación en una sola etapa, **0 anulados y 87 rechazados por "ya anulado"**.
+     * Como el camino bulk falla y cae a folio-a-folio, cada intento cuesta 2 requests
+     * al SII: varios minutos de la corrida gastados en no hacer nada.
+     */
+    this.stateDir = options.stateDir || this.debugDir;
     
     // Sesión SII — priorizar reutilización para evitar bans del SII
     // Orden: (1) sesión explícita, (2) registro de CafSolicitor, (3) nueva sesión
@@ -289,6 +307,31 @@ class FolioService {
    *   usar para destrabar el tope. Ponerlo en false lo deja en modo consulta.
    * @returns {Promise<Object>} { ok, cafPath, otorgados, maxAutor, foliosDisp, errorCode, error }
    */
+  /**
+   * Consulta cuánto autoriza el SII para un tipo, SIN emitir nada.
+   *
+   * Recorre el flujo de timbraje solo hasta el formulario que expone MAX_AUTOR y
+   * FOLIOS_DISP, y corta ahí. Sirve para decidir si hace falta anular folios antes de
+   * pedir, en vez de anular siempre por las dudas.
+   *
+   * ⚠️ Ausencia de MAX_AUTOR no es cero: el SII **solo publica esos campos cuando está
+   * racionando** ese tipo de documento (verificado 2026-07-22: tras anular folios, los
+   * tipos 56 y 61 dejaron de exponerlos). Por eso se devuelve `sinTope: true`, que
+   * significa "el SII no está limitando", no "no se pudo leer".
+   *
+   * @returns {Promise<{ sinTope: boolean, maxAutor: number|null, foliosDisp: number|null }>}
+   */
+  async consultarTope({ tipoDte }) {
+    if (!this.cafSolicitor) {
+      throw new Error('FolioService: CafSolicitor no inicializado (se requiere pfxPath y pfxPassword)');
+    }
+    await this.cafSolicitor.solicitar({ tipoDte, cantidad: 1, soloConsultarTope: true });
+    const maxAutor   = this.cafSolicitor._lastMaxAutor ?? null;
+    const foliosDisp = this.cafSolicitor._lastFoliosDisp ?? null;
+    // `_lastFoliosDisp` queda en null justamente cuando el SII no publicó los campos.
+    return { sinTope: foliosDisp === null, maxAutor, foliosDisp };
+  }
+
   async solicitarCafExacto({ tipoDte, cantidad, permitirAnular = true }) {
     if (!this.cafSolicitor) {
       throw new Error('FolioService: CafSolicitor no inicializado (se requiere pfxPath y pfxPassword)');
@@ -525,7 +568,7 @@ class FolioService {
    */
   _anuladosPath(tipoDte) {
     const rutLimpio = String(this.rutEmisor || '').replace(/[^0-9kK]/g, '');
-    return path.join(this.debugDir, `folios-anulados-${rutLimpio}-${tipoDte}.json`);
+    return path.join(this.stateDir, `folios-anulados-${rutLimpio}-${tipoDte}.json`);
   }
 
   /** Set de claves "desde-hasta" que el SII ya reportó como anuladas. */
@@ -543,7 +586,7 @@ class FolioService {
 
   _guardarAnulados(tipoDte, set) {
     try {
-      fs.mkdirSync(this.debugDir, { recursive: true });
+      fs.mkdirSync(this.stateDir, { recursive: true });
       fs.writeFileSync(this._anuladosPath(tipoDte), JSON.stringify([...set]), 'utf8');
     } catch (err) {
       console.warn(`[FolioService] No se pudo persistir registro de anulados: ${err.message}`);
@@ -695,6 +738,11 @@ class FolioService {
         if (!yaConflicto) {
           const razon = this._parseAnulacionResult(bodyBulk).reason || 'error';
           rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: razon });
+          // Mismo criterio que en el camino folio-a-folio: solo se recuerdan los
+          // rechazos definitivos, no los transitorios.
+          if (razon === 'ya-anulado' || razon === 'recepcionado') {
+            yaAnulados.add(`${iniA}-${finA}`);
+          }
           console.warn(`[FolioService] ✗ Rango ${iniA}-${finA} rechazado: ${razon}`);
           continue;
         }
@@ -724,6 +772,17 @@ class FolioService {
           } else {
             const razon = this._parseAnulacionResult(bs).reason || 'error';
             rechazados.push({ folioDesde: folio, folioHasta: folio, count: 1, reason: razon });
+            // Un folio ya anulado, o ya recepcionado en un DTE enviado, NO va a volver
+            // a ser anulable nunca. Recordarlo es lo único que evita reintentarlo en
+            // cada corrida. Faltaba justo acá, en el camino folio-a-folio, que es donde
+            // caen casi todos los rechazos porque el bulk conflictúa siempre: en una
+            // etapa medida el 11/08/2026 se registró 1 rango de 33 rechazos, y los 32
+            // restantes se reintentaron desde cero en la corrida siguiente.
+            // `error-red`, `error-sii-500` y `desconocido` quedan fuera a propósito:
+            // son transitorios y sí conviene reintentarlos.
+            if (razon === 'ya-anulado' || razon === 'recepcionado') {
+              yaAnulados.add(`${folio}-${folio}`);
+            }
           }
         }
         console.log('');

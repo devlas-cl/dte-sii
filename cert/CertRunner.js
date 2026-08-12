@@ -16,6 +16,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { resolveArtifactDir } = require('../utils/paths');
+const { registrarHttpDebug } = require('../utils/httpDebug');
 
 // Core
 const { Certificado, EnvioDTE } = require('../index');
@@ -52,6 +54,7 @@ const { STEPS, emitProgress } = require('../utils/progress');
  * @property {Object} receptor - { rut, razon_social, giro, direccion, comuna, ciudad }
  * @property {string} [ambiente='certificacion']
  * @property {string} [debugDir]
+ * @property {string} [stateDir] - Estado que persiste entre corridas (periodo-libros, ltc-totales). Default: debugDir.
  * @property {string} [sessionPath]
  */
 
@@ -64,7 +67,28 @@ class CertRunner {
     
     this.config = config;
     this.ambiente = config.ambiente || 'certificacion';
-    this.debugDir = config.debugDir || path.join(process.cwd(), 'debug', 'cert-v2');
+    // El consumidor inyecta el directorio (ver utils/paths.resolveRunDir para el layout
+    // recomendado). El fallback ya no depende de process.cwd(), que cambiaba según desde
+    // dónde se lanzara el proceso y hacía impredecible dónde quedaban los artefactos.
+    this.debugDir = resolveArtifactDir(config.debugDir, config.debugDir ? '' : 'cert-v2');
+    /**
+     * Directorio del estado que SOBREVIVE a la corrida, separado de `debugDir`.
+     *
+     * `debugDir` es por corrida (y por etapa, cuando lo inyecta un orquestador): sirve
+     * para el rastro, que justamente se quiere aislado. Pero hay estado que NO es rastro
+     * y cuyo valor está en acumularse entre corridas — sobre todo `periodo-libros.json`,
+     * que guarda hasta qué período retrocedió la búsqueda de un mes contable abierto.
+     *
+     * Guardarlo en `debugDir` lo hacía frágil: si el proceso moría (timeout, SIGKILL)
+     * antes del volcado final al directorio estable, se perdía TODA la búsqueda y el
+     * intento siguiente arrancaba desde el mismo período de siempre. En una empresa con
+     * muchas pruebas encima, donde el SII rechaza decenas de períodos seguidos con "LNC
+     * - Libro Cerrado", eso significa no avanzar nunca por más que se reintente.
+     *
+     * Por defecto es `debugDir`, así que el comportamiento no cambia para quien no lo
+     * inyecte.
+     */
+    this.stateDir = config.stateDir || this.debugDir;
     this.sessionPath = config.sessionPath || path.join(this.debugDir, 'session.json');
     
     // Componentes (lazy init)
@@ -115,6 +139,9 @@ class CertRunner {
         pfxPath: this.config.certificado.path,
         pfxPassword: this.config.certificado.password,
         debugDir: this.debugDir,
+        // El registro de folios ya anulados debe sobrevivir a la corrida, o cada
+        // ejecución vuelve a intentar anular los mismos folios y los pierde igual.
+        stateDir: this.stateDir,
         sessionPath: this.sessionPath, // Usar sesión compartida
         retries: 3,
       });
@@ -260,8 +287,44 @@ class CertRunner {
     // Limpiar ANTES de pedir rompe ese espiral. Es seguro: solo se anulan folios
     // que el SII reporta como no recepcionados, y los que ya fueron anulados o
     // usados se rechazan sin efecto.
+    //
+    // Pero se limpia SOLO SI HACE FALTA (ver el sondeo dentro del loop). Hacerlo
+    // siempre era caro y casi nunca útil, y "se rechazan sin efecto" es engañoso: sin
+    // efecto en el SII, sí, pero cada rechazo cuesta requests y minutos de corrida.
     for (const tipoDte of Object.keys(cafRequired)) {
       try {
+        // ── ¿Hace falta limpiar? ────────────────────────────────────────────────
+        // Antes esto se ejecutaba SIEMPRE, y casi nunca servía. Medido el 11/08/2026
+        // en una corrida real: 87 intentos de anulación, 0 anulados, todos rechazados
+        // por "ya anulado" — mientras el SII autorizaba 73 folios de factura y solo
+        // hacían falta 4. Minutos de corrida y ~180 requests al SII para nada.
+        //
+        // El sondeo cuesta ~3 requests, no emite nada y responde la única pregunta
+        // que importa: ¿el SII está racionando este tipo?
+        const tope = await this.folioService.consultarTope({ tipoDte: Number(tipoDte) });
+        const necesarios = cafRequired[tipoDte];
+
+        // `sinTope` = el SII ni siquiera publica MAX_AUTOR, o sea no está limitando
+        // este tipo. Limpiar ahí es puro costo.
+        // Con tope publicado se exige un margen de 3x sobre lo necesario, no apenas
+        // lo justo: el racionamiento se endurece rápido y conviene actuar antes de
+        // quedar contra la pared, que es el bloqueo duro del que cuesta salir.
+        const holgado = tope.sinTope || (tope.maxAutor !== null && tope.maxAutor >= necesarios * 3);
+        if (holgado) {
+          console.log(
+            ` Tipo ${tipoDte}: sin limpieza previa — ` +
+            (tope.sinTope
+              ? 'el SII no está racionando este tipo'
+              : `MAX_AUTOR=${tope.maxAutor} para ${necesarios} folio(s) necesarios`)
+          );
+          continue;
+        }
+
+        console.warn(
+          `[CertRunner] Tipo ${tipoDte}: MAX_AUTOR=${tope.maxAutor} ajustado para ${necesarios} ` +
+          `folio(s) (FOLIOS_DISP=${tope.foliosDisp}) — limpiando folios sin usar...`
+        );
+
         // ACOTADA a propósito. Solo interesan los folios que ESTA certificación
         // timbró y dejó sin usar, que son de hoy. Sin el corte por antigüedad la
         // limpieza barre el historial completo de la empresa: en un RUT con
@@ -1364,7 +1427,7 @@ class CertRunner {
    * @returns {string} Período en formato YYYY-MM
    */
   _getPeriodoLibros() {
-    const stateFile = path.join(this.debugDir, 'periodo-libros.json');
+    const stateFile = path.join(this.stateDir, 'periodo-libros.json');
     
     // Cargar estado existente o crear nuevo
     let state = { periodo: null, lastRun: null };
@@ -1398,7 +1461,7 @@ class CertRunner {
    * @returns {string} Nuevo período
    */
   _decrementarPeriodoLibros() {
-    const stateFile = path.join(this.debugDir, 'periodo-libros.json');
+    const stateFile = path.join(this.stateDir, 'periodo-libros.json');
     const currentPeriodo = this._getPeriodoLibros();
     
     const [year, month] = currentPeriodo.split('-').map(Number);
@@ -1433,7 +1496,7 @@ class CertRunner {
    * @param {string} periodo - Período en formato YYYY-MM
    */
   resetPeriodoLibros(periodo) {
-    const stateFile = path.join(this.debugDir, 'periodo-libros.json');
+    const stateFile = path.join(this.stateDir, 'periodo-libros.json');
     const state = { periodo, lastRun: new Date().toISOString() };
     
     try {
@@ -1452,7 +1515,7 @@ class CertRunner {
    * @private
    */
   _guardarLtcTotales(periodo, tipo, resumen) {
-    const ltcFile = path.join(this.debugDir, 'ltc-totales.json');
+    const ltcFile = path.join(this.stateDir, 'ltc-totales.json');
     let data = {};
     try {
       if (fs.existsSync(ltcFile)) data = JSON.parse(fs.readFileSync(ltcFile, 'utf8'));
@@ -1475,7 +1538,7 @@ class CertRunner {
    * @private
    */
   _leerLtcTotales(periodo, tipo) {
-    const ltcFile = path.join(this.debugDir, 'ltc-totales.json');
+    const ltcFile = path.join(this.stateDir, 'ltc-totales.json');
     try {
       if (fs.existsSync(ltcFile)) {
         const data = JSON.parse(fs.readFileSync(ltcFile, 'utf8'));
@@ -2374,10 +2437,17 @@ class CertRunner {
           },
         };
         if (body) opts.headers['Content-Length'] = Buffer.byteLength(body);
+        const _t0 = Date.now();
         const req = https.request(opts, (res) => {
           let data = '';
           res.on('data', c => data += c);
-          res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
+          res.on('end', () => {
+            registrarHttpDebug({
+              url: urlStr, method, status: res.statusCode, headers: res.headers,
+              body: data, reqBody: body, ms: Date.now() - _t0, cliente: 'pfeInternet',
+            });
+            resolve({ status: res.statusCode, body: data, headers: res.headers });
+          });
         });
         req.on('error', reject);
         if (body) req.write(body);
@@ -2683,10 +2753,23 @@ class CertRunner {
           },
         };
         if (bodyBuf) opts.headers['Content-Length'] = bodyBuf.length;
+        const _t0 = Date.now();
         const req = https.request(opts, (res) => {
           const chunks = [];
           res.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-          res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers }));
+          res.on('end', () => {
+            const _body = Buffer.concat(chunks).toString('utf8');
+            // pdfdteInternet es un TERCER cliente HTTP, aparte de SiiSession y
+            // SiiPortalAuth: no pasa por ninguno de los dos hooks, así que todo el flujo
+            // de muestras impresas era invisible en el debug. Se notó el 11/08/2026, al
+            // quedar bloqueada la subida con un mensaje del SII que no aparecía en
+            // ninguna captura porque estas llamadas simplemente no se registraban.
+            registrarHttpDebug({
+              url: urlStr, method, status: res.statusCode, headers: res.headers,
+              body: _body, reqBody: body, ms: Date.now() - _t0, cliente: 'pdfdteInternet',
+            });
+            resolve({ status: res.statusCode, body: _body, headers: res.headers });
+          });
         });
         req.on('error', reject);
         if (bodyBuf) req.write(bodyBuf);
@@ -2817,15 +2900,17 @@ class CertRunner {
         } catch (_) {}
       }
 
-      let estado = null, numImpresos = null, fechaEnvio = null, revId = null;
+      // ⚠️ No se deduce la cantidad de documentos de la tabla: el string numérico corto
+      // que se tomaba como contador es en realidad el dígito verificador del RUT del
+      // usuario. Reportaba "8 documentos" con 41 subidos. Ver el mismo caso en
+      // _subirMuestrasImpresasPortal.
+      let estado = null, fechaEnvio = null, revId = null;
       if (table) {
         const estadoStr = table.find(s => typeof s === 'string' && /APROBADO|POR REVISAR|RECHAZADO|INGRESO|EN REVISI/i.test(s));
         const errorStr  = table.find(s => typeof s === 'string' && /El estado de la postulacion/i.test(s));
         const fechaStr  = table.find(s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s));
-        const nStr      = table.find(s => typeof s === 'string' && /^\d+$/.test(s) && +s > 0 && +s < 500);
         estado      = estadoStr ? estadoStr.toUpperCase() : (errorStr ? 'BLOQUEADO' : null);
         fechaEnvio  = fechaStr || null;
-        numImpresos = nStr ? parseInt(nStr, 10) : null;
       }
       // Fallback: regex directo en el body
       if (!estado) {
@@ -2839,7 +2924,7 @@ class CertRunner {
         let n = 0; for (const c of m[1]) n = n * 64 + GWT_B64_V.indexOf(c);
         if (n >= 100000 && n <= 9999999) { revId = n; break; }
       }
-      return { estado, revId, numImpresos, fechaEnvio };
+      return { estado, revId, fechaEnvio };
     } catch (err) {
       return { estado: null, error: err.message };
     }
@@ -2918,6 +3003,33 @@ class CertRunner {
     if (leeResp.status !== 200) throw new Error(`pdfdteInternet leeImpreso HTTP ${leeResp.status}`);
 
     // ── Parsear string table GWT (siempre antes de flags/version al final) ─────
+    /**
+     * Extrae el mensaje de error que el SII mete en la tabla de strings de GWT.
+     *
+     * ⚠️ El portal contesta HTTP 200 y `//OK` incluso cuando rechaza: el motivo viaja
+     * como una frase en castellano dentro de la tabla. Antes se buscaba UNA frase fija
+     * ("El estado de la postulacion"), así que cualquier otro rechazo pasaba de largo:
+     * `leeImpreso` lo leía como "no hay revisión previa" y seguía, y `creaLista` moría
+     * después con "no se pudo extraer ID de revisión de: //OK[0,0,2,...".
+     * Caso real (11/08/2026): "El contribuyente ... no ha solicitado Set de pruebas."
+     * venía en AMBAS respuestas y no se reportó en ninguna.
+     *
+     * El criterio es amplio a propósito: es preferible cortar mostrando el texto literal
+     * del SII que seguir a ciegas y fallar más adelante sin él.
+     */
+    const _mensajeErrorGwt = (body) => {
+      const tabla = _parseGwtStringTable(body);
+      if (!tabla) return null;
+      return tabla.find(x =>
+        typeof x === 'string' &&
+        x.length > 15 &&
+        // El resto de la tabla son nombres de clase Java y tipos GWT.
+        !/^[\w.$]+\/\d+$/.test(x) && !x.includes('cl.sii.sdi') &&
+        /\s/.test(x) &&
+        /(no ha|no est|no se|no corresp|debe |error|inv[aá]lid|rechaz|El estado|El contribuyente)/i.test(x)
+      ) || null;
+    };
+
     const _parseGwtStringTable = (body) => {
       const stIdx = body.lastIndexOf(',["');
       if (stIdx === -1) return null;
@@ -2936,10 +3048,11 @@ class CertRunner {
     const estadoActual = estadoMatch ? estadoMatch[1].toUpperCase() : null;
 
     // Detectar mensaje de error del SII: tabla parseada o regex directo en body (por si \x27 falla)
-    const errorEstadoMsg = !estadoActual && (
-      (leeTable && leeTable.find(s => typeof s === 'string' && /El estado de la postulacion/i.test(s))) ||
-      (() => { const m = leeResp.body.match(/"(El estado de la postulacion[^"\\]*(?:\\.[^"\\]*)*)"/i); return m ? m[1].replace(/\\x27/g, "'").replace(/\\x22/g, '"') : null; })()
-    );
+    // Sin estado, cualquier frase de error de la tabla es el motivo real. Antes solo se
+    // reconocía "El estado de la postulacion", así que "El contribuyente ... no ha
+    // solicitado Set de pruebas." se leía como "no hay revisión previa" y el flujo
+    // seguía hasta reventar en creaLista sin ese texto.
+    const errorEstadoMsg = !estadoActual && _mensajeErrorGwt(leeResp.body);
     if (errorEstadoMsg) {
       // OJO: el SII devuelve "El estado de la postulacion NO es: 'DOCUMENTOS IMPRESOS'" en DOS
       // situaciones distintas, y el mensaje no las distingue:
@@ -2959,20 +3072,23 @@ class CertRunner {
     // Si ya hay una revisión activa (no rechazada ni aprobada), no se puede re-subir.
     // El SII sólo permite crear nueva revisión cuando el estado es RECHAZADO o APROBADO.
     if (estadoActual && estadoActual !== 'RECHAZADO' && estadoActual !== 'APROBADO') {
-      // Extraer detalles adicionales de la respuesta leeImpreso para diagnóstico
-      let numImpresos = null, fechaEnvio = null, revId = null;
+      // Extraer detalles adicionales de la respuesta leeImpreso para diagnóstico.
+      //
+      // ⚠️ NO se intenta sacar de acá la cantidad de documentos. La tabla de strings trae
+      // el RUT del usuario partido en número y dígito verificador, y "buscar el primer
+      // string numérico menor a 500" agarraba ese DV: reportaba 8 documentos cuando se
+      // habían subido 41. Un dato inventado es peor que ninguno, así que se omite.
+      let fechaEnvio = null, revId = null;
       if (leeTable) {
         const fechaStr = leeTable.find(s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(s));
-        const nStr     = leeTable.find(s => typeof s === 'string' && /^\d+$/.test(s) && +s > 0 && +s < 500);
-        fechaEnvio  = fechaStr || null;
-        numImpresos = nStr ? parseInt(nStr, 10) : null;
+        fechaEnvio = fechaStr || null;
       }
       for (const m of leeResp.body.matchAll(/'([A-Za-z0-9$_]{3,7})'/g)) {
         let n = 0; for (const c of m[1]) n = n * 64 + GWT_B64.indexOf(c);
         if (n >= 100000 && n <= 9999999) { revId = n; break; }
       }
-      console.log(` → Estado: ${estadoActual}${revId ? ` | Revisión #${revId}` : ''}${fechaEnvio ? ` | Enviado: ${fechaEnvio}` : ''}${numImpresos ? ` | ${numImpresos} documentos` : ''} — ya enviadas, no se requiere re-subida`);
-      return { success: true, alreadyCompleted: true, estado: estadoActual, revId, numImpresos, fechaEnvio };
+      console.log(` → Estado: ${estadoActual}${revId ? ` | Revisión #${revId}` : ''}${fechaEnvio ? ` | Enviado: ${fechaEnvio}` : ''} — ya enviadas, no se requiere re-subida`);
+      return { success: true, alreadyCompleted: true, estado: estadoActual, revId, fechaEnvio };
     }
     if (estadoActual) {
       console.log(` → Estado previo: ${estadoActual} — creando nueva revisión`);
@@ -2991,11 +3107,22 @@ class CertRunner {
     if (creaResp.status !== 200 || !creaResp.body.startsWith('//OK')) {
       throw new Error(`pdfdteInternet creaLista falló HTTP ${creaResp.status}: ${creaResp.body.substring(0, 200)}`);
     }
-    // Detectar error de SII dentro del //OK (e.g. revisión en curso bloqueando)
-    const creaTable = _parseGwtStringTable(creaResp.body);
-    const creaErrorMsg = creaTable && creaTable.find(s => typeof s === 'string' && /El estado de la postulacion/i.test(s));
+    // Detectar error de SII dentro del //OK.
+    //
+    // ⚠️ El portal contesta HTTP 200 y `//OK` incluso cuando rechaza: el motivo viaja
+    // como una frase en castellano dentro de la tabla de strings de GWT. Antes acá se
+    // buscaba UNA sola frase ("El estado de la postulacion"), así que cualquier otro
+    // rechazo pasaba de largo, no se encontraba el ID de revisión y el usuario recibía
+    // "no se pudo extraer ID de revisión de: //OK[0,0,2,...".
+    // Caso real (11/08/2026): "El contribuyente 77111222-3 no ha solicitado Set de
+    // pruebas." quedó completamente oculto detrás de ese mensaje.
+    //
+    // Ahora se reconoce cualquier frase con pinta de mensaje al usuario. Es deliberado
+    // que el criterio sea amplio: es preferible cortar con el texto literal del SII que
+    // seguir a ciegas y fallar más adelante sin él.
+    const creaErrorMsg = _mensajeErrorGwt(creaResp.body);
     if (creaErrorMsg) {
-      throw new Error(`pdfdteInternet creaLista: ${creaErrorMsg} — Espere a que el SII procese la revisión en curso.`);
+      throw new Error(`El SII rechazó la subida de muestras: ${creaErrorMsg}`);
     }
 
     // Extraer ID de revisión (Long codificado en GWT base64, ej: 'BAqo' = 264872)
@@ -3065,9 +3192,47 @@ class CertRunner {
       fs.writeFileSync(path.join(debugDir, `pdfte-enviar-sii-resp.txt`), enviarResp.body, 'utf8');
     }
 
-    console.log(` ✓ Solicitud enviada al SII correctamente (${pdfPaths.length} PDFs, revisión ${revId})`);
+    // ── Paso 5: verificar en qué quedó la revisión ─────────────────────────
+    //
+    // ⚠️ `solicitaRevisionSII` devuelve `//OK[0,[],0,7]` (lista vacía) tanto si el SII
+    // acepta como si rechaza. Dar por buena la subida con solo ese OK es exactamente el
+    // error que se venía arrastrando: `pdfdteInternet` es el servicio **validaPdfDte**,
+    // un validador AUTOMÁTICO de formato, no una bandeja de revisores. Puede pasar la
+    // revisión a RECHAZADO en minutos.
+    //
+    // Caso real (11/08/2026): la revisión 271384 se creó 21:53, se subieron 41 PDFs, el
+    // envío devolvió OK, la etapa se marcó completada... y el portal ya la tenía
+    // RECHAZADO. El usuario quedó esperando "3 a 7 días hábiles" por algo que ya había
+    // fallado. Por eso se relee el estado y se devuelve tal cual.
+    let estadoPost = null;
+    try {
+      const verifResp = await gwtPost(leeBody);
+      const m = verifResp.body.match(/"(APROBADO|POR REVISAR|EN REVISI[OÓ]N|RECHAZADO|INGRESO|ENVIADO AL SII)"/i);
+      estadoPost = m ? m[1].toUpperCase() : null;
+      if (debugDir) {
+        fs.writeFileSync(path.join(debugDir, 'pdfte-estado-post-envio.txt'), verifResp.body, 'utf8');
+      }
+    } catch (e) {
+      // No poder confirmar no invalida el envío: se reporta como desconocido.
+      console.warn(` [!] No se pudo confirmar el estado tras el envío: ${e.message}`);
+    }
+
+    if (estadoPost === 'RECHAZADO') {
+      console.error(` [ERR] El SII RECHAZÓ la revisión ${revId} de muestras impresas.`);
+      return {
+        success: false,
+        rechazado: true,
+        revId,
+        estado: estadoPost,
+        error: `El SII rechazó las muestras impresas (revisión ${revId}). Revisa el detalle en el portal ` +
+               `de Muestras Impresas y corrige el formato de los documentos antes de volver a subirlos.`,
+      };
+    }
+
+    console.log(` ✓ Solicitud enviada al SII correctamente (${pdfPaths.length} PDFs, revisión ${revId})` +
+      (estadoPost ? ` — estado: ${estadoPost}` : ''));
     process.stdout.write('\nMUESTRAS SUBIDAS EXITOSAMENTE\n');
-    return { success: true, revId };
+    return { success: true, revId, estado: estadoPost };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -3130,7 +3295,19 @@ class CertRunner {
           'Content-Length': buf.length,
         },
         ...tlsOpts,
-      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      }, (res) => {
+        const ch = []; const _t0 = Date.now();
+        res.on('data', c => ch.push(c));
+        res.on('end', () => {
+          const _body = Buffer.concat(ch).toString('utf-8');
+          registrarHttpDebug({
+            url: `${CBE_BASE}facade`, method: 'POST', status: res.statusCode,
+            headers: res.headers, body: _body, reqBody: bodyStr,
+            ms: Date.now() - _t0, cliente: 'certBolElectDte',
+          });
+          resolve(_body);
+        });
+      });
       req.on('error', reject);
       req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE')); });
       req.write(buf); req.end();
@@ -3164,7 +3341,20 @@ class CertRunner {
           'Accept': 'text/plain,text/html,*/*',
         },
         ...tlsOpts,
-      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      }, (res) => {
+        const ch = []; const _t0 = Date.now();
+        res.on('data', c => ch.push(c));
+        res.on('end', () => {
+          const _body = Buffer.concat(ch).toString('utf-8');
+          // GET sin cuerpo: acá NO hay `bodyStr` (eso es de los gwtPost de más arriba).
+          registrarHttpDebug({
+            url: dlUrl, method: 'GET', status: res.statusCode,
+            headers: res.headers, body: _body,
+            ms: Date.now() - _t0, cliente: 'certBolElectDte',
+          });
+          resolve(_body);
+        });
+      });
       req.on('error', reject);
       req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout DownloadFileServlet boleta')); });
     });
@@ -3225,7 +3415,19 @@ class CertRunner {
           'Content-Length': buf.length,
         },
         ...tlsOpts,
-      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      }, (res) => {
+        const ch = []; const _t0 = Date.now();
+        res.on('data', c => ch.push(c));
+        res.on('end', () => {
+          const _body = Buffer.concat(ch).toString('utf-8');
+          registrarHttpDebug({
+            url: `${CBE_BASE}facade`, method: 'POST', status: res.statusCode,
+            headers: res.headers, body: _body, reqBody: bodyStr,
+            ms: Date.now() - _t0, cliente: 'certBolElectDte',
+          });
+          resolve(_body);
+        });
+      });
       req.on('error', reject);
       req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE')); });
       req.write(buf); req.end();
@@ -3286,7 +3488,19 @@ class CertRunner {
           'Content-Length': buf.length,
         },
         ...tlsOpts,
-      }, (res) => { const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => resolve(Buffer.concat(ch).toString('utf-8'))); });
+      }, (res) => {
+        const ch = []; const _t0 = Date.now();
+        res.on('data', c => ch.push(c));
+        res.on('end', () => {
+          const _body = Buffer.concat(ch).toString('utf-8');
+          registrarHttpDebug({
+            url: `${CBE_BASE}facade`, method: 'POST', status: res.statusCode,
+            headers: res.headers, body: _body, reqBody: bodyStr,
+            ms: Date.now() - _t0, cliente: 'certBolElectDte',
+          });
+          resolve(_body);
+        });
+      });
       req.on('error', reject);
       req.setTimeout(30000, () => { req.destroy(); reject(new Error('timeout gwtPost CBE')); });
       req.write(buf); req.end();

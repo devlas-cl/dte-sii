@@ -26,11 +26,12 @@ const https  = require('https');
 const http   = require('http');
 const fs     = require('fs');
 const path   = require('path');
-const os     = require('os');
 const { URL } = require('url');
 const forge  = require('node-forge');
 const crypto = require('crypto');
 const SiiSessionStore = require('./SiiSessionStore');
+const { resolveDataDir } = require('./utils/paths');
+const { registrarHttpDebug } = require('./utils/httpDebug');
 
 function _cookieObjToStr(obj) {
   return Object.entries(obj).map(([k, v]) => `${k}=${v}`).join('; ');
@@ -57,10 +58,12 @@ const SII_TLS_OPTS = {
 // ─── Ruta del caché de sesión ─────────────────────────────────────────────────
 // Guarda las cookies NETSCAPE_LIVEWIRE.* para reusar entre ejecuciones y evitar
 // el error "máximo de sesiones autenticadas" del SII.
-const SESSION_CACHE_PATH = path.join(
-  process.env.DATADIR || path.join(os.homedir(), 'AppData', 'Roaming', 'POS'),
-  'sii_session_cache.json'
-);
+//
+// El directorio lo define el consumidor vía DATADIR; el fallback es os.tmpdir(),
+// neutral respecto del sistema operativo. Antes caía a `~/AppData/Roaming/POS`,
+// una convención de un producto Windows específico hardcodeada en una librería
+// genérica de DTE — en Linux creaba esa ruta igual, porque Node no la valida.
+const SESSION_CACHE_PATH = path.join(resolveDataDir(), 'sii_session_cache.json');
 
 /**
  * Registro global de instancias SiiPortalAuth por certHash (singleton por certificado).
@@ -196,6 +199,7 @@ class SiiPortalAuth {
 
   _request(urlStr, { method = 'GET', cookieJar = {}, body = null, headers = {}, usarCert = false } = {}) {
     return new Promise((resolve, reject) => {
+      const _t0 = Date.now();
       const url = new URL(urlStr);
       const isHttps = url.protocol === 'https:';
 
@@ -248,7 +252,23 @@ class SiiPortalAuth {
           const encoding = /charset=utf-?8/i.test(ct)
             ? 'utf8'
             : (isSiiHost || /iso-8859|latin-1|windows-1252/i.test(ct)) ? 'latin1' : 'utf8';
-          resolve({ status: res.statusCode, headers: res.headers, body: buf.toString(encoding), cookieJar });
+          const bodyStr = buf.toString(encoding);
+
+          // Cliente HTTP independiente de SiiSession (https nativo, sin código en común):
+          // necesita su propio hook o quedarían fuera las llamadas del flujo de
+          // verificación de autorización, que hoy no dejan ningún rastro.
+          registrarHttpDebug({
+            url: urlStr,
+            method,
+            status: res.statusCode,
+            headers: res.headers,
+            body: bodyStr,
+            reqBody: body,
+            ms: Date.now() - _t0,
+            cliente: 'SiiPortalAuth',
+          });
+
+          resolve({ status: res.statusCode, headers: res.headers, body: bodyStr, cookieJar });
         });
       });
 
@@ -1035,6 +1055,111 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
       _instanceRegistry.delete(hash);
       SiiSessionStore.delete(hash);
     }
+  }
+
+  /**
+   * Autentica en el portal SII y devuelve los datos frescos del emisor
+   * (resolución + datos del contribuyente) ya normalizados, junto con el
+   * cookieJar de la sesión iniciada para reutilizarla.
+   *
+   * Es una operación completa del portal —autenticar, consultar dos endpoints,
+   * reintentar con sesión fresca si la cacheada quedó inservible y normalizar el
+   * resultado—, así que vive acá y no en el consumidor: no tiene ningún
+   * conocimiento del proyecto que la use.
+   *
+   * @param {Object} opts
+   * @param {Buffer} opts.pfxBuffer - Contenido del .pfx
+   * @param {string} [opts.pfxPassword] - Contraseña del .pfx
+   * @param {string} [opts.rutEmpresa] - RUT de la empresa (acepta puntos). Si no se
+   *   pasa, se intenta deducir de las cookies del portal tras autenticar.
+   * @param {Function} [opts.onAviso] - Callback para avisos no fatales (default: console.warn).
+   * @returns {Promise<{ emisor: Object, cookieJar: Object }>}
+   * @throws Si no puede autenticar, si el RUT es inválido o si faltan datos de resolución.
+   */
+  static async obtenerEmisor({ pfxBuffer, pfxPassword = '', rutEmpresa = '', onAviso } = {}) {
+    const aviso = onAviso || ((msg) => console.warn(msg));
+    const auth = new SiiPortalAuth({ pfxBuffer, pfxPassword });
+
+    // Se resuelve antes de autenticar para poder reintentar con sesión fresca.
+    let rutNum, dv;
+    if (rutEmpresa) {
+      const rutLimpio = String(rutEmpresa).replace(/\./g, '');
+      const match = rutLimpio.match(/^(\d+)-([0-9Kk])$/);
+      if (!match) {
+        throw new Error(`RUT empresa inválido: "${rutEmpresa}". Formato esperado: "77111222-3"`);
+      }
+      rutNum = match[1];
+      dv = match[2].toUpperCase();
+    }
+
+    let cookieJar = await auth.autenticar();
+
+    const rutDesdeCookies = (jar) => [
+      jar['NETSCAPE_LIVEWIRE.rutm'] || jar['NETSCAPE_LIVEWIRE.rut'] || null,
+      jar['NETSCAPE_LIVEWIRE.dvm'] || jar['NETSCAPE_LIVEWIRE.dv'] || null,
+    ];
+
+    if (!rutNum) {
+      [rutNum, dv] = rutDesdeCookies(cookieJar);
+      if (!rutNum || !dv) {
+        throw new Error(
+          'No se pudo determinar el RUT empresa desde las cookies del portal SII. ' +
+          'Indica el RUT explícitamente en opts.rutEmpresa.',
+        );
+      }
+    }
+
+    // Retry con sesión fresca: a veces la sesión cacheada pasa la validación básica
+    // pero ad_empresa2 devuelve otra página (ej. "Actualización de Datos del
+    // Contribuyente"). Secuencial a propósito: compartir el cookieJar en paralelo
+    // genera una race condition — ce_consulta_muestra_e puede sobreescribir la cookie
+    // Tivoli (TS0xxxxxxx) que ad_empresa1 dejó, y ad_empresa2 responde vacío.
+    let datosResol, datosContrib;
+    for (let intento = 1; intento <= 2; intento++) {
+      try {
+        datosResol = await auth.obtenerDatosEmpresa(rutNum, dv, cookieJar);
+        datosContrib = await auth.obtenerDatosContribuyente(rutNum, dv, cookieJar).catch((e) => {
+          aviso(`[SiiPortalAuth] obtenerDatosContribuyente falló (no crítico): ${e.message}`);
+          return null;
+        });
+        break;
+      } catch (e) {
+        if (intento === 1) {
+          aviso(`[SiiPortalAuth] Sesión cacheada inválida (${e.message}). Re-autenticando...`);
+          SiiPortalAuth.limpiarSesionCache();
+          cookieJar = await auth.autenticar();
+          if (!rutEmpresa) {
+            const [r, d] = rutDesdeCookies(cookieJar);
+            rutNum = r || rutNum;
+            dv = d || dv;
+          }
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    if (!datosResol?.fch_resol) {
+      throw new Error(
+        `No se encontraron datos de resolución para ${rutNum}-${dv} en el portal SII.\n` +
+        'Verifica que la empresa esté habilitada para emitir DTE.',
+      );
+    }
+
+    // fch_resol ya viene normalizada a YYYY-MM-DD desde obtenerDatosEmpresa
+    const emisor = {
+      rut:          `${rutNum}-${dv}`,
+      razon_social: datosContrib?.razonSocial || datosResol.razonSocial || '',
+      giro:         datosContrib?.actividades?.[0]?.descripcion || datosContrib?.glosa || '',
+      acteco:       datosContrib?.acteco || datosContrib?.actividades?.[0]?.codigo || '',
+      direccion:    datosContrib?.direccion || '',
+      comuna:       datosContrib?.comuna || '',
+      ciudad:       datosContrib?.ciudad || datosContrib?.comuna || '',
+      fch_resol:    datosResol.fch_resol,
+      nro_resol:    datosResol.nro_resol ?? 0,
+    };
+
+    return { emisor, cookieJar };
   }
 }
 

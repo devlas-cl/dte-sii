@@ -41,6 +41,53 @@ function sanitizeSiiText(text) {
 }
 
 /**
+ * Sanitizar texto que va DENTRO del TED (timbre electrónico).
+ *
+ * Además de lo que hace `sanitizeSiiText`, pliega los acentuados de Latin-1 a ASCII
+ * (á→a, ñ→n, Ü→U…).
+ *
+ * ⚠️ Esto NO es cosmético y no se puede omitir: **el lector de PDF417 del SII no
+ * devuelve los bytes ≥ 128 tal como se codificaron**. Medido contra el portal de
+ * Muestras Impresas el 11/08/2026 — el SII leyó del código de barras:
+ *
+ *     "Cajón AFECTO"    ->  "Cajnn AFECTO"
+ *     "Pañuelo AFECTO"  ->  "Pauuelo AFECTO"
+ *     "CIGUEÑALES"      ->  "CIGUEAALES"
+ *
+ * (el carácter acentuado se pierde y el siguiente se duplica). Como el TED viaja
+ * firmado, el SII verifica la firma sobre lo que ÉL leyó, no sobre lo que se codificó:
+ * cualquier documento con tilde o ñ en RSR o IT1 termina rechazado con
+ * "Error Tecnico: TED - Firma invalida", y basta uno para tumbar la revisión completa.
+ *
+ * Se descartó que fuera un problema nuestro de codificación: se verificó que la firma
+ * es válida sobre los bytes latin1, que el TED del envío y el del DTE son idénticos, y
+ * que bwip-js codifica el byte correctamente — el barcode generado con `binarytext`
+ * resultó idéntico al generado escapando el byte a mano (`^243` con `parse`).
+ *
+ * Solo aplica al TED. El DTE conserva el texto real con sus acentos: acá se pliega
+ * únicamente lo que va al código de barras, y se hace ANTES de firmar para que la
+ * firma cubra exactamente los bytes que el SII va a leer.
+ *
+ * @param {string} text - Texto a sanitizar (RSR o IT1 del TED)
+ * @returns {string} - Texto sin caracteres fuera de ASCII
+ */
+function sanitizeTedText(text) {
+  return sanitizeSiiText(text)
+    // Descompone en letra base + diacrítico y descarta el diacrítico.
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    // Lo que NFD no separa (ligaduras y símbolos con forma propia).
+    .replace(/[ﬀﬁﬂ]/g, m => ({ 'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl' })[m])
+    .replace(/Æ/g, 'AE').replace(/æ/g, 'ae')
+    .replace(/Ø/g, 'O').replace(/ø/g, 'o')
+    .replace(/Ð/g, 'D').replace(/ð/g, 'd')
+    .replace(/Þ/g, 'TH').replace(/þ/g, 'th')
+    .replace(/ß/g, 'ss')
+    // Red de seguridad: cualquier resto no-ASCII se elimina antes del barcode.
+    .replace(/[^\x20-\x7E]/g, '');
+}
+
+/**
  * Truncar texto a longitud máxima (preservando palabras completas si es posible)
  * 
  * @param {string} text - Texto a truncar
@@ -127,6 +174,7 @@ function safeSegment(value, fallback = 'sin-valor') {
 
 module.exports = {
   sanitizeSiiText,
+  sanitizeTedText,
   truncateText,
   sanitizeGiroRecep,
   sanitizeRazonSocial,

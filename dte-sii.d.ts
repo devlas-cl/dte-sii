@@ -615,10 +615,24 @@ export interface FolioServiceConfig {
   cafDir?: string;
 }
 
+export interface FolioTope {
+  /** true si el SII no publicó los campos de tope en el formulario. */
+  sinTope: boolean;
+  /** Máximo autorizado por el SII, o null si no vino. */
+  maxAutor: number | null;
+  /** Folios disponibles según el SII, o null si no vino. */
+  foliosDisp: number | null;
+}
+
 export class FolioService {
   constructor(config?: FolioServiceConfig);
   getNextFolio(tipoDte: number, rutEmisor: string, caf: CAF): Promise<number>;
   markFolioUsed(tipoDte: number, folio: number, rutEmisor: string): Promise<void>;
+  /**
+   * Lee el tope autorizado SIN solicitar folios. Permite decidir si hace falta
+   * anular antes de pedir, en vez de anular a ciegas.
+   */
+  consultarTope(options: { tipoDte: number }): Promise<FolioTope>;
 }
 
 export interface FolioRegistryOptions {
@@ -656,9 +670,34 @@ export class SiiSession {
   getToken(tipo?: 'soap' | 'rest'): Promise<string>;
 }
 
+export interface CafSolicitarOptions {
+  tipoDte: number;
+  cantidad?: number;
+  /** Mínimo aceptable si el SII autoriza menos de `cantidad`. */
+  minCantidad?: number | null;
+  /**
+   * Sondeo: llega hasta leer el tope autorizado y NO solicita folios.
+   * Sirve para decidir si hace falta anular antes de pedir, sin efectos secundarios.
+   */
+  soloConsultarTope?: boolean;
+}
+
+export interface CafSolicitarResult {
+  success: boolean;
+  xml?: string;
+  error?: string;
+  errorCode?: string;
+  folioDesde?: number;
+  folioHasta?: number;
+}
+
 export class CafSolicitor {
   constructor(config: object);
-  solicitar(tipoDte: number, cantidad?: number): Promise<string>;
+  /**
+   * ⚠️ Recibe un OBJETO, no argumentos posicionales. La declaración anterior
+   * (`solicitar(tipoDte, cantidad)`) no coincidía con la implementación.
+   */
+  solicitar(options: CafSolicitarOptions): Promise<CafSolicitarResult>;
 }
 
 // ============================================
@@ -698,6 +737,13 @@ export class CertFolioHelper {
 
 // Sanitizacion
 export function sanitizeSiiText(text: string): string;
+/**
+ * Normaliza a ASCII para el TED (timbre PDF417).
+ *
+ * El lector del SII pierde los bytes >= 128: `Cajón` llega como `Cajnn` y el timbre no
+ * valida. Se aplica SOLO a lo que entra al timbre — el cuerpo del DTE conserva las tildes.
+ */
+export function sanitizeTedText(text: string): string;
 export function truncateText(text: string, maxLen: number, preserveWords?: boolean): string;
 export function sanitizeGiroRecep(giro: string): string;
 export function sanitizeRazonSocial(razonSocial: string): string;
@@ -841,6 +887,7 @@ export function createTlsOptions(certificado: Certificado): object;
 
 export const utils: {
   sanitizeSiiText: typeof sanitizeSiiText;
+  sanitizeTedText: typeof sanitizeTedText;
   truncateText: typeof truncateText;
   sanitizeGiroRecep: typeof sanitizeGiroRecep;
   sanitizeRazonSocial: typeof sanitizeRazonSocial;

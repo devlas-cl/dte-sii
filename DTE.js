@@ -11,6 +11,7 @@ const { XMLBuilder } = require('fast-xml-parser');
 const { DOMParser } = require('@xmldom/xmldom');
 const {
   sanitizeSiiText,
+  sanitizeTedText,
   formatBase64InXml,
   normalizeEmisor,
   normalizeReceptor,
@@ -264,8 +265,13 @@ class DTE {
     
     this.tmstFirma = timestampOverride || new Date().toISOString().replace(/\.\d{3}Z$/, '');
     
-    const rznRecepRaw = sanitizeSiiText((enc.Receptor.RznSocRecep || '').substring(0, 40));
-    const it1Raw = sanitizeSiiText((primerItem.NmbItem || 'Producto').substring(0, 40));
+    // sanitizeTedText (no sanitizeSiiText): pliega los acentos a ASCII porque el lector
+    // de PDF417 del SII no devuelve los bytes ≥128 tal como se codificaron, y como el TED
+    // va firmado, el SII valida la firma sobre lo que él leyó → "TED - Firma invalida".
+    // Se aplica ANTES de firmar, así la firma cubre exactamente los bytes del barcode.
+    // El DTE conserva el texto real con acentos; esto solo afecta al timbre.
+    const rznRecepRaw = sanitizeTedText((enc.Receptor.RznSocRecep || '').substring(0, 40));
+    const it1Raw = sanitizeTedText((primerItem.NmbItem || 'Producto').substring(0, 40));
     const rznRecepXml = this._escapeXmlText(rznRecepRaw);
     const it1Xml = this._escapeXmlText(it1Raw);
     

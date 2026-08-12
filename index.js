@@ -44,6 +44,7 @@ const utils = require('./utils');
 const {
   // Sanitización
   sanitizeSiiText,
+  sanitizeTedText,
   truncateText,
   sanitizeGiroRecep,
   sanitizeRazonSocial,
@@ -257,6 +258,7 @@ module.exports = {
   // Sanitización
   // ─────────────────────────────────────────
   sanitizeSiiText,
+  sanitizeTedText,
   truncateText,
   sanitizeGiroRecep,
   sanitizeRazonSocial,

@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const { XMLParser, XMLBuilder } = require('fast-xml-parser');
 const { SignedXml } = require('xml-crypto');
+const { resolveArtifactDir } = require('../utils/paths');
 
 const DECLARACION_RECIBO = 'El acuse de recibo que se declara en este acto, de acuerdo a lo dispuesto en la letra b) del Art. 4, y la letra c) del Art. 5 de la Ley 19.983, acredita que la entrega de mercaderias o servicio(s) prestado(s) ha(n) sido recibido(s).';
 
@@ -357,7 +358,9 @@ class IntercambioCert {
    * @returns {Object} Resultado con rutas de archivos generados
    */
   async generarIntercambio(envioDteXml, options = {}) {
-    const outDir = options.outDir || this.debugDir || './debug/intercambio';
+    // `'./debug/intercambio'` era relativo al cwd del proceso: los archivos aparecían
+    // en un lugar distinto según desde dónde se hubiera lanzado el runner.
+    const outDir = resolveArtifactDir(options.outDir || this.debugDir, 'intercambio');
     fs.mkdirSync(outDir, { recursive: true });
 
     console.log('\n' + '═'.repeat(60));

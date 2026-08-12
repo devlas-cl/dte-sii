@@ -22,6 +22,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const { registrarHttpDebug } = require('../utils/httpDebug');
 
 class BoletaCert {
   /**
@@ -663,14 +664,23 @@ class BoletaCert {
     
     // Hacer request
     const requestWithCert = (options, payload) => new Promise((resolve, reject) => {
+      const t0 = Date.now();
       const req = https.request({ ...options, ...tlsOptions }, (res) => {
         let data = '';
         res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve({
-          status: res.statusCode,
-          text: data,
-          headers: res.headers,
-        }));
+        res.on('end', () => {
+          registrarHttpDebug({
+            url: `https://${options.hostname}${options.path}`,
+            method: options.method || 'GET',
+            status: res.statusCode,
+            headers: res.headers,
+            body: data,
+            reqBody: payload,
+            ms: Date.now() - t0,
+            cliente: 'BoletaCert',
+          });
+          resolve({ status: res.statusCode, text: data, headers: res.headers });
+        });
       });
       req.on('error', reject);
       if (payload) req.write(payload);
@@ -784,14 +794,23 @@ class BoletaCert {
     
     // Hacer request
     const requestWithCert = (options, payload) => new Promise((resolve, reject) => {
+      const t0 = Date.now();
       const req = https.request({ ...options, ...tlsOptions }, (res) => {
         let data = '';
         res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve({
-          status: res.statusCode,
-          text: data,
-          headers: res.headers,
-        }));
+        res.on('end', () => {
+          registrarHttpDebug({
+            url: `https://${options.hostname}${options.path}`,
+            method: options.method || 'GET',
+            status: res.statusCode,
+            headers: res.headers,
+            body: data,
+            reqBody: payload,
+            ms: Date.now() - t0,
+            cliente: 'BoletaCert',
+          });
+          resolve({ status: res.statusCode, text: data, headers: res.headers });
+        });
       });
       req.on('error', reject);
       if (payload) req.write(payload);
