@@ -238,7 +238,7 @@ class CafSolicitor {
   }
 
   static esBloqueoTimbraje(html) {
-    return /NO\s+(SE\s+)?AUTORIZA\s+TIMBRAJE/i.test(String(html || ''));
+    return /NO\s+(SE\s+)?AUTORIZA\s+TIMBRAJE/i.test(CafSolicitor.textoVisible(html, 4000));
   }
 
   /**
@@ -254,7 +254,8 @@ class CafSolicitor {
    * no confirmado por el mensaje) de un fallo real desconocido.
    */
   static esNoAutorizadoIngresarOpcion(html) {
-    return /no\s+est.\s+autorizado\s+para\s+ingresar\s+a\s+esta\s+opci.n/i.test(String(html || ''));
+    return /no\s+est.{0,8}\s*autorizado\s+para\s+ingresar\s+a\s+esta\s+opci.{0,8}n/i
+      .test(CafSolicitor.textoVisible(html, 4000));
   }
 
   /**
@@ -267,9 +268,91 @@ class CafSolicitor {
    * es reenviar los permisos del usuario (Paso 5 de la inscripción) EN EL MISMO
    * AMBIENTE donde se está pidiendo el folio.
    */
+  /**
+   * El SII exige hacer el trámite PRESENCIALMENTE en la oficina.
+   *
+   * Sale al intentar inscribir a la empresa como facturador electrónico, incluso en el
+   * sistema gratuito: "deberá presentarse en la oficina del SII correspondiente a su
+   * domicilio y solicitar la asistencia de un funcionario". Suele deberse a observaciones
+   * en el RUT, domicilio sin verificar o anotaciones del contribuyente.
+   *
+   * Se detecta porque es un callejón sin salida para el software: mientras esté, la
+   * empresa no puede inscribirse, no queda autorizada en palena, no puede enrolar
+   * usuarios ni timbrar. Sin este mensaje el usuario ve un error genérico y vuelve a
+   * intentar sin saber que lo único que corresponde es ir al SII.
+   *
+   * Caso real (12/08/2026, RUT 79555666-7): Verificación de Actividades aprobada,
+   * usuario enrolado en maullin y certificación de boleta enviada — y aun así palena
+   * rechazaba todo, porque la inscripción por internet estaba bloqueada de origen.
+   */
+  static esRequiereTramitePresencial(html) {
+    const t = CafSolicitor.textoVisible(html, 4000);
+    return /deber.{0,8}\s*presentarse\s+en\s+la\s+oficina\s+del\s+SII/i.test(t)
+      || (/no\s+cumple\s+con\s+los\s+requisitos/i.test(t)
+          && /asistencia\s+de\s+un\s+funcionario/i.test(t));
+  }
+
+  /**
+   * "la empresa no está autorizada para operar en esta modalidad"
+   *
+   * Distinto de `esUsuarioSinPermiso`: ahí el sujeto es el USUARIO del certificado, acá
+   * es la EMPRESA. El SII lo devuelve en palena cuando el contribuyente todavía no fue
+   * autorizado como emisor electrónico en producción — no hay nada que arreglar del lado
+   * del enrolamiento, porque el portal ni siquiera deja abrir la mantención de usuarios.
+   *
+   * Caso real (12/08/2026, RUT 79555666-7): el flujo de enrolamiento siguió de largo con
+   * páginas vacías —sin formulario ni hidden `key`— hasta reventar con un 500 en
+   * `eu_graba_usuario`. El 500 era el síntoma; esta frase, en el PRIMER paso, la causa.
+   */
+  static esEmpresaNoAutorizada(html) {
+    return /(la\s+)?empresa\s+no\s+est.{0,8}\s*autorizada\s+para\s+operar/i
+      .test(CafSolicitor.textoVisible(html, 4000));
+  }
+
+  /**
+   * ¿Este HTML es un rechazo que hace inútil seguir el flujo?
+   *
+   * ⚠️ Los rechazos del SII NO llegan siempre en la última respuesta. Este caso real
+   * (12/08/2026, RUT 79555666-7, tipo 39 en palena) llegó en el PASO 2
+   * (`of_solicita_folios_dcto`), donde solo se miraba `esBloqueoTimbraje`. El flujo
+   * siguió de largo y terminó devolviendo el genérico `UNKNOWN: No se obtuvo CAF`,
+   * escondiendo un mensaje que la librería ya sabía interpretar desde julio.
+   *
+   * Por eso el chequeo es UNO SOLO y se aplica en TODOS los pasos: agregar un patrón
+   * nuevo no debe obligar a acordarse de replicarlo en cada punto del flujo.
+   */
+  static esRechazoDuro(html) {
+    const h = String(html || '');
+    return CafSolicitor.esBloqueoTimbraje(h)
+      || CafSolicitor.esRequiereTramitePresencial(h)
+      || CafSolicitor.esEmpresaNoAutorizada(h)
+      || CafSolicitor.esNoAutorizadoIngresarOpcion(h)
+      || CafSolicitor.esUsuarioSinPermiso(h)
+      || /no\s+registra\s+Verificaci.{0,8}n\s+de\s+Actividades/i.test(CafSolicitor.textoVisible(h, 4000));
+  }
+
+  /**
+   * Texto legible de una página del SII, sin markup.
+   *
+   * Para que un rechazo desconocido no se pierda: sin esto, el motivo real queda solo
+   * en el HTML —que en producción no se guarda— y el operador ve `UNKNOWN` sin más.
+   */
+  static textoVisible(html, max = 400) {
+    return String(html || '')
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ').replace(/&aacute;/gi, 'a').replace(/&eacute;/gi, 'e')
+      .replace(/&iacute;/gi, 'i').replace(/&oacute;/gi, 'o').replace(/&uacute;/gi, 'u')
+      .replace(/&ntilde;/gi, 'n').replace(/&[a-z]+;/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max);
+  }
+
   static esUsuarioSinPermiso(html) {
-    return /no\s+tiene\s+permiso\s+en\s+(la\s+)?empresa|usuario\s+no\s+autorizado\s+para\s+(la\s+)?empresa|no\s+est.\s+autorizado\s+para\s+operar\s+en\s+la\s+empresa/i
-      .test(String(html || ''));
+    return /no\s+tiene\s+permiso\s+en\s+(la\s+)?empresa|usuario\s+no\s+autorizado\s+para\s+(la\s+)?empresa|no\s+est.{0,8}\s*autorizado\s+para\s+operar\s+en\s+la\s+empresa/i
+      .test(CafSolicitor.textoVisible(html, 4000));
   }
 
   /**
@@ -402,6 +485,22 @@ class CafSolicitor {
         return { success: false, errorCode: 'TIMBRAJE_BLOQUEADO', error: 'SII: No se autoriza timbraje. Folios acumulados excesivos o situaciones tributarias pendientes. Revisa el portal SII → Factura Electrónica → Solicitud de Timbraje.' };
       }
 
+      if (response.body && CafSolicitor.esRequiereTramitePresencial(response.body)) {
+        return {
+          success: false,
+          errorCode: 'REQUIERE_TRAMITE_PRESENCIAL',
+          error: 'El SII exige completar la inscripción en Factura Electrónica de forma presencial: el representante legal debe ir con su cédula a la oficina del SII del domicilio de la empresa. Hasta entonces no se pueden obtener folios. Suele deberse a observaciones en el RUT o al domicilio sin verificar.',
+        };
+      }
+
+      if (response.body && CafSolicitor.esEmpresaNoAutorizada(response.body)) {
+        return {
+          success: false,
+          errorCode: 'EMPRESA_NO_AUTORIZADA',
+          error: `SII (${this.ambiente}): la EMPRESA no está autorizada para operar como emisor electrónico en este ambiente. No es un problema del usuario ni de sus permisos: hasta que el SII autorice al contribuyente, el portal no permite ni enrolar usuarios ni solicitar folios.`,
+        };
+      }
+
       if (response.body && CafSolicitor.esNoAutorizadoIngresarOpcion(response.body)) {
         return {
           success: false,
@@ -524,7 +623,14 @@ class CafSolicitor {
         return { success: false, errorCode: 'SESSION_EXPIRED', error: 'Sesión SII inválida — registro limpiado, el próximo intento reautenticará.' };
       }
 
-      return { success: false, errorCode: 'UNKNOWN', error: 'No se obtuvo CAF en la respuesta' };
+      // Se adjunta lo que dijo el SII: un `UNKNOWN` sin el motivo obliga a reproducir
+      // el fallo con el debug encendido, que es justo lo que no se puede hacer en
+      // producción cuando el problema es de un cliente concreto.
+      return {
+        success: false,
+        errorCode: 'UNKNOWN',
+        error: `No se obtuvo CAF en la respuesta. El SII respondió: "${CafSolicitor.textoVisible(response.body)}"`,
+      };
 
     } catch (err) {
       const msg = err.message || '';
@@ -557,8 +663,8 @@ class CafSolicitor {
 
     // Defensivo: mismo rechazo por Verificación de Actividades puede aparecer si el SII
     // lo entrega recién en un paso posterior en vez del response inicial de solicitar().
-    if (currentHtml.includes('no registra Verificacion de Actividades')) {
-      return response; // solicitar() detectará el rechazo en response.body
+    if (CafSolicitor.esRechazoDuro(currentHtml)) {
+      return response; // solicitar() traduce el motivo desde response.body
     }
 
     const realFormAction = SiiSession.extractFormAction(currentHtml);
@@ -592,8 +698,8 @@ class CafSolicitor {
 
       // Rechazo duro antes del check de COD_DOCTO: la página de rechazo también contiene
       // "COD_DOCTO" en su JavaScript, lo que causaría un POST innecesario con datos vacíos.
-      if (CafSolicitor.esBloqueoTimbraje(currentHtml)) {
-        return response; // solicitar() detectará el bloqueo en response.body
+      if (CafSolicitor.esRechazoDuro(currentHtml)) {
+        return response; // solicitar() traduce el motivo desde response.body
       }
 
       // Selección de tipo de documento
@@ -615,8 +721,8 @@ class CafSolicitor {
         currentHtml = response.body || '';
         this._saveDebug(debugDir, 'select.html', currentHtml);
 
-        if (CafSolicitor.esBloqueoTimbraje(currentHtml)) {
-          return response; // solicitar() detectará el bloqueo en response.body
+        if (CafSolicitor.esRechazoDuro(currentHtml)) {
+          return response; // solicitar() traduce el motivo desde response.body
         }
       }
 
@@ -634,8 +740,8 @@ class CafSolicitor {
   async _processStep3(response, rut, dv, tipoDte, cantidad, debugDir) {
     let currentHtml = response.body || '';
 
-    if (currentHtml.includes('no registra Verificacion de Actividades')) {
-      return response; // solicitar() detectará el rechazo en response.body
+    if (CafSolicitor.esRechazoDuro(currentHtml)) {
+      return response; // solicitar() traduce el motivo desde response.body
     }
 
     const formAction3 = SiiSession.extractFormAction(currentHtml) || '/cvc_cgi/dte/of_confirma_folio';

@@ -3,6 +3,58 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.13.1] - 2026-08-12
+
+Depurando por qué un cliente real (RUT 79555666-7) no obtenía folios en palena aparecieron
+tres fallas encadenadas en la detección de rechazos del SII. El síntoma era siempre el mismo
+y no decía nada: `UNKNOWN: No se obtuvo CAF en la respuesta`.
+
+### Corregido
+
+#### Los detectores de rechazo no podían funcionar con el HTML real
+
+Los patrones se evaluaban sobre el HTML **crudo**, pero el SII manda **entidades**:
+`no est&aacute; autorizado`. El regex esperaba `no está autorizado` y su `.` cubre un
+carácter, no los ocho de `&aacute;`.
+
+`esNoAutorizadoIngresarOpcion()` **nunca pudo matchear** un rechazo real, pese a estar
+escrita para este caso exacto (su comentario dice "Verificado 2026-07-24 contra
+79555666-7"). Se había escrito contra texto ya decodificado.
+
+Todos los detectores evalúan ahora el **texto visible** —sin markup, sin entidades, sin
+saltos de línea— vía `CafSolicitor.textoVisible()`. Robusto a las tres cosas de una vez.
+
+#### El chequeo no se aplicaba donde ocurre el rechazo
+
+El SII rechaza en **cualquier** paso del flujo multi-paso, no solo en el último. Este caso
+llegó en el paso 2 (`of_solicita_folios_dcto`), donde solo se miraba `esBloqueoTimbraje`:
+el flujo siguió de largo y terminó en el genérico.
+
+Ahora hay un único `esRechazoDuro()` con todos los patrones, aplicado en **los cuatro
+pasos**. Agregar un patrón nuevo ya no obliga a acordarse de replicarlo en cada punto.
+
+#### `UNKNOWN` dejó de ser opaco
+
+Cuando ningún patrón reconoce la página, el error **incluye lo que dijo el SII** en vez de
+`No se obtuvo CAF en la respuesta` a secas. Sin esto hay que reproducir el fallo con el
+debug encendido, que es justo lo que no se puede hacer cuando el problema es de un cliente
+en producción.
+
+### Agregado
+
+#### `esEmpresaNoAutorizada()` — "la empresa no está autorizada para operar en esta modalidad"
+
+Distinto de `esUsuarioSinPermiso`: ahí el sujeto es el **usuario** del certificado, acá es
+la **empresa**. El SII lo devuelve en palena cuando el contribuyente todavía no fue
+autorizado como emisor electrónico, y entonces el portal no deja ni enrolar usuarios ni
+pedir folios.
+
+Detectarlo importa porque el flujo de enrolamiento seguía de largo con páginas vacías
+—sin formulario ni hidden `key`— hasta reventar con un **500** en `eu_graba_usuario`. El
+500 era el síntoma; esta frase, presente ya en el primer paso, la causa.
+
+---
+
 ## [2.13.0] - 2026-08-12
 
 Depuración de una certificación real de punta a punta (RUT 77111222-3, maullin). Casi todo
