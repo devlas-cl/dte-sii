@@ -3,6 +3,46 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.13.2] - 2026-08-13
+
+Dos fallas en el plegado del TED, encontradas revisando el código de 2.13.0.
+
+### Corregido
+
+#### El truncado a 40 iba antes del plegado, y el plegado alarga
+
+`DTE.js` hacía `sanitizeTedText(texto.substring(0, 40))`. El problema es el orden: plegar
+**puede alargar** el texto, porque varios caracteres se expanden de 1 a 2 (`ß`→`ss`,
+`Æ`→`AE`, `Þ`→`TH`, `ﬁ`→`fi`). Si el corte de 40 caía justo en uno de esos, el resultado
+quedaba en 41-42 caracteres y **desbordaba el límite de `<RSR>` e `<IT1>`**, con riesgo de
+que el SII rechazara el timbre.
+
+Reproducido: `"Cerveza Weissbier Especial Importada AßX"` (40 caracteres) daba **41**
+después de plegar. Ahora se trunca al final y da 40 exactos.
+
+Solo se dispara si el texto llega a 40 caracteres **y** el borde cae en un carácter
+germánico o nórdico, así que en nombres chilenos es prácticamente inexistente. Se corrige
+igual: el límite del SII es duro y el TED va firmado.
+
+#### Las ligaduras se borraban en vez de expandirse
+
+`sanitizeTedText` mapeaba `ﬀ ﬁ ﬂ` a `ff fi fl`, pero ese `replace` era **código muerto**:
+corría después de `sanitizeSiiText`, que ya había descartado esos caracteres por no
+reconocerlos. El resultado era que desaparecían del timbre.
+
+Ahora el plegado va **antes** y las reglas del SII después, sobre texto ya ASCII. De paso
+se agregaron `ﬃ ﬄ Œ œ`, que tampoco estaban.
+
+```
+antes:  'ﬁ' → ''     'Œ' → ''
+ahora:  'ﬁ' → 'fi'   'Œ' → 'OE'
+```
+
+Verificado con un DTE tipo 39 firmado: `<IT1>` de 40 caracteres exactos, 0 bytes no-ASCII
+en el TED y `<FRMT>` presente. Los acentos del cuerpo siguen intactos.
+
+---
+
 ## [2.13.1] - 2026-08-12
 
 Depurando por qué un cliente real (RUT 79555666-7) no obtenía folios en palena aparecieron

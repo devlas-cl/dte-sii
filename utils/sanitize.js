@@ -72,19 +72,27 @@ function sanitizeSiiText(text) {
  * @returns {string} - Texto sin caracteres fuera de ASCII
  */
 function sanitizeTedText(text) {
-  return sanitizeSiiText(text)
+  // ⚠️ El plegado va ANTES de `sanitizeSiiText`, no después.
+  //
+  // `sanitizeSiiText` descarta lo que no reconoce, así que si corre primero se lleva las
+  // ligaduras (ﬁ, ﬀ, Œ…) y el mapeo de más abajo nunca llega a verlas: quedaba como código
+  // muerto y esos caracteres desaparecían del timbre en vez de expandirse.
+  return String(text ?? '')
     // Descompone en letra base + diacrítico y descarta el diacrítico.
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     // Lo que NFD no separa (ligaduras y símbolos con forma propia).
-    .replace(/[ﬀﬁﬂ]/g, m => ({ 'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl' })[m])
+    .replace(/[ﬀﬁﬂﬃﬄŒœ]/g, m => ({
+      'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬃ': 'ffi', 'ﬄ': 'ffl', 'Œ': 'OE', 'œ': 'oe',
+    })[m])
     .replace(/Æ/g, 'AE').replace(/æ/g, 'ae')
     .replace(/Ø/g, 'O').replace(/ø/g, 'o')
     .replace(/Ð/g, 'D').replace(/ð/g, 'd')
     .replace(/Þ/g, 'TH').replace(/þ/g, 'th')
     .replace(/ß/g, 'ss')
-    // Red de seguridad: cualquier resto no-ASCII se elimina antes del barcode.
-    .replace(/[^\x20-\x7E]/g, '');
+    // Recién ahora las reglas del SII, sobre texto ya plegado a ASCII.
+    .replace(/[^\x20-\x7E]/g, '')
+    .trim();
 }
 
 /**

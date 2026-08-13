@@ -270,8 +270,12 @@ class DTE {
     // va firmado, el SII valida la firma sobre lo que él leyó → "TED - Firma invalida".
     // Se aplica ANTES de firmar, así la firma cubre exactamente los bytes del barcode.
     // El DTE conserva el texto real con acentos; esto solo afecta al timbre.
-    const rznRecepRaw = sanitizeTedText((enc.Receptor.RznSocRecep || '').substring(0, 40));
-    const it1Raw = sanitizeTedText((primerItem.NmbItem || 'Producto').substring(0, 40));
+    // ⚠️ Truncar DESPUÉS de plegar, no antes: el plegado puede ALARGAR el texto, porque
+    // algunos caracteres se expanden de 1 a 2 (ß→ss, Æ→AE, Þ→TH, ﬁ→fi). Si el corte de 40
+    // caía justo en uno de esos, el resultado quedaba en 41-42 caracteres y desbordaba el
+    // límite de <RSR> e <IT1> del SII, con riesgo de rechazo del timbre.
+    const rznRecepRaw = sanitizeTedText(enc.Receptor.RznSocRecep || '').substring(0, 40);
+    const it1Raw = sanitizeTedText(primerItem.NmbItem || 'Producto').substring(0, 40);
     const rznRecepXml = this._escapeXmlText(rznRecepRaw);
     const it1Xml = this._escapeXmlText(it1Raw);
     
