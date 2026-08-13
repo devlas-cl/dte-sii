@@ -421,9 +421,14 @@ class CafSolicitor {
 
       this._saveDebug(debugDir, 'step1-submit.html', response.body || '');
 
-      // Guardar sesión para reutilización
+      // Guardar sesión para reutilización. Best-effort: si falla, se pierde el
+      // reuso pero NO se aborta la solicitud de folios ya en curso.
       if (this.sessionPath) {
-        this.session.saveSession(this.sessionPath);
+        try {
+          this.session.saveSession(this.sessionPath);
+        } catch (e) {
+          console.warn(`[CafSolicitor] No se pudo guardar la sesión: ${e.message}`);
+        }
       }
 
       // Rechazo duro por falta de Verificación de Actividades: debe detectarse ANTES de

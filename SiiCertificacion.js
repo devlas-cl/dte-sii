@@ -107,7 +107,15 @@ class SiiCertificacion {
       const _sp = options.sessionPath;
       this.session.ensureSession = async function(targetPath) {
         const result = await _origEnsure(targetPath);
-        _sess.saveSession(_sp);
+        // Best-effort: este hook corre en CADA establecimiento de sesión, así que
+        // una falla al escribir el cache (disco lleno, permisos, volumen no montado)
+        // tumbaría toda operación contra el SII. Persistir la sesión es una
+        // optimización; la operación en curso ya tiene la sesión viva en memoria.
+        try {
+          _sess.saveSession(_sp);
+        } catch (e) {
+          console.warn(`[SiiCertificacion] No se pudo guardar la sesión en ${_sp}: ${e.message}`);
+        }
         return result;
       };
     }

@@ -3,6 +3,43 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.13.3] - 2026-08-13
+
+Guardar la sesión fallaba si su carpeta no existía todavía. Encontrado auditando el resto
+de la librería tras un ENOENT equivalente en el orquestador de certificación.
+
+### Corregido
+
+#### `saveSession()` no creaba el directorio contenedor
+
+`SiiSession.saveSession(filePath)` hacía `writeFileSync` directo. Si la carpeta de
+`filePath` no existía, lanzaba `ENOENT` — el caso normal en el **primer arranque** sobre
+un volumen persistente recién creado, o sobre una carpeta de debug aún vacía.
+
+El síntoma no era el error en sí, sino lo que provocaba según quién llamara:
+
+| Llamador | Consecuencia |
+|---|---|
+| `FolioService` | Lo tragaba con `catch (_) {}`: la sesión **nunca** se persistía, en silencio |
+| `CafSolicitor` | Sin `catch` propio: abortaba la **solicitud de folios** en curso |
+| `SiiCertificacion` | Sin `catch` propio, y en un hook que corre en **cada** establecimiento de sesión: tumbaba cualquier operación contra el SII |
+
+Lo grave del primer caso es que no se nota: sin cache de sesión hay un login nuevo por
+operación, y ese es el camino directo al bloqueo por "máximo de sesiones autenticadas"
+del RUT.
+
+Ahora `saveSession()` crea el directorio con `mkdirSync(recursive)` antes de escribir,
+igual que ya hacía `SiiPortalAuth` con su propio cache. `SetsProvider` venía parchando
+esto por su cuenta con `_ensureDir()` en tres sitios distintos, lo que confirmaba que
+faltaba en la raíz.
+
+#### Persistir la sesión ya no puede abortar una operación real
+
+Los dos auto-guardados que corrían sin protección (`SiiCertificacion`, `CafSolicitor`)
+pasan a ser best-effort, con `console.warn` en vez de excepción. Guardar la sesión es una
+optimización de reuso: la operación en curso ya tiene la sesión viva en memoria, así que
+un disco lleno o un volumen no montado no tienen por qué hacerla fallar.
+
 ## [2.13.2] - 2026-08-13
 
 Dos fallas en el plegado del TED, encontradas revisando el código de 2.13.0.

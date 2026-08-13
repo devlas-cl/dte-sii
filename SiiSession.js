@@ -538,17 +538,26 @@ class SiiSession {
   }
 
   /**
-   * Guarda la sesión actual en un archivo JSON
+   * Guarda la sesión actual en un archivo JSON.
+   *
+   * Crea el directorio contenedor si no existe: `filePath` suele apuntar a un
+   * volumen persistente o a una carpeta de debug que en el primer arranque
+   * todavía no está creada, y sin esto `writeFileSync` lanza ENOENT. Perder la
+   * sesión obliga a re-loguearse contra el SII en cada operación, que es el
+   * camino directo al bloqueo por "máximo de sesiones autenticadas" del RUT.
+   *
    * @param {string} filePath - Ruta del archivo donde guardar
    */
   saveSession(filePath) {
     const fs = require('fs');
+    const path = require('path');
     const sessionData = {
       cookieJar: this.cookieJar,
       baseHost: this.baseHost,
       savedAt: Date.now(),
       expiresAt: Date.now() + (90 * 60 * 1000), // 90 minutos de validez
     };
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify(sessionData, null, 2), 'utf8');
   }
 
