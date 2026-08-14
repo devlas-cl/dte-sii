@@ -99,9 +99,7 @@ class SetCompra extends SetBase {
     const { DTE, CAF, buildDetalleCompra, buildSetReferencia } = require('../index');
     const fs = require('fs');
     
-    const cafXml = fs.readFileSync(cafPath, 'utf8');
-    const caf = new CAF(cafXml);
-    const folio = this._reservarFolio(caf, cafXml);
+    const { caf, cafXml, folio } = this._tomarFolio(cafPath);
     
     // Construir detalle con buildDetalleCompra (incluye CodImpAdic)
     const items = this._normalizarItems(caso.items);
@@ -151,9 +149,7 @@ class SetCompra extends SetBase {
     const { DTE, CAF, buildDetalleCompra, buildSetReferencia } = require('../index');
     const fs = require('fs');
     
-    const cafXml = fs.readFileSync(cafPath, 'utf8');
-    const caf = new CAF(cafXml);
-    const folio = this._reservarFolio(caf, cafXml);
+    const { caf, cafXml, folio } = this._tomarFolio(cafPath);
     
     // Obtener documento referenciado
     const docRef = this._docRefs[caso.referenciaCaso];
@@ -219,9 +215,7 @@ class SetCompra extends SetBase {
     const { DTE, CAF, buildDetalleCompra, buildSetReferencia } = require('../index');
     const fs = require('fs');
     
-    const cafXml = fs.readFileSync(cafPath, 'utf8');
-    const caf = new CAF(cafXml);
-    const folio = this._reservarFolio(caf, cafXml);
+    const { caf, cafXml, folio } = this._tomarFolio(cafPath);
     
     // Obtener documento referenciado
     const docRef = this._docRefs[caso.referenciaCaso];
@@ -394,18 +388,6 @@ class SetCompra extends SetBase {
    * Reserva el siguiente folio disponible
    * @private
    */
-  _reservarFolio(caf, cafXml) {
-    const cafFingerprint = this.folioHelper.createCafFingerprint(cafXml);
-    const folio = this.folioHelper.reserveNextFolio({
-      rutEmisor: this.config.emisor.rut,
-      tipoDte: caf.getTipoDTE(),
-      folioDesde: caf.getFolioDesde(),
-      folioHasta: caf.getFolioHasta(),
-      ambiente: this.config.ambiente || 'certificacion',
-      cafFingerprint,
-    });
-    return folio;
-  }
 
   /**
    * Obtiene la fecha de emisión

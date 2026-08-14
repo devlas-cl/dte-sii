@@ -38,23 +38,29 @@ function escapeText(text) {
 }
 
 /**
- * Corrige entidades en contenido XML (apóstrofes y comillas)
- * @param {string} xml - XML a procesar
- * @returns {string} - XML con entidades corregidas
+ * ⚠️ NO agregar acá un paso que escape apóstrofes o comillas en el contenido.
+ *
+ * Existía un `fixEntities()` que recorría el XML canónico y convertía `'` en `&apos;` y
+ * `"` en `&quot;` dentro del texto. Canonical XML (REC-xml-c14n-20010315, §1.3 y §2.3)
+ * escapa en nodos de texto SOLO `&`, `<`, `>` y el retorno de carro; el apóstrofe y la
+ * comilla doble quedan literales. `escapeText()` acá arriba ya hace exactamente eso.
+ *
+ * Con ese paso de más, la forma canónica que firmábamos dejaba de ser la que el SII
+ * calcula al recibir el documento, así que el DigestValue no coincidía y el SII rechazaba
+ * el ENVÍO COMPLETO con `RFR - Rechazado por Error en Firma` — sin decir cuál documento ni
+ * por qué. Y solo pasaba cuando algún texto traía un apóstrofe, que es lo que lo hacía
+ * tan difícil de ver: los mismos sets pasaban o fallaban según el contenido del set.
+ *
+ * Medido el 14/08/2026 (RUT 77111222-3, maullin). Un solo ítem, "CAPACITACION USO PLC'S
+ * CNC", en un único documento del Set Factura Exenta:
+ *
+ *   Set Básico   → EPR   0 documentos con digest divergente
+ *   Set Guía     → EPR   0
+ *   Set Exenta   → RFR   1  (nota de débito 56/2616, la del apóstrofe)
+ *   Set Compra   → EPR   0
+ *
+ * El envío entero se cae por un carácter en un ítem. Ver `test/c14n-apostrofe.test.js`.
  */
-function fixEntities(xml) {
-  let out = '';
-  let inContent = false;
-  for (let i = 0; i < xml.length; i++) {
-    const ch = xml[i];
-    if (ch === '>') inContent = true;
-    if (ch === '<') inContent = false;
-    if (inContent && ch === "'") { out += '&apos;'; continue; }
-    if (inContent && ch === '"') { out += '&quot;'; continue; }
-    out += ch;
-  }
-  return out;
-}
 
 /**
  * Serializa un nodo DOM a XML canónico
@@ -257,7 +263,6 @@ module.exports = {
   // Escape/Text functions
   escapeAttr,
   escapeText,
-  fixEntities,
   // Serialization
   serializeNode,
   serializeElement,

@@ -109,11 +109,17 @@ class FolioService {
 
     // Solicitador de CAF interno (migrado de test-caf-solicitar.js)
     this.cafSolicitor = null;
-    if (options.pfxPath && options.pfxPassword) {
+    // `pfxBuffer` también sirve: el constructor pedía `pfxPath` sí o sí, aunque la propia
+    // clase ya acepta buffer para la sesión y CafSolicitor lo soporta. Un consumidor que
+    // tiene el certificado en memoria (leído de la BD, sin escribirlo a disco) quedaba con
+    // `cafSolicitor: null` y todo lo que depende de él —solicitar, consultar tope,
+    // reobtener— fallaba con "CafSolicitor no inicializado".
+    if ((options.pfxPath || options.pfxBuffer) && options.pfxPassword) {
       this.cafSolicitor = new CafSolicitor({
         ambiente: this.ambiente,
         rutEmisor: this.rutEmisor,
         pfxPath: options.pfxPath,
+        pfxBuffer: options.pfxBuffer,
         pfxPassword: options.pfxPassword,
         baseDir: this.baseDir,
         sessionPath: this.sessionPath,
@@ -152,7 +158,23 @@ class FolioService {
             try {
               const xml = fs.readFileSync(fullPath, 'utf8');
               const tdMatch = xml.match(/<TD>(\d+)<\/TD>/i);
-              if (tdMatch && Number(tdMatch[1]) === Number(tipoDte)) {
+              // ⚠️ El RUT se valida acá, contra el <RE> del propio CAF, y NO se da por
+              // supuesto por la ruta.
+              //
+              // `cafDir` (debug/auto-caf) es COMPARTIDO entre todos los comercios del
+              // servidor: sus subcarpetas llevan el RUT, pero la búsqueda es recursiva y
+              // antes solo comparaba el tipo de DTE. Un CAF de otra empresa con el mismo
+              // tipo entraba como candidato válido.
+              //
+              // Pasó de verdad (14/08/2026): al reusar CAF previos, los tipos 56 y 61 del
+              // RUT 76543210-K resolvieron a CAF de 77111222-3. El timbre quedó firmado con
+              // la llave de otro contribuyente y el SII devolvió `RFR - Rechazado por Error
+              // en Firma` para todo el envío, lo que a su vez trababa la declaración de
+              // simulación ("no debe contener documentos con reparos o rechazos").
+              const reMatch = xml.match(/<RE>([^<]+)<\/RE>/i);
+              const rutCaf  = (reMatch?.[1] ?? '').replace(/\./g, '').trim().toUpperCase();
+              const rutMio  = String(this.rutEmisor).replace(/\./g, '').trim().toUpperCase();
+              if (tdMatch && Number(tdMatch[1]) === Number(tipoDte) && rutCaf === rutMio) {
                 const stat = fs.statSync(fullPath);
                 matches.push({ filePath: fullPath, mtime: stat.mtimeMs });
               }
@@ -308,6 +330,86 @@ class FolioService {
    * @returns {Promise<Object>} { ok, cafPath, otorgados, maxAutor, foliosDisp, errorCode, error }
    */
   /**
+   * Intenta cubrir `cantidad` folios recuperando un CAF ya autorizado, sin pedirle folios
+   * nuevos al SII.
+   *
+   * Es el paso que va ANTES de pedir y muy antes de anular. Cuando el SII bloquea el
+   * timbraje lo hace porque el contribuyente ya tiene folios sin usar; recuperarlos y
+   * emitir con ellos es justo lo que el SII pide para levantar el bloqueo, mientras que
+   * anular lo empeora (los folios anulados pesan 6 meses en contra del cupo).
+   *
+   * ⚠️ Solo sirve un rango que por sí solo alcance: el generador de sets recibe UN CAF por
+   * tipo (`cafManager.ensureCaf({ tipoDte })` en CertRunner), así que no se pueden juntar
+   * dos rangos sueltos para el mismo tipo. El SII suele entregarlos de a un folio, así que
+   * esto no siempre alcanza — y cuando no alcanza, se devuelve el motivo en vez de fingir.
+   *
+   * @returns {Promise<{ ok: boolean, cafPath?: string, motivo?: string, disponibles?: number }>}
+   */
+  async reobtenerCaf({ tipoDte, cantidad }) {
+    if (!this.cafSolicitor) {
+      return { ok: false, motivo: 'CafSolicitor no inicializado' };
+    }
+    let rangos;
+    try {
+      rangos = await this.cafSolicitor.listarReobtenibles(Number(tipoDte));
+    } catch (err) {
+      // Nunca fatal: si la reobtención falla, el flujo sigue por el camino normal.
+      console.warn(`[FolioService] Tipo ${tipoDte}: no se pudo consultar reobtención — ${err.message}`);
+      return { ok: false, motivo: err.message };
+    }
+
+    const usables = rangos.filter(r => !r.anulado);
+    const anulados = rangos.length - usables.length;
+    console.log(
+      `[FolioService] Tipo ${tipoDte}: ${rangos.length} rango(s) reobtenible(s), ` +
+      `${usables.length} usable(s)${anulados ? `, ${anulados} anulado(s) descartado(s)` : ''}`
+    );
+
+    const total = usables.reduce((n, r) => n + r.cantidad, 0);
+    if (total < cantidad) {
+      return {
+        ok: false,
+        disponibles: total,
+        motivo: `los rangos usables no alcanzan (se necesitan ${cantidad}, hay ${total})`,
+      };
+    }
+
+    // En orden de folio ascendente: los documentos del set quedan numerados de menor a
+    // mayor, como si vinieran de un rango contiguo.
+    const elegidos = [];
+    let acumulado = 0;
+    for (const r of usables.sort((a, b) => a.folioDesde - b.folioDesde)) {
+      if (acumulado >= cantidad) break;
+      elegidos.push(r);
+      acumulado += r.cantidad;
+    }
+
+    // Se descargan TODOS los que hagan falta: el SII entrega los folios reobtenidos de a
+    // uno, así que cubrir 4 folios puede requerir 4 CAF distintos. Los sets los aceptan
+    // como lista (ver SetBase._tomarFolio) porque cada uno firma con su propia llave.
+    const cafPaths = [];
+    for (const rango of elegidos) {
+      const res = await this.cafSolicitor.reobtenerCaf(Number(tipoDte), rango);
+      if (!res.success) {
+        // Si uno falla a mitad, lo ya descargado igual sirve mientras alcance.
+        console.warn(`[FolioService] Tipo ${tipoDte}: falló reobtener ${rango.folioDesde}-${rango.folioHasta} — ${res.error}`);
+        continue;
+      }
+      cafPaths.push(res.cafPath);
+      console.log(`[FolioService] Tipo ${tipoDte}: CAF REOBTENIDO (folios ${res.folioDesde}-${res.folioHasta}) — sin gastar cupo`);
+    }
+
+    const cubiertos = elegidos
+      .filter((_, i) => i < cafPaths.length)
+      .reduce((n, r) => n + r.cantidad, 0);
+    if (cubiertos < cantidad) {
+      return { ok: false, disponibles: cubiertos,
+        motivo: `se reobtuvieron ${cubiertos} folio(s) de los ${cantidad} necesarios` };
+    }
+    return { ok: true, cafPaths, cafPath: cafPaths[0] };
+  }
+
+  /**
    * Consulta cuánto autoriza el SII para un tipo, SIN emitir nada.
    *
    * Recorre el flujo de timbraje solo hasta el formulario que expone MAX_AUTOR y
@@ -325,11 +427,16 @@ class FolioService {
     if (!this.cafSolicitor) {
       throw new Error('FolioService: CafSolicitor no inicializado (se requiere pfxPath y pfxPassword)');
     }
+    this.cafSolicitor._lastBloqueoTimbraje = false;
     await this.cafSolicitor.solicitar({ tipoDte, cantidad: 1, soloConsultarTope: true });
     const maxAutor   = this.cafSolicitor._lastMaxAutor ?? null;
     const foliosDisp = this.cafSolicitor._lastFoliosDisp ?? null;
-    // `_lastFoliosDisp` queda en null justamente cuando el SII no publicó los campos.
-    return { sinTope: foliosDisp === null, maxAutor, foliosDisp };
+    const bloqueado  = this.cafSolicitor._lastBloqueoTimbraje === true;
+    // `_lastFoliosDisp` queda en null en DOS casos opuestos: cuando el SII no está
+    // limitando este tipo, y cuando lo tiene bloqueado del todo (ahí tampoco publica los
+    // campos, muestra "NO AUTORIZA TIMBRAJE"). Sin `bloqueado`, el segundo se leía como el
+    // primero y el llamador se saltaba la limpieza que era justo lo que hacía falta.
+    return { sinTope: foliosDisp === null && !bloqueado, maxAutor, foliosDisp, bloqueado };
   }
 
   async solicitarCafExacto({ tipoDte, cantidad, permitirAnular = true }) {
@@ -647,7 +754,40 @@ class FolioService {
       console.log(`[FolioService] Pasada ${pasada + 1}: ${rangos.length} rango(s) a procesar`);
       const host = this.session.getBaseHost();
 
+      // Corte cuando el SII deja de permitir anular, para no gastar requests confirmando
+      // lo mismo rango tras rango.
+      //
+      // ⚠️ Solo cuentan las negativas REALES. `ya-anulado` y `recepcionado` no son
+      // negativas: son resultados esperados (ese rango ya estaba anulado, o sus folios ya
+      // se usaron) y aparecen mezclados con anulaciones exitosas.
+      //
+      // Contarlos rompía la limpieza (medido el 13/08/2026, RUT 76543210-K, tipo 33):
+      //     20 rangos a procesar
+      //     ✓ 47-49 anulado   ✓ 43-46 anulado
+      //     ✗ 31-34 ya anulado ✗ 27-30 ya anulado  → CORTE, 8 rangos sin intentar
+      // Los éxitos y los "ya anulado" se intercalan, así que cortar ahí abandona rangos
+      // todavía anulables y deja el racionamiento puesto: la corrida quedó esperando por
+      // folios que se podrían haber liberado en esa misma pasada.
+      const NO_SON_NEGATIVA = new Set(['ya-anulado', 'recepcionado']);
+      const esNegativaDelSii = (razon) => !NO_SON_NEGATIVA.has(razon);
+      const MAX_RECHAZOS_SEGUIDOS = 2;
+      let rechazosSeguidos = 0;
+
+      let procesados = 0;
       for (const range of rangos) {
+        if (rechazosSeguidos >= MAX_RECHAZOS_SEGUIDOS) {
+          console.warn(
+            `[FolioService] Tipo ${tipoDte}: ${rechazosSeguidos} rangos rechazados seguidos — ` +
+            `el SII no está permitiendo anular, se abandona la limpieza ` +
+            // Se cuenta contra los rangos de ESTA pasada, no contra `vistos`, que acumula
+            // entre pasadas y hacía que el número saliera negativo (visto el 13/08/2026:
+            // "se abandona la limpieza (-16 rango(s) sin intentar)").
+            `(${rangos.length - procesados} rango(s) sin intentar).`
+          );
+          break;
+        }
+        procesados++;
+        const anuladosAntes = anulados.length;
         vistos.add(`${range.folioDesde}-${range.folioHasta}`);
         const iniA = folioDesde != null ? Math.max(range.folioDesde, folioDesde) : range.folioDesde;
         const finA = folioHasta != null ? Math.min(range.folioHasta, folioHasta) : range.folioHasta;
@@ -675,6 +815,7 @@ class FolioService {
         } catch (err) {
           console.error(`[FolioService] af_anular3 falló rango ${iniA}-${finA}: ${err.message}`);
           rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'error-red' });
+          rechazosSeguidos = rechazosSeguidos + 1;
           continue;
         }
 
@@ -687,6 +828,7 @@ class FolioService {
             body3.includes('efectuado anteriormente') ||
             /anulad[oa]\s+anteriormente/i.test(body3)) {
           rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'ya-anulado' });
+          // 'ya anulado' NO cuenta: es un no-op, no una negativa del SII.
           // Se recuerda para que la próxima corrida no lo reintente.
           yaAnulados.add(`${iniA}-${finA}`);
           console.warn(`[FolioService] ✗ Rango ${iniA}-${finA}: ya anulado (af_anular3)`);
@@ -711,6 +853,7 @@ class FolioService {
         } catch (err) {
           console.error(`[FolioService] af_anular bulk falló rango ${iniA}-${finA}: ${err.message}`);
           rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: 'error-red' });
+          rechazosSeguidos = rechazosSeguidos + 1;
           continue;
         }
 
@@ -718,6 +861,7 @@ class FolioService {
                           bodyBulk.includes('SOLICITUD ANULACION DE FOLIOS');
         if (exitoBulk) {
           anulados.push({ folioDesde: iniA, folioHasta: finA, count });
+          rechazosSeguidos = 0;
           // Un rango recién anulado sigue apareciendo en `consultarFolios` como
           // "sin utilizar": si no se recuerda acá, la próxima corrida lo
           // reintenta y el SII contesta "ya anulado". Ésta es la fuente
@@ -738,6 +882,7 @@ class FolioService {
         if (!yaConflicto) {
           const razon = this._parseAnulacionResult(bodyBulk).reason || 'error';
           rechazados.push({ folioDesde: iniA, folioHasta: finA, count, reason: razon });
+          if (esNegativaDelSii(razon)) rechazosSeguidos = rechazosSeguidos + 1;
           // Mismo criterio que en el camino folio-a-folio: solo se recuerdan los
           // rechazos definitivos, no los transitorios.
           if (razon === 'ya-anulado' || razon === 'recepcionado') {

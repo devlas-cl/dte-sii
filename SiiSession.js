@@ -548,12 +548,27 @@ class SiiSession {
    *
    * @param {string} filePath - Ruta del archivo donde guardar
    */
+  /**
+   * Huella del certificado con el que se configuró el TLS de esta sesión.
+   *
+   * Identifica de QUIÉN es la sesión. Sin esto, `SII_SESSION_PATH` —que en producción es
+   * un archivo ÚNICO para todos los comercios (`/data/sii/session.json`)— hacía que la
+   * sesión de un contribuyente se cargara para las operaciones de otro.
+   * @private
+   */
+  _huellaCert() {
+    const pem = this.tlsOptions?.cert;
+    if (!pem) return null;
+    return require('crypto').createHash('sha256').update(String(pem)).digest('hex').slice(0, 16);
+  }
+
   saveSession(filePath) {
     const fs = require('fs');
     const path = require('path');
     const sessionData = {
       cookieJar: this.cookieJar,
       baseHost: this.baseHost,
+      certHash: this._huellaCert(),
       savedAt: Date.now(),
       expiresAt: Date.now() + (90 * 60 * 1000), // 90 minutos de validez
     };
@@ -583,6 +598,26 @@ class SiiSession {
       // Verificar que el host coincida
       if (data.baseHost && data.baseHost !== this.baseHost) {
         console.log('Host SII no coincide, se requiere nuevo login');
+        return false;
+      }
+
+      // ⚠️ Y que la sesión sea de ESTE certificado.
+      //
+      // `SII_SESSION_PATH` es un archivo único para todo el proceso (en producción
+      // `/data/sii/session.json`), así que en un servidor multi-tenant la sesión del
+      // último comercio que operó queda ahí para el siguiente. Cargarla significa actuar
+      // ante el SII como el usuario de OTRO contribuyente.
+      //
+      // Caso real (14/08/2026): una corrida del RUT 77111222-3 reusó la sesión del
+      // certificado de otra empresa y el portal respondió "usted no está autorizado por la
+      // empresa para ingresar a esta opción" al pedir el set de pruebas. El mismo pedido
+      // con autenticación fresca funcionó. El síntoma no dice "sesión equivocada", dice
+      // "sin permisos", que manda a buscar el problema donde no está.
+      //
+      // Las sesiones viejas no traen `certHash`: se descartan, que es lo seguro.
+      const huella = this._huellaCert();
+      if (huella && data.certHash !== huella) {
+        console.log('[SessionSii] Sesión de otro certificado — se ignora y se hace login propio');
         return false;
       }
       

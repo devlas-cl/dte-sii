@@ -3,6 +3,203 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.14.0] - 2026-08-14
+
+Dos frentes, los dos medidos contra maullin: la firma de los envíos (un apóstrofe en el
+nombre de un ítem hacía que el SII rechazara el envío completo) y el timbraje (dejar de
+agravar el bloqueo del SII, y aprender a recuperar folios ya autorizados).
+
+Con esto una certificación llegó de punta a punta por primera vez: las diez etapas, los
+cuatro sets en `EPR` y las muestras impresas aceptadas por el validador del SII
+(RUT 77111222-3, 14/08/2026). El timbraje se midió con el RUT 76543210-K.
+
+### Agregado
+
+#### Reobtención de folios ya autorizados
+
+Cuando el SII bloquea el timbraje lo hace porque el contribuyente ya tiene folios sin
+usar, y su propio mensaje da la salida: *"debe emitir y enviar documentos electrónicos al
+SII o anular folios"*. Las dos salidas no son equivalentes: emitir baja el contador de
+folios disponibles, mientras que anular suma un **factor de anulación** que el SII aplica
+cuando se anularon folios y no se emitieron DTE entre timbrajes. Pero para emitir hace falta el
+CAF, y si se perdió no había forma de recuperarlo.
+
+`CafSolicitor.listarReobtenibles()` y `.reobtenerCaf()` implementan el flujo del portal,
+que resultó ser de **cinco** pasos y no de tres:
+
+```
+rf_reobtencion1 → rf_reobtencion2 → rf_reobtencion3 → rf_genera_folio → rf_genera_archivo
+                    (lista)          (¿anulado?)        (resolución)       (XML del CAF)
+```
+
+`rf_genera_folio` no devuelve el XML: emite la resolución de autorización y recién ahí
+ofrece el enlace de descarga, igual que el timbraje normal (`of_genera_folio` →
+`of_genera_archivo`).
+
+⚠️ **El listado incluye rangos anulados sin distinguirlos.** Solo al abrir cada uno el
+portal avisa *"ha sido anulado completamente... los documentos que el Servicio reciba con
+dichos folios serán rechazados"*. Por eso hay un request por rango. En el RUT de prueba,
+4 de 6 rangos del tipo 56 estaban anulados.
+
+`FolioService.reobtenerCaf({ tipoDte, cantidad })` junta tantos rangos como haga falta y
+descarta los anulados.
+
+#### Varios CAF por tipo de documento
+
+`SetBase._tomarFolio()` acepta una ruta o una lista, y devuelve el par **folio + CAF**
+junto.
+
+Hacía falta porque el SII entrega los folios reobtenidos de a uno (folios 1-1 y 3-3 como
+CAF separados). Y no alcanza con concatenar numeraciones: **cada CAF trae su propia llave
+RSA** (`CAF.js` → `RSASK`) y el timbre se firma con la del CAF que contiene ESE folio
+(`DTE.js` → `caf.sign(...)`). Firmar el folio 3 con la llave del CAF del folio 1 produce
+un timbre inválido y el SII rechaza el envío completo con `RFR - Rechazado por Error en
+Firma`.
+
+De paso unifica el método: estaba duplicado —idéntico, mismo hash— en `SetBasico`,
+`SetGuia`, `SetExenta` y `SetCompra`. Ahora la lógica de qué llave firma qué documento
+vive en un solo lugar.
+
+### Corregido
+
+#### Un apóstrofe en el nombre de un ítem tumbaba el envío completo
+
+La canonicalización pasaba por un `fixEntities()` que convertía `'` en `&apos;` y `"` en
+`&quot;` dentro del contenido. Canonical XML (REC-xml-c14n-20010315) escapa en nodos de
+texto **solo** `&`, `<`, `>` y el retorno de carro; el apóstrofe y la comilla doble quedan
+literales, que es justo lo que ya hacía `escapeText()`.
+
+Con ese paso de más, la forma canónica que se firmaba dejaba de ser la que el SII recalcula
+al recibir el documento. El `DigestValue` no coincidía y el SII rechazaba el **envío
+entero** con `RFR - Rechazado por Error en Firma`, sin decir qué documento ni por qué.
+
+Lo que lo hacía difícil de ver es que dependía del **contenido**, no del código: el mismo
+flujo pasaba o fallaba según lo que trajera el set. Medido el 14/08/2026 (RUT 77111222-3,
+maullin), contando documentos cuyo digest el SII calcula distinto:
+
+```
+Set Básico   → EPR   0        Set Exenta   → RFR   1  ← "CAPACITACION USO PLC'S CNC"
+Set Guía     → EPR   0        Set Compra   → EPR   0
+```
+
+Un carácter, en un ítem, en un documento de veintidós. Tras el arreglo la divergencia es 0
+en los cuatro sets, y los documentos sin apóstrofes ni comillas producen exactamente el
+mismo digest de antes — así que no cambia nada de lo que el SII ya aceptaba.
+
+Regresión cubierta en `test/c14n-apostrofe.test.js`.
+
+#### Un CAF reusado se volvía a gastar en la etapa siguiente
+
+El reuso de CAF de más abajo tenía un límite que no estaba puesto: valía para
+**reintentos de la misma etapa** (un intento que falló no emitió nada), pero se aplicaba
+también entre etapas distintas. `ENVIAR_SETS` no falló — terminó bien y gastó sus folios;
+`SIMULACION`, al arrancar en otro proceso con el contador de folios en cero, tomó el
+mismo CAF y reemitió los mismos números.
+
+Medido en maullin (RUT 77111222-3, 14/08/2026), consultando los dos envíos por SOAP:
+
+```
+0254369292  Set Básico   → EPR  Envío Procesado                 (folios 33: 4519-4522)
+0254369570  Simulación   → RFR  Rechazado por Error en Firma    (folios 33: 4519-4522)
+```
+
+El SII rechaza el envío **entero**, no el documento repetido.
+
+`CertRunner._marcarCafsConsumidos()` registra los folios emitidos y `_cafReusable()` los
+salta. Se marca en un `finally`, apenas se intentó el envío y sin mirar si salió bien: si
+el envío viajó, el SII ya vio esos folios aunque después lo rechace. Quemar un folio de
+más es barato; repetirlo cuesta la etapa completa.
+
+⚠️ **El registro va por rango, no por archivo**, y esa distinción es el arreglo de verdad.
+El mismo CAF se guarda en DOS árboles con el mismo contenido:
+
+```
+debug/auto-caf/{rut}/{ts}/{tipo}/archivo.xml
+debug/caf/{ambiente}/{rut}/{tipo}/{ts}/caf-{tipo}-{desde}-{hasta}.xml
+```
+
+`findLatestCaf` puede devolver cualquiera de las dos, así que marcar la copia usada deja
+la otra intacta y la etapa siguiente la encuentra "sin usar". Pasó exactamente eso: la
+primera versión de este arreglo marcaba solo el archivo, y la simulación volvió a repetir
+los folios desde la otra copia. Lo que identifica a un folio es (RUT, tipo, número), no
+dónde quedó el archivo, así que los rangos consumidos van a
+`{stateDir}/folios-usados-{rut}.json`.
+
+#### El polling de simulación reportaba un rechazo como "todavía en revisión"
+
+`esperarSimulacionAprobada()` decide mirando el avance de la postulación, y ahí un envío
+rechazado se ve idéntico a uno que el SII aún no revisa: en los dos casos la etapa no se
+mueve. Al agotar los intentos devolvía `Timeout esperando aprobación`, que quien llamaba
+leía como "sigue en curso".
+
+Ahora, antes de rendirse, consulta el estado del envío por su trackId — la única fuente
+de verdad — y si está rechazado lo devuelve como tal (`rechazado: true`, con el estado y
+la glosa del SII). Nuevo método público `CertRunner.consultarEstadoEnvio(trackId)`.
+
+#### El reintento volvía a timbrar folios que ya tenía
+
+Cuando una etapa fallaba después de timbrar algunos tipos, el reintento pedía todo de
+cero. Los folios del intento anterior quedaban sin usar, y el SII cuenta exactamente eso
+para negar el timbraje: **cada reintento agravaba el bloqueo que intentaba superar**.
+Medido: 6 reintentos de `ENVIAR_SETS` quemaron **66 folios** sin emitir un solo documento.
+
+`CertRunner._cafReusable()` busca el CAF previo en disco antes de pedir. Es seguro porque
+los sets se envían recién cuando todos los CAF están en mano, así que un intento fallido
+no emitió nada.
+
+#### `findLatestCaf` devolvía CAF de otros contribuyentes
+
+Buscaba recursivamente en `debug/auto-caf` —carpeta compartida por todos los comercios—
+y solo comparaba el tipo de DTE, ignorando el RUT que recibe en el constructor. Los tipos
+56 y 61 del RUT 76543210-K resolvieron a CAF de 77111222-3 y el SII rechazó el envío
+entero por firma. Ahora valida el `<RE>` del propio CAF.
+
+#### El sondeo confundía "sin tope" con "bloqueado"
+
+La ausencia de `MAX_AUTOR` tiene dos causas opuestas: el SII no limita ese tipo, o no
+autoriza nada. En ambos casos la página viene sin los campos, así que `consultarTope()`
+informaba "no está racionando" con el timbraje cerrado, y la limpieza previa nunca corría.
+Ahora devuelve `bloqueado` por separado.
+
+La detección se hace en `_esRechazoDuroYMarca()`, que marca **donde detecta**: el corte
+por rechazo duro está en cuatro puntos del flujo y cada uno retorna apenas lo ve, así que
+marcarlo en un punto elegido a mano quedaba inalcanzable según por dónde saliera.
+
+#### La limpieza se abandonaba por rechazos que no eran negativas
+
+El corte por rechazos consecutivos contaba `ya-anulado` y `recepcionado`, que son
+resultados esperados y aparecen mezclados con anulaciones exitosas. Medido en el tipo 33:
+tras dos anulaciones OK venían dos "ya anulado" y la pasada se abandonaba con 8 rangos
+todavía anulables sin intentar. Ahora solo cuentan las negativas reales.
+
+#### `FolioService` ignoraba `pfxBuffer`
+
+Solo creaba el `CafSolicitor` con `pfxPath`, aunque la clase acepta buffer para la sesión
+y `CafSolicitor` lo soporta. Un consumidor con el certificado en memoria (leído de la BD,
+sin escribirlo a disco) quedaba con todo el timbraje muerto: `"CafSolicitor no
+inicializado"`.
+
+#### Ventana de limpieza según ambiente
+
+Era de 1 día en todos lados. En producción está bien —el historial son documentos reales
+y anular es destructivo—, pero en maullin dejaba un callejón sin salida: los folios que
+bloquean suelen ser de semanas atrás, el filtro los descartaba antes de intentarlos y la
+corrida reintentaba para siempre. Ahora 1 día en producción, 180 en certificación.
+
+### Orden de resolución de folios
+
+```
+1. reusar el CAF que ya está en disco     gratis, sin tocar el SII
+2. reobtener del portal                   sin gastar cupo
+3. pedir folios nuevos                    el camino normal
+4. anular                                 último recurso
+```
+
+Anular pasó de ser el primer remedio al último: es el único con costo (activa el factor de
+anulación del SII) y el único que puede empeorar la situación que intenta arreglar. Medido
+el 14/08/2026 con 72 documentos emitidos en maullin — ver
+`el consumidor/docs/mediciones/2026-08-14-cupo-folios-maullin.md`.
+
 ## [2.13.3] - 2026-08-13
 
 Guardar la sesión fallaba si su carpeta no existía todavía. Encontrado auditando el resto

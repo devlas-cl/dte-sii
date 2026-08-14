@@ -214,8 +214,59 @@ class SetBase {
       cafs[tipoDte] = cafPath;
       this.logger.log(` ✓ CAF tipo ${tipoDte}: ${cafPath}`);
     }
-    
+
     return cafs;
+  }
+
+  /**
+   * Reserva el próximo folio y devuelve EL CAF QUE LO CONTIENE.
+   *
+   * `cafRef` acepta una ruta (comportamiento de siempre) o una lista de rutas. La lista
+   * hace falta porque el SII no siempre entrega un rango contiguo: al reobtener folios ya
+   * autorizados los devuelve de a uno (folios 1-1 y 3-3 como CAF separados, visto el
+   * 14/08/2026 en el RUT 76543210-K).
+   *
+   * Y no alcanza con concatenar numeraciones: **cada CAF trae su propia llave privada RSA**
+   * (`CAF.js` → `RSASK`) y el timbre de cada documento se firma con la llave del CAF que
+   * contiene ESE folio (`DTE.js` → `caf.sign(...)`). Por eso hay que devolver el par
+   * folio+CAF junto, y no solo el número: firmar el folio 3 con la llave del CAF del folio
+   * 1 produce un timbre inválido y el SII rechaza el envío completo con "Rechazado por
+   * Error en Firma".
+   *
+   * Antes este método estaba duplicado —idéntico, mismo hash— en SetBasico, SetGuia,
+   * SetExenta y SetCompra. Se unifica acá para que la lógica de qué llave firma qué
+   * documento viva en un solo lugar.
+   *
+   * @param {string|string[]} cafRef - ruta al CAF, o varias en orden de preferencia
+   * @returns {{ caf: Object, cafXml: string, folio: number }}
+   */
+  _tomarFolio(cafRef) {
+    const { CAF } = require('../index');
+    const fs = require('fs');
+    const rutas = Array.isArray(cafRef) ? cafRef : [cafRef];
+
+    let ultimoError = null;
+    for (const ruta of rutas) {
+      const cafXml = fs.readFileSync(ruta, 'utf8');
+      const caf = new CAF(cafXml);
+      try {
+        const folio = this.folioHelper.reserveNextFolio({
+          rutEmisor: this.config.emisor.rut,
+          tipoDte: caf.getTipoDTE(),
+          folioDesde: caf.getFolioDesde(),
+          folioHasta: caf.getFolioHasta(),
+          ambiente: this.config.ambiente || 'certificacion',
+          cafFingerprint: this.folioHelper.createCafFingerprint(cafXml),
+        });
+        return { caf, cafXml, folio };
+      } catch (err) {
+        // `reserveNextFolio` lanza cuando el rango se agotó: se pasa al CAF siguiente.
+        // Cualquier otro error sí es fatal y se propaga.
+        if (!/No hay más folios disponibles/.test(err.message)) throw err;
+        ultimoError = err;
+      }
+    }
+    throw ultimoError ?? new Error('No se recibió ningún CAF para reservar folio');
   }
 
   /**

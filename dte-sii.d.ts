@@ -622,6 +622,17 @@ export interface FolioTope {
   maxAutor: number | null;
   /** Folios disponibles según el SII, o null si no vino. */
   foliosDisp: number | null;
+  /** true si el SII bloqueó el timbraje para este tipo. Tiene prioridad sobre `sinTope`. */
+  bloqueado?: boolean;
+}
+
+export interface ReobtenerCafResult {
+  /** Rutas de los CAF recuperados. El SII entrega los folios de a uno, así que pueden ser varios. */
+  paths: string[];
+  /** Cantidad total de folios recuperados entre todos los rangos. */
+  folios: number;
+  /** Rangos que se descartaron por estar anulados en el SII. */
+  descartados: Array<{ desde: number; hasta: number; motivo: string }>;
 }
 
 export class FolioService {
@@ -633,6 +644,15 @@ export class FolioService {
    * anular antes de pedir, en vez de anular a ciegas.
    */
   consultarTope(options: { tipoDte: number }): Promise<FolioTope>;
+  /**
+   * Recupera CAF ya autorizados desde el portal, sin gastar cupo de timbraje.
+   *
+   * Es la salida cuando el SII bloqueó el timbraje: los folios ya están autorizados,
+   * solo se perdió el archivo. Junta tantos rangos como haga falta y descarta los que
+   * el portal reporta como anulados (los documentos emitidos con esos folios se
+   * rechazan).
+   */
+  reobtenerCaf(options: { tipoDte: number; cantidad: number }): Promise<ReobtenerCafResult | null>;
 }
 
 export interface FolioRegistryOptions {
@@ -698,6 +718,15 @@ export class CafSolicitor {
    * (`solicitar(tipoDte, cantidad)`) no coincidía con la implementación.
    */
   solicitar(options: CafSolicitarOptions): Promise<CafSolicitarResult>;
+  /**
+   * Lista los rangos de folios ya autorizados que el portal permite volver a descargar.
+   *
+   * ⚠️ El listado incluye rangos ANULADOS sin distinguirlos: solo al abrir cada uno el
+   * portal lo avisa. Por eso `reobtenerCaf` hace un request por rango.
+   */
+  listarReobtenibles(tipoDte: number): Promise<Array<{ desde: number; hasta: number; raw?: string }>>;
+  /** Descarga el CAF de un rango ya autorizado. Devuelve null si el rango está anulado. */
+  reobtenerCaf(tipoDte: number, rango: { desde: number; hasta: number }): Promise<string | null>;
 }
 
 // ============================================

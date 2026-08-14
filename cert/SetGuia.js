@@ -82,11 +82,9 @@ class SetGuia extends SetBase {
     const fs = require('fs');
     
     // Cargar CAF
-    const cafXml = fs.readFileSync(cafPath, 'utf8');
-    const caf = new CAF(cafXml);
+    const { caf, cafXml, folio } = this._tomarFolio(cafPath);
     
     // Reservar folio
-    const folio = this._reservarFolio(caf, cafXml);
     
     // Construir detalle (buildDetalleGuia siempre incluye QtyItem)
     const items = this._normalizarItems(caso.items);
@@ -178,18 +176,6 @@ class SetGuia extends SetBase {
    * Reserva el siguiente folio disponible
    * @private
    */
-  _reservarFolio(caf, cafXml) {
-    const cafFingerprint = this.folioHelper.createCafFingerprint(cafXml);
-    const folio = this.folioHelper.reserveNextFolio({
-      rutEmisor: this.config.emisor.rut,
-      tipoDte: caf.getTipoDTE(),
-      folioDesde: caf.getFolioDesde(),
-      folioHasta: caf.getFolioHasta(),
-      ambiente: this.config.ambiente || 'certificacion',
-      cafFingerprint,
-    });
-    return folio;
-  }
 
   /**
    * Obtiene la fecha de emisión en formato YYYY-MM-DD

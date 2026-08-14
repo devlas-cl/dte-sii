@@ -20,7 +20,7 @@ const {
   TIPOS_BOLETA,
   TASA_IVA,
 } = require('./utils');
-const { serializeNode, fixEntities, escapeAttr, escapeText, buildSignedInfo, buildSignature } = require('./utils/c14n');
+const { serializeNode, escapeAttr, escapeText, buildSignedInfo, buildSignature } = require('./utils/c14n');
 
 // ============================================
 // CONSTANTES
@@ -410,7 +410,7 @@ class DTE {
     }
 
     c14n += '</Documento>';
-    return fixEntities(c14n);
+    return c14n;
   }
   
   // ============================================

@@ -171,6 +171,20 @@ function registrarHttpDebug(info = {}) {
         truncado,
         archivo: nombre,
         archivoRequest: archivoReq,
+        // El cuerpo enviado va TAMBIÉN acá, no solo en el HTML.
+        //
+        // `index.jsonl` es lo único que la purga conserva siempre (ver cert-purga.ts), y
+        // el HTML con su cabecera es lo primero que se descarta. Depurando el 14/08/2026
+        // hacia atrás quedó a la vista: del día anterior se podía leer QUÉ endpoints se
+        // llamaron, pero no CON QUÉ datos, que era justo lo necesario para comparar una
+        // corrida buena contra una fallada.
+        //
+        // Se recorta a 2000 caracteres: el índice se guarda un año y tiene que seguir
+        // siendo liviano. El cuerpo completo, mientras exista, está en el HTML o en el
+        // `-request.txt`.
+        reqBody: reqTexto
+          ? (reqTexto.length > 2000 ? reqTexto.slice(0, 2000) + ` …${REDACTADO} recortado` : reqTexto)
+          : null,
         headers: redactarHeaders(headers),
       }) + '\n',
       'utf-8',

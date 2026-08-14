@@ -104,9 +104,7 @@ class SetExenta extends SetBase {
     const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia } = require('../index');
     const fs = require('fs');
     
-    const cafXml = fs.readFileSync(cafPath, 'utf8');
-    const caf = new CAF(cafXml);
-    const folio = this._reservarFolio(caf, cafXml);
+    const { caf, cafXml, folio } = this._tomarFolio(cafPath);
     
     // Marcar todos los items como exentos
     const items = this._normalizarItemsExentos(caso.items);
@@ -156,9 +154,7 @@ class SetExenta extends SetBase {
     const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia } = require('../index');
     const fs = require('fs');
     
-    const cafXml = fs.readFileSync(cafPath, 'utf8');
-    const caf = new CAF(cafXml);
-    const folio = this._reservarFolio(caf, cafXml);
+    const { caf, cafXml, folio } = this._tomarFolio(cafPath);
     
     // Obtener documento referenciado
     const docRef = this._docRefs[caso.referenciaCaso];
@@ -224,9 +220,7 @@ class SetExenta extends SetBase {
     const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia } = require('../index');
     const fs = require('fs');
     
-    const cafXml = fs.readFileSync(cafPath, 'utf8');
-    const caf = new CAF(cafXml);
-    const folio = this._reservarFolio(caf, cafXml);
+    const { caf, cafXml, folio } = this._tomarFolio(cafPath);
     
     // Obtener documento referenciado
     const docRef = this._docRefs[caso.referenciaCaso];
@@ -412,18 +406,6 @@ class SetExenta extends SetBase {
    * Reserva el siguiente folio disponible
    * @private
    */
-  _reservarFolio(caf, cafXml) {
-    const cafFingerprint = this.folioHelper.createCafFingerprint(cafXml);
-    const folio = this.folioHelper.reserveNextFolio({
-      rutEmisor: this.config.emisor.rut,
-      tipoDte: caf.getTipoDTE(),
-      folioDesde: caf.getFolioDesde(),
-      folioHasta: caf.getFolioHasta(),
-      ambiente: this.config.ambiente || 'certificacion',
-      cafFingerprint,
-    });
-    return folio;
-  }
 
   /**
    * Obtiene la fecha de emisión

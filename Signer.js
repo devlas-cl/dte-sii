@@ -9,7 +9,7 @@
 const crypto = require('crypto');
 const { DOMParser } = require('@xmldom/xmldom');
 const { formatBase64InXml } = require('./utils');
-const { serializeNode, fixEntities, buildSignedInfo, buildSignature } = require('./utils/c14n');
+const { serializeNode, buildSignedInfo, buildSignature } = require('./utils/c14n');
 
 // ============================================
 // CLASE SIGNER
@@ -87,7 +87,7 @@ class Signer {
     }
     
     c14n += '</SetDTE>';
-    return fixEntities(c14n);
+    return c14n;
   }
 }
 

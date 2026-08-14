@@ -366,6 +366,115 @@ class CafSolicitor {
    *   la simulación de certificación.
    * @returns {Promise<Object>} - { success, cafPath, xml, maxAutor, foliosDisp, error, errorCode }
    */
+  /**
+   * Lista los rangos de folios YA AUTORIZADOS que el SII permite volver a descargar.
+   *
+   * Es la salida a un timbraje bloqueado que no cuesta cupo. Cuando el SII niega folios
+   * nuevos dice, textual: "usted tiene disponible una cantidad de folios suficiente...
+   * debe emitir y enviar documentos electrónicos al SII o anular folios". Anular es
+   * contraproducente —los folios anulados pesan 6 meses EN CONTRA del cupo, así que
+   * profundiza el bloqueo—; emitir es lo que lo levanta. Pero para emitir hace falta el
+   * CAF, y si se perdió, esto lo recupera.
+   *
+   * ⚠️ El listado del paso 2 incluye rangos ANULADOS sin distinguirlos: recién al abrir
+   * cada uno (paso 3) el portal avisa "el rango de folios que desea reobtener ha sido
+   * anulado completamente... los documentos que el Servicio reciba con dichos folios
+   * serán rechazados". Por eso hay que abrir cada rango para saber si sirve, y por eso
+   * este método hace un request por rango. Verificado en maullin el 14/08/2026 con el
+   * RUT 76543210-K: de 6 rangos listados en el tipo 56, solo 2 eran usables.
+   *
+   * @param {number} tipoDte
+   * @returns {Promise<Array<{ campos: Object, folioDesde: number, folioHasta: number,
+   *                           cantidad: number, anulado: boolean }>>}
+   */
+  async listarReobtenibles(tipoDte) {
+    const { numero, dv } = splitRut(this.rutEmisor);
+
+    await this.session.request(`https://${this.session.getBaseHost()}/cvc_cgi/dte/rf_reobtencion1_folios`);
+    const lista = await this.session.submitForm('/cvc_cgi/dte/rf_reobtencion2_folios', {
+      RUT_EMP: numero, DV_EMP: String(dv).toUpperCase(), PAGINA: '1',
+      COD_DOCTO: String(tipoDte), ACEPTAR: 'Consultar',
+    }, '/cvc_cgi/dte/rf_reobtencion1_folios');
+
+    // Cada rango viene en su propio <form name="frmN"> con todos sus ocultos.
+    const rangos = [...String(lista.body || '').matchAll(/<form\s+name="frm\d+"[\s\S]*?<\/form>/gi)]
+      .map(([bloque]) => {
+        const campos = {};
+        for (const [, k, v] of bloque.matchAll(/<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"/gi)) campos[k] = v;
+        return campos;
+      })
+      .filter(c => c.FOLIO_INI && c.FOLIO_FIN);
+
+    const salida = [];
+    for (const campos of rangos) {
+      const detalle = await this.session.submitForm(
+        '/cvc_cgi/dte/rf_reobtencion3_folios', campos, '/cvc_cgi/dte/rf_reobtencion2_folios',
+      );
+      const html = String(detalle.body || '');
+      salida.push({
+        campos,
+        folioDesde: Number(campos.FOLIO_INI),
+        folioHasta: Number(campos.FOLIO_FIN),
+        cantidad: Number(campos.FOLIO_FIN) - Number(campos.FOLIO_INI) + 1,
+        anulado: /ha sido anulado/i.test(html),
+        // El paso 3 ya trae el formulario final; se guarda para no repetir el request.
+        confirmacion: html,
+      });
+    }
+    return salida;
+  }
+
+  /**
+   * Descarga el CAF de un rango ya autorizado. `rango` es un elemento de
+   * `listarReobtenibles()`. Devuelve el mismo shape que `solicitar()` para que el
+   * llamador no tenga que distinguir de dónde salió el CAF.
+   */
+  async reobtenerCaf(tipoDte, rango) {
+    if (rango.anulado) {
+      return { success: false, errorCode: 'RANGO_ANULADO',
+        error: `El rango ${rango.folioDesde}-${rango.folioHasta} del tipo ${tipoDte} está anulado: el SII rechazaría cualquier documento emitido con esos folios.` };
+    }
+
+    // El paso 3 devolvió el formulario final (`form1` → rf_genera_folio) con sus ocultos.
+    const campos = {};
+    const bloque = String(rango.confirmacion || '').match(/<form\s+name="form1"[\s\S]*?<\/form>/i)?.[0] ?? '';
+    for (const [, k, v] of bloque.matchAll(/<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"/gi)) campos[k] = v;
+    if (!campos.FOLIO_INI) {
+      return { success: false, errorCode: 'REOBTENCION_SIN_FORMULARIO',
+        error: 'El SII no devolvió el formulario de generación para este rango.' };
+    }
+
+    // `rf_genera_folio` NO devuelve el XML: emite la resolución ("el SII ha autorizado...
+    // la numeración desde N hasta M") y recién ahí ofrece el enlace de descarga, que es
+    // otro formulario contra `rf_genera_archivo`. Son dos pasos, como en el timbraje
+    // normal (of_genera_folio → of_genera_archivo).
+    const autorizacion = await this.session.submitForm('/cvc_cgi/dte/rf_genera_folio',
+      { ...campos, ACEPTAR: 'Solicitar Folios' }, '/cvc_cgi/dte/rf_reobtencion3_folios');
+
+    const camposArchivo = {};
+    const formArchivo = String(autorizacion.body || '')
+      .match(/<form[^>]*action="[^"]*rf_genera_archivo"[\s\S]*?<\/form>/i)?.[0] ?? '';
+    for (const [, k, v] of formArchivo.matchAll(/<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"/gi)) camposArchivo[k] = v;
+    if (!camposArchivo.FOLIO_INI) {
+      return { success: false, errorCode: 'REOBTENCION_SIN_DESCARGA',
+        error: 'El SII autorizó la reobtención pero no ofreció el enlace de descarga del CAF.' };
+    }
+
+    const resp = await this.session.submitForm('/cvc_cgi/dte/rf_genera_archivo',
+      { ...camposArchivo, ACEPTAR: 'AQUI' }, '/cvc_cgi/dte/rf_genera_folio');
+    const body = String(resp.body || '');
+    if (!body.includes('<AUTORIZACION')) {
+      return { success: false, errorCode: 'REOBTENCION_SIN_CAF',
+        error: 'El SII no devolvió el XML del CAF al reobtener.' };
+    }
+
+    const cafPath = this._saveCafOrganized(body, tipoDte);
+    return {
+      success: true, cafPath, xml: body, reobtenido: true,
+      folioDesde: rango.folioDesde, folioHasta: rango.folioHasta, otorgados: rango.cantidad,
+    };
+  }
+
   async solicitar({ tipoDte, cantidad = 1, minCantidad = null, soloConsultarTope = false }) {
     const { numero: rut, dv } = splitRut(this.rutEmisor);
     const debugDir = this._getDebugDir(tipoDte);
@@ -663,12 +772,31 @@ class CafSolicitor {
    * Procesa el flujo multi-paso del SII para obtener CAF
    * @private
    */
+  /**
+   * Igual que `esRechazoDuro`, pero además deja registrado si el motivo fue el bloqueo de
+   * timbraje, para que `consultarTope()` pueda distinguir "el SII no limita este tipo" de
+   * "el SII no autoriza nada" — dos casos que se ven idénticos porque en ambos la página
+   * viene sin MAX_AUTOR.
+   *
+   * Existe porque el corte por rechazo duro está en CUATRO puntos distintos del flujo
+   * (`_processMultiStepFlow` dos veces, su paso intermedio y `_processStep3`), y cada uno
+   * retorna apenas lo detecta. Marcar la bandera en uno solo dejaba la detección
+   * inalcanzable según por dónde saliera: el sondeo del tipo 56 informaba "no está
+   * racionando" con el timbraje cerrado (14/08/2026). Se marca donde se detecta, no en un
+   * punto elegido a mano.
+   * @private
+   */
+  _esRechazoDuroYMarca(html) {
+    if (CafSolicitor.esBloqueoTimbraje(html)) this._lastBloqueoTimbraje = true;
+    return CafSolicitor.esRechazoDuro(html);
+  }
+
   async _processMultiStepFlow(response, rut, dv, tipoDte, cantidad, debugDir) {
     let currentHtml = response.body || '';
 
     // Defensivo: mismo rechazo por Verificación de Actividades puede aparecer si el SII
     // lo entrega recién en un paso posterior en vez del response inicial de solicitar().
-    if (CafSolicitor.esRechazoDuro(currentHtml)) {
+    if (this._esRechazoDuroYMarca(currentHtml)) {
       return response; // solicitar() traduce el motivo desde response.body
     }
 
@@ -703,7 +831,7 @@ class CafSolicitor {
 
       // Rechazo duro antes del check de COD_DOCTO: la página de rechazo también contiene
       // "COD_DOCTO" en su JavaScript, lo que causaría un POST innecesario con datos vacíos.
-      if (CafSolicitor.esRechazoDuro(currentHtml)) {
+      if (this._esRechazoDuroYMarca(currentHtml)) {
         return response; // solicitar() traduce el motivo desde response.body
       }
 
@@ -726,7 +854,7 @@ class CafSolicitor {
         currentHtml = response.body || '';
         this._saveDebug(debugDir, 'select.html', currentHtml);
 
-        if (CafSolicitor.esRechazoDuro(currentHtml)) {
+        if (this._esRechazoDuroYMarca(currentHtml)) {
           return response; // solicitar() traduce el motivo desde response.body
         }
       }
@@ -745,7 +873,14 @@ class CafSolicitor {
   async _processStep3(response, rut, dv, tipoDte, cantidad, debugDir) {
     let currentHtml = response.body || '';
 
-    if (CafSolicitor.esRechazoDuro(currentHtml)) {
+    // Se marca ANTES del corte por rechazo duro, no después.
+    //
+    // `esRechazoDuro` incluye el bloqueo de timbraje, así que en ese caso la función
+    // retorna acá mismo y todo lo que viene abajo —incluida la lectura de MAX_AUTOR—
+    // no se ejecuta. Marcarlo más adelante dejaba la bandera en false justo en el único
+    // caso que tiene que detectar, y el sondeo seguía informando "el SII no está
+    // racionando este tipo" con el timbraje cerrado (visto el 14/08/2026, tipo 56).
+    if (this._esRechazoDuroYMarca(currentHtml)) {
       return response; // solicitar() traduce el motivo desde response.body
     }
 
