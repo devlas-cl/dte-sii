@@ -4051,7 +4051,13 @@ class CertRunner {
     const cookieJar = await this._obtenerCookiesSII();
     const cookieStr = Object.entries(cookieJar).map(([k, v]) => `${k}=${v}`).join('; ');
 
+    // ⚠️ Este era el ÚNICO cliente HTTP de la librería que no dejaba rastro, y es
+    // precisamente el que responde "¿el SII ya habilitó el timbraje?": consulta
+    // of_solicita_folios_dcto en palena y mira si el tipo 39 aparece en el select.
+    // Cuando la respuesta es "todavía no", sin la captura no queda forma de saber si el
+    // SII contestó eso de verdad o si la consulta salió mal.
     const fetchHtml = (url) => new Promise((resolve, reject) => {
+      const _t0 = Date.now();
       const req = https.get(url, {
         headers: {
           'Cookie': cookieStr,
@@ -4062,7 +4068,14 @@ class CertRunner {
       }, (res) => {
         const chunks = [];
         res.on('data', c => chunks.push(c));
-        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+        res.on('end', () => {
+          const _body = Buffer.concat(chunks).toString('utf-8');
+          registrarHttpDebug({
+            url, method: 'GET', status: res.statusCode, headers: res.headers,
+            body: _body, ms: Date.now() - _t0, cliente: 'verificarAutorizacionBoleta',
+          });
+          resolve(_body);
+        });
       });
       req.on('error', reject);
       req.setTimeout(20000, () => { req.destroy(); reject(new Error('Timeout')); });

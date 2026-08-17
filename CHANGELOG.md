@@ -3,6 +3,31 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.14.1] - 2026-08-17
+
+### Corregido
+
+#### La consulta que decide "¿ya me habilitaron?" no dejaba rastro
+
+`verificarAutorizacionBoleta()` era el único cliente HTTP de la librería sin captura: su
+`fetchHtml()` resolvía el cuerpo y no llamaba a `registrarHttpDebug`. Es la consulta a
+`of_solicita_folios_dcto` en palena que mira si el tipo 39 ya aparece en el select, o sea
+la que contesta si el SII habilitó el timbraje.
+
+Sin esa captura, un "todavía no" no se puede distinguir de una consulta que salió mal:
+las dos terminan en `autorizadaProduccion: false`. Justo el caso en el que uno necesita
+mirar la respuesta cruda (17/08/2026, RUT 79555666-7).
+
+Auditados después los cinco archivos con clientes HTTP exigiendo un `registrarHttpDebug`
+dentro de las 25 líneas de cada `https.request` / `https.get` / `fetch`: **0 sitios sin
+registro**. Los clientes que pueden aparecer en el índice son ocho: `SiiPortalAuth`,
+`SiiSession`, `EnviadorSII`, `BoletaCert`, `certBolElectDte`, `pdfdteInternet`,
+`pfeInternet` y `verificarAutorizacionBoleta`.
+
+⚠️ La captura sigue dependiendo de que el consumidor defina `SII_HTTP_DEBUG_DIR`, y de que
+esa ruta esté en almacenamiento persistente. Apuntarla al disco de un contenedor efímero
+deja la instrumentación sin efecto: se escribe y se pierde en el siguiente deploy.
+
 ## [2.14.0] - 2026-08-14
 
 Dos frentes, los dos medidos contra maullin: la firma de los envíos (un apóstrofe en el
