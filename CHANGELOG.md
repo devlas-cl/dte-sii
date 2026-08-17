@@ -3,6 +3,34 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.14.3] - 2026-08-17
+
+### Corregido
+
+#### "Esperando el SOK" sobre empresas que ya habían declarado
+
+`consultarEstadoBoletaPortal()` pregunta puntualmente por el estado **90**, así que una
+lista vacía significa "no está en P90". Eso ocurre en dos situaciones opuestas:
+
+- todavía no llegó (el SII no emitió el SOK del set), o
+- **ya lo pasó**: declaró cumplimiento y avanzó a P91.
+
+Se daban por la primera siempre. Resultado: después de una declaración exitosa, el flujo
+seguía informando "esperando aprobación del SII (SOK)" y la pantalla le pedía al usuario
+esperar una etapa ya superada. Visto el 17/08/2026 (RUT 79555666-7): declaró a las 14:01
+con `DECLARACION EFECTUADA` y a las 14:5x seguía diciendo que faltaba el SOK.
+
+Ahora, cuando la consulta por el 90 viene vacía, se desempata preguntando por el **91**,
+que es el estado al que mueve `autorizarEmpresaBolProd`. Se agrega `yaDeclarada` al
+resultado.
+
+#### Reintentar la declaración sobre una empresa ya declarada quedaba en espera infinita
+
+Con lo anterior, `completarDeclaracionBoletaPortal()` devolvía `pendingSok` para una
+empresa en P91, y quien orquesta dejaba la etapa en `esperando` aguardando un SOK que ya
+había llegado y ya se había usado. Ahora devuelve `success: true` con `yaDeclarada: true`:
+la etapa está cumplida, no pendiente.
+
 ## [2.14.2] - 2026-08-17
 
 ### Corregido

@@ -3944,12 +3944,43 @@ class CertRunner {
     const listaParaDeclarar = estadoResp.includes('P90');
     const estadoMatch = estadoResp.match(/"(P\d+)"/);
     const listaVacia = /\/\/OK\[0,\[\]/.test(estadoResp);
-    const estado = listaParaDeclarar ? 'P90'
-                 : estadoMatch ? estadoMatch[1]
-                 : listaVacia ? 'sin_estado_sok_pendiente'
-                 : 'desconocido';
 
-    return { success: true, inscrita: true, listaParaDeclarar, estado };
+    // ⚠️ La consulta pregunta puntualmente por el estado 90, así que una lista vacía
+    // significa "no está en P90" — y eso pasa en DOS situaciones opuestas:
+    //   a) todavía no llegó (el SII no emitió el SOK del set), o
+    //   b) YA lo pasó: declaró cumplimiento y avanzó a P91.
+    //
+    // Darlas por (a) siempre hacía que, después de una declaración exitosa, se
+    // informara "esperando aprobación del SII (SOK)". La pantalla le pedía al usuario
+    // esperar una etapa que ya había superado (visto el 17/08/2026, RUT 79555666-7:
+    // declaró a las 14:01 con DECLARACION EFECTUADA y a las 14:5x seguía diciendo que
+    // faltaba el SOK).
+    //
+    // Se desempata preguntando por el 91, que es el estado al que mueve
+    // `autorizarEmpresaBolProd`.
+    let estado = listaParaDeclarar ? 'P90'
+               : estadoMatch ? estadoMatch[1]
+               : listaVacia ? 'sin_estado_sok_pendiente'
+               : 'desconocido';
+    let yaDeclarada = false;
+
+    if (estado === 'sin_estado_sok_pendiente') {
+      try {
+        const resp91 = await gwtPost(
+          `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|obtenerEstadoAutorizaEmp|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|4|5|6|5|6|5|${rutNum}|7|5|91|0|`
+        );
+        if (resp91.includes('P91')) {
+          estado = 'P91';
+          yaDeclarada = true;
+        }
+      } catch (e) {
+        // Si la segunda consulta falla se conserva la lectura original: es un dato de
+        // más, no una dependencia.
+        console.log(` [!] No se pudo desempatar el estado con P91: ${e.message}`);
+      }
+    }
+
+    return { success: true, inscrita: true, listaParaDeclarar, estado, yaDeclarada };
   }
 
   async completarDeclaracionBoletaPortal({
@@ -3972,6 +4003,13 @@ class CertRunner {
     }
     if (!estadoActual.inscrita) {
       return { success: false, error: 'No se pudo obtener representante vigente (facade CBE)' };
+    }
+    // Ya declaró y avanzó a P91: la etapa está cumplida, no pendiente. Sin este caso,
+    // reintentar la declaración sobre una empresa ya declarada devolvía `pendingSok` y
+    // la etapa quedaba "esperando" para siempre, esperando un SOK que ya había llegado
+    // y ya se había usado.
+    if (estadoActual.yaDeclarada) {
+      return { success: true, yaDeclarada: true, mensaje: 'La declaración de cumplimiento ya estaba efectuada (P91)' };
     }
     if (!estadoActual.listaParaDeclarar) {
       const legible = estadoActual.estado === 'sin_estado_sok_pendiente'
