@@ -3,6 +3,44 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.14.2] - 2026-08-17
+
+### Corregido
+
+#### "Boleta NO autorizada" sobre empresas que sí lo estaban
+
+`verificarAutorizacionBoleta()` consultaba el timbraje de producción con un `GET` pelado a
+`of_solicita_folios_dcto`. Ese endpoint es la **segunda** pantalla de un formulario de dos
+pasos: sin el `POST` previo que lleva `RUT_EMP`/`DV_EMP`, el SII responde 200 con una
+página de error genérica que no trae ningún `<select>`.
+
+Como el parser buscaba `<option value="39">`, esa página vacía daba cero tipos y se
+concluía **"no autorizada"**. Siempre. Para cualquier empresa.
+
+Ahora hace los dos pasos, que es la misma secuencia que ya usaba
+`CafSolicitor._processMultiStepFlow()` para pedir folios de verdad, y por eso ese camino sí
+funcionaba. Medido contra palena (RUT 79555666-7, 17/08/2026):
+
+```
+antes:   página de error LIBRUD-OFSF-DTE-3-1-02, tipos []      -> "no autorizada"
+después: tipos [33, 34, 46, 52, 56, 61]                        -> boleta 39: NO (dato real)
+```
+
+El resultado final coincide, pero por el motivo correcto: esa empresa tiene habilitados
+factura y el resto, y le falta solo boleta. Antes decía lo mismo estando rota, que es peor
+que equivocarse: la respuesta correcta por la razón equivocada, indistinguible del caso en
+que sí está habilitada.
+
+#### Ausencia de `<select>` ya no se interpreta como "no autorizada"
+
+Complementa lo anterior para cualquier otra falla del portal. Si la respuesta no trae
+formulario, se devuelve `consultaFallida: true` y `errorConsultaProduccion` con el código
+del SII, en vez de afirmar algo sobre la autorización.
+
+⚠️ Quien consuma esto tiene que distinguir **tres** estados, no dos: autorizada, no
+autorizada, y no se pudo consultar. Tratar `consultaFallida` como "no autorizada" reproduce
+el bug original.
+
 ## [2.14.1] - 2026-08-17
 
 ### Corregido

@@ -4081,6 +4081,41 @@ class CertRunner {
       req.setTimeout(20000, () => { req.destroy(); reject(new Error('Timeout')); });
     });
 
+    const [rutNum, dvChar] = String(this.config.emisor.rut).replace(/\./g, '').split('-');
+
+    /** POST de formulario, para el segundo paso del timbraje. Se captura igual que el GET. */
+    const postForm = (url, campos) => new Promise((resolve, reject) => {
+      const cuerpo = Object.entries(campos)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v ?? '')}`).join('&');
+      const u = new URL(url);
+      const _t0 = Date.now();
+      const req = https.request({
+        hostname: u.hostname, path: u.pathname + u.search, method: 'POST',
+        headers: {
+          'Cookie': cookieStr,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(cuerpo),
+        },
+        rejectUnauthorized: false,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          const _body = Buffer.concat(chunks).toString('utf-8');
+          registrarHttpDebug({
+            url, method: 'POST', status: res.statusCode, headers: res.headers,
+            body: _body, reqBody: cuerpo, ms: Date.now() - _t0,
+            cliente: 'verificarAutorizacionBoleta',
+          });
+          resolve(_body);
+        });
+      });
+      req.on('error', reject);
+      req.setTimeout(20000, () => { req.destroy(); reject(new Error('Timeout')); });
+      req.write(cuerpo); req.end();
+    });
+
     const result = {
       autorizadaProduccion:       false,
       autorizadaCertificacion:    false,
@@ -4090,8 +4125,37 @@ class CertRunner {
     };
 
     // ── 1. Verificar producción: of_solicita_folios_dcto en palena ─────────
+    //
+    // ⚠️ Son DOS pasos, no uno. `of_solicita_folios_dcto` es la segunda pantalla del
+    // formulario de timbraje: entrar con un GET pelado, sin el POST previo que lleva
+    // RUT_EMP/DV_EMP, hace que el SII responda 200 con una página de error genérica
+    // ("No ha sido posible completar su solicitud... LIBRUD-OFSF-DTE-3-1-02") que no
+    // trae ningún <select>.
+    //
+    // Como el parser buscaba <option value="39">, esa página vacía se leía como "no
+    // autorizada". Es la secuencia que ya usa CafSolicitor._processMultiStepFlow() para
+    // pedir folios de verdad, y por eso ESE camino sí funciona.
+    //
+    // Caso real (17/08/2026, RUT 79555666-7): el flujo reportaba "Boleta NO autorizada"
+    // mientras el SII tenía a la empresa como FACTURADOR ELECTRONICO con BOLETA
+    // ELECTRONICA autorizada hasta el folio 103009 desde el 12/07/2026, y palena le
+    // entregaba folios reales de factura por el camino bien armado. Un comercio ya
+    // habilitado quedaba viendo "esperando al SII" para siempre.
     try {
-      const htmlProd = await fetchHtml('https://palena.sii.cl/cvc_cgi/dte/of_solicita_folios_dcto');
+      const SiiSession = require('../SiiSession');
+      const htmlPaso1 = await fetchHtml('https://palena.sii.cl/cvc_cgi/dte/of_solicita_folios');
+      const accion = SiiSession.extractFormAction(htmlPaso1) || '/cvc_cgi/dte/of_solicita_folios_dcto';
+      const campos = {
+        ...SiiSession.extractInputValues(htmlPaso1),
+        RUT_EMP: rutNum,
+        DV_EMP:  dvChar,
+      };
+      // El `action` del form puede venir absoluto, con barra inicial, o relativo.
+      const BASE_PALENA = 'https://palena.sii.cl';
+      const urlPaso2 = accion.startsWith('http') ? accion
+        : accion.startsWith('/')                 ? `${BASE_PALENA}${accion}`
+                                                 : `${BASE_PALENA}/cvc_cgi/dte/${accion}`;
+      const htmlProd = await postForm(urlPaso2, campos);
       if (this.config.debugDir) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         fs.writeFileSync(
@@ -4099,10 +4163,31 @@ class CertRunner {
           htmlProd, 'utf-8'
         );
       }
-      const matches = [...htmlProd.matchAll(/<option[^>]+value="(\d+)"[^>]*>/gi)];
-      result.tiposDisponiblesProduccion = matches.map(m => parseInt(m[1], 10)).filter(n => n > 0);
-      result.autorizadaProduccion = result.tiposDisponiblesProduccion.includes(39);
-      console.log(` ✓ Producción — tipos disponibles: [${result.tiposDisponiblesProduccion.join(', ')}] | Boleta 39: ${result.autorizadaProduccion ? '✅ SÍ' : '❌ NO'}`);
+      // ⚠️ "No hay <option> con el 39" NO significa "no está autorizada". El SII también
+      // responde 200 con una página de error que no trae ningún select, y ahí el parser
+      // veía cero tipos y concluía "no autorizada" — un dato inventado, indistinguible
+      // de la respuesta real.
+      //
+      // Visto el 17/08/2026 (RUT 79555666-7): palena devolvió 3377 bytes con
+      // "No ha sido posible completar su solicitud... código LIBRUD-OFSF-DTE-3-1-02" y
+      // el flujo venía reportando "certificación incompleta" desde hacía días.
+      //
+      // Se distingue por la ausencia de select, no por el texto del error: cualquier
+      // fallo del portal que no pinte el formulario cae acá.
+      const hayFormulario = /<select[^>]*>/i.test(htmlProd);
+      if (!hayFormulario) {
+        const codigo = (htmlProd.match(/([A-Z]{4,}-[A-Z]{3,}-[A-Z0-9-]{4,})/) || [])[1] || null;
+        result.consultaFallida = true;
+        result.errorConsultaProduccion = codigo
+          ? `El portal del SII no entregó el formulario de timbraje (código ${codigo})`
+          : 'El portal del SII no entregó el formulario de timbraje';
+        console.log(` [!] Producción — ${result.errorConsultaProduccion}. NO se puede afirmar si está autorizada.`);
+      } else {
+        const matches = [...htmlProd.matchAll(/<option[^>]+value="(\d+)"[^>]*>/gi)];
+        result.tiposDisponiblesProduccion = matches.map(m => parseInt(m[1], 10)).filter(n => n > 0);
+        result.autorizadaProduccion = result.tiposDisponiblesProduccion.includes(39);
+        console.log(` ✓ Producción — tipos disponibles: [${result.tiposDisponiblesProduccion.join(', ')}] | Boleta 39: ${result.autorizadaProduccion ? '✅ SÍ' : '❌ NO'}`);
+      }
     } catch (e) {
       console.log(` [!] No se pudo verificar producción: ${e.message}`);
     }
