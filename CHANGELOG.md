@@ -3,6 +3,38 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.15.0] - 2026-08-18
+
+### Agregado
+
+- `CertRunner.precargarPlanDeCorrida(sets)`: arma el plan de timbraje desde los sets ya
+  cargados y delega en `precargarCafsDeSets()`. Evita que cada consumidor duplique los
+  `cafRequired` de cada set, que era la forma de quedar desincronizado si cambiaban en la lib.
+
+  ```js
+  await runner.obtenerSets();
+  await runner.precargarPlanDeCorrida();              // corrida completa
+  await runner.precargarPlanDeCorrida(['basico']);    // un set aislado
+  ```
+
+  ⚠️ **Hay que pasar los sets que realmente se van a ejecutar.** `_estructuras` puede traer los
+  cuatro aunque la corrida ejecute uno solo, porque se rehidrata desde disco. Precargar todo en
+  ese caso timbraría folios que nadie va a emitir, y quedarían autorizados sin usar: justo el
+  gatillo del racionamiento del SII que este método viene a evitar. El default son los cuatro.
+
+### Cambiado
+
+- Los `cafRequired` de cada set salen de la constante `CAF_POR_SET`, única fuente de verdad
+  para `ejecutarSet*` y `precargarPlanDeCorrida()`. Antes vivían inline en cada `ejecutarSet*`.
+
+- **El fallback del set de guía pasa de 1 a 3.** Solo aplica cuando el set no trae
+  `cafRequired`. El valor sale de tráfico real: en 17 corridas registradas el set vino siempre
+  con `cafRequired: { 52: 3 }` y 3 casos, así que 1 timbraba de menos. Coincide con el fallback
+  que ya usaba `el consumidor`, o sea que la divergencia lib/consumidor queda resuelta.
+
+Propuesto por WB. La firma con `sets` se acordó tras detectar que la versión sin argumentos
+rompía los modos de set aislado.
+
 ## [2.14.4] - 2026-08-18
 
 ### Corregido

@@ -58,6 +58,32 @@ const { STEPS, emitProgress } = require('../utils/progress');
  * @property {string} [sessionPath]
  */
 
+/**
+ * CAF que consume cada set de certificación. **Fuente única de verdad**: la usan tanto los
+ * `ejecutarSet*` (como fallback cuando el set no trae `cafRequired`) como
+ * `precargarPlanDeCorrida()`. Antes estos números vivían inline en cada `ejecutarSet*` y los
+ * consumidores los duplicaban por su cuenta, así que un cambio acá los dejaba desincronizados
+ * y timbrando mal.
+ *
+ * El valor de `guia` es una función porque depende de cuántos casos traiga el set.
+ * El default de 3 sale de tráfico real: en 17 corridas registradas el set de guía vino
+ * siempre con `cafRequired: { 52: 3 }` y 3 casos. Antes la lib usaba 1, que timbraba de menos.
+ */
+const CAF_POR_SET = {
+  basico: { 33: 4, 56: 1, 61: 3 },
+  guia:   (setData) => ({ 52: setData?.casos?.length || 3 }),
+  exenta: { 34: 3, 56: 1, 61: 4 },
+  compra: { 46: 1, 56: 1, 61: 1 },
+};
+
+/** Nombre de la estructura y su plan de CAF, en el orden en que se ejecutan los sets. */
+const SETS_DE_CORRIDA = [
+  ['basico', 'setBasico',        CAF_POR_SET.basico],
+  ['guia',   'setGuiaDespacho',  CAF_POR_SET.guia],
+  ['exenta', 'setFacturaExenta', CAF_POR_SET.exenta],
+  ['compra', 'setFacturaCompra', CAF_POR_SET.compra],
+];
+
 class CertRunner {
   /**
    * @param {CertConfig} config - Configuración del runner
@@ -301,6 +327,45 @@ class CertRunner {
     this._planPrecargado  = total;
     return this._cafsPrecargados;
   }
+
+  /**
+   * Timbra por adelantado el total de folios de la corrida, armando el plan desde los sets ya
+   * cargados en `_estructuras`. Azúcar sobre `precargarCafsDeSets()` para que el consumidor no
+   * tenga que duplicar los `cafRequired` de cada set (ver `CAF_POR_SET`).
+   *
+   * Llamar después de `obtenerSets()` y antes del primer `ejecutarSet*`.
+   *
+   * ⚠️ **Hay que pasar los sets que realmente se van a ejecutar.** `_estructuras` puede traer
+   * los cuatro aunque la corrida ejecute uno solo, porque se rehidrata desde disco. Precargar
+   * todo en ese caso timbraría folios de sets que nadie va a emitir, y quedarían autorizados
+   * sin usar: exactamente el gatillo del racionamiento del SII que este método viene a evitar.
+   *
+   * @param {Array<'basico'|'guia'|'exenta'|'compra'>} [sets] - Sets de esta corrida.
+   * @returns {Promise<Object>} { 33: cafPath, 56: cafPath, ... }
+   */
+  async precargarPlanDeCorrida(sets = ['basico', 'guia', 'exenta', 'compra']) {
+    if (!this._estructuras) {
+      throw new Error('Ejecutar obtenerSets() antes de precargarPlanDeCorrida().');
+    }
+
+    const pedidos = new Set(sets);
+    const planes = [];
+    for (const [nombre, claveEstructura, fallback] of SETS_DE_CORRIDA) {
+      if (!pedidos.has(nombre)) continue;
+      const setData = this._estructuras[claveEstructura];
+      if (!setData) continue; // set opcional ausente en esta corrida
+      planes.push(
+        setData.cafRequired || (typeof fallback === 'function' ? fallback(setData) : fallback)
+      );
+    }
+
+    if (!planes.length) {
+      console.log('\n Nada que precargar: ninguno de los sets pedidos está presente.');
+      return {};
+    }
+    return this.precargarCafsDeSets(planes);
+  }
+
 
   /**
    * Devuelve los CAF precargados que le tocan a un set.
@@ -803,7 +868,7 @@ class CertRunner {
 
   async ejecutarSetBasico(casos) {
     emitProgress(STEPS.SET_START, { set: 'basico' });
-    const r = await this._ejecutarSet(SetBasico, 'setBasico', 'basico', { 33: 4, 56: 1, 61: 3 }, 'basico', casos);
+    const r = await this._ejecutarSet(SetBasico, 'setBasico', 'basico', CAF_POR_SET.basico, 'basico', casos);
     if (r.success) emitProgress(STEPS.SET_OK, { set: 'basico', trackId: r.trackId });
     else emitProgress(STEPS.SET_ERROR, { set: 'basico', error: r.error });
     return r;
@@ -812,7 +877,7 @@ class CertRunner {
   async ejecutarSetGuia(casos) {
     emitProgress(STEPS.SET_START, { set: 'guia' });
     const r = await this._ejecutarSet(SetGuia, 'setGuiaDespacho', 'guia',
-      (setData) => ({ 52: setData.casos?.length || 1 }), 'guia', casos);
+      CAF_POR_SET.guia, 'guia', casos);
     if (r.success) emitProgress(STEPS.SET_OK, { set: 'guia', trackId: r.trackId });
     else emitProgress(STEPS.SET_ERROR, { set: 'guia', error: r.error });
     return r;
@@ -820,7 +885,7 @@ class CertRunner {
 
   async ejecutarSetExenta(casos) {
     emitProgress(STEPS.SET_START, { set: 'exenta' });
-    const r = await this._ejecutarSet(SetExenta, 'setFacturaExenta', 'exenta', { 34: 3, 56: 1, 61: 4 }, 'exenta', casos);
+    const r = await this._ejecutarSet(SetExenta, 'setFacturaExenta', 'exenta', CAF_POR_SET.exenta, 'exenta', casos);
     if (r.success) emitProgress(STEPS.SET_OK, { set: 'exenta', trackId: r.trackId });
     else emitProgress(STEPS.SET_ERROR, { set: 'exenta', error: r.error });
     return r;
@@ -828,7 +893,7 @@ class CertRunner {
 
   async ejecutarSetCompra(casos) {
     emitProgress(STEPS.SET_START, { set: 'compra' });
-    const r = await this._ejecutarSet(SetCompra, 'setFacturaCompra', 'compra', { 46: 1, 56: 1, 61: 1 }, 'compra', casos);
+    const r = await this._ejecutarSet(SetCompra, 'setFacturaCompra', 'compra', CAF_POR_SET.compra, 'compra', casos);
     if (r.success) emitProgress(STEPS.SET_OK, { set: 'compra', trackId: r.trackId });
     else emitProgress(STEPS.SET_ERROR, { set: 'compra', error: r.error });
     return r;
