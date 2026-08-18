@@ -447,7 +447,11 @@ class BoletaCert {
     // 4. Enviar EnvioBOLETA
     console.log('\nEnviando EnvioBOLETA al SII...');
     const enviador = new EnviadorSII(this.certificado, this.ambiente);
-    const resultadoBoleta = await enviador.enviarBoletaSoap(envioBoleta);
+    // `let`, no `const`: la rama de duplicado más abajo lo reasigna. Con `const` eso lanzaba
+    // `TypeError: Assignment to constant variable` justo en el path que pretende recuperarse.
+    // Sin disparador confirmado: el duplicado real de EnvioBOLETA vuelve STATUS 99 (no 7), y
+    // los STATUS 7 observados son cvc-* de Libros, que EnviadorSII rutea a duplicado:false.
+    let resultadoBoleta = await enviador.enviarBoletaSoap(envioBoleta);
     
     if (!resultadoBoleta.ok) {
       if (resultadoBoleta.duplicado) {

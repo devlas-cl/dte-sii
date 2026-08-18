@@ -3,6 +3,29 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.14.4] - 2026-08-18
+
+### Corregido
+
+- `BoletaCert`: la rama que maneja un `EnvioBOLETA` duplicado reasignaba una variable
+  declarada `const`, lo que lanzaba `TypeError: Assignment to constant variable` justo en el
+  camino que pretende recuperarse. Ahora es `let`.
+
+  **Sin disparador confirmado.** Reportado por WB a partir de lectura estática del código, no
+  de un caso observado. Se verificó contra tráfico real y no se pudo reproducir: reenviar un
+  `EnvioBOLETA` ya aceptado a maullin devuelve **STATUS 99** (`"Archivo ya fue enviado N veces
+  con Trackid X"`), no STATUS 7, y el 99 no setea `duplicado`, así que la rama no se entra.
+  De 12 respuestas STATUS 7 capturadas en corridas reales, todas son de Libros con detalle
+  `cvc-*`, que `EnviadorSII` rutea explícitamente a `duplicado: false`. En 319 logs de
+  corridas la rama nunca se ejecutó.
+
+  Se corrige igual porque el código es incorrecto y el costo es nulo, pero **no arregla una
+  falla observada de certificación de boleta**.
+
+  Punto ciego conocido: las capturas contra palena son solo navegación de portal, ningún
+  `DTEUpload`. Si aparece un STATUS 7 sin `trackId` y sin `CHR-00001`/`SCH-00001`/`cvc-`, hay
+  que revisar la clasificación de `EnviadorSII` antes que este parche.
+
 ## [2.14.3] - 2026-08-17
 
 ### Corregido
