@@ -33,6 +33,114 @@ const SiiSessionStore = require('./SiiSessionStore');
 const { resolveDataDir } = require('./utils/paths');
 const { registrarHttpDebug } = require('./utils/httpDebug');
 
+/** Portal viejo (MIPYME). No es www4: esas son las SPA nuevas. */
+const RESPALDO_BASE = 'https://www1.sii.cl/cgi-bin/Portal001';
+/** Tope duro del SII por descarga. Medido 18/08/2026: 20 → OK, 21 → página de error. */
+const RESPALDO_MAX_DOCS = 20;
+
+/**
+ * Extrae el texto de los `alert(...)` de una página del portal viejo del SII.
+ *
+ * ⚠️ El portal viejo comunica sus errores por **alert() de JavaScript**, no en el HTML
+ * visible ni en el `<title>`. Quien clasifique por título, o quien limpie el HTML sacando
+ * los `<script>` antes de leerlo, pierde el motivo entero y se queda con una página que
+ * parece decir otra cosa.
+ *
+ * Caso real (18/08/2026): para un RUT sin datos, la respuesta traía
+ * `<title>Seleccionar empresa</title>` mientras el alert decía
+ * *"No existe información en MIPYME para el rut ingresado"*. Clasificar por el título llevó
+ * a inventar tres causas equivocadas antes de mirar el script.
+ *
+ * @param {string} html
+ * @returns {string[]} mensajes en orden de aparición, ya desescapados
+ */
+function extraerAlertasPortal(html = '') {
+  const mensajes = [];
+  const re = /alert\s*\(\s*(['"])([\s\S]*?)\1\s*\)/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    // ⚠️ La página normal del respaldo trae `//alert("Maximo numero de docmentos...")`
+    // COMENTADO dentro del template. Tomarlo por bueno hace creer que un listado válido
+    // falló. Se descarta todo alert que venga comentado en su propia línea.
+    const inicioLinea = html.lastIndexOf('\n', m.index) + 1;
+    const antes = html.slice(inicioLinea, m.index);
+    if (/\/\//.test(antes.replace(/[a-z]+:\/\//gi, ''))) continue;
+
+    const texto = m[2]
+      .replace(/\\(['"\\])/g, '$1')
+      .replace(/\\[rnt]/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&aacute;/gi, 'á').replace(/&eacute;/gi, 'é').replace(/&iacute;/gi, 'í')
+      .replace(/&oacute;/gi, 'ó').replace(/&uacute;/gi, 'ú').replace(/&ntilde;/gi, 'ñ')
+      .replace(/&amp;/gi, '&')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (texto) mensajes.push(texto);
+  }
+  return mensajes;
+}
+
+/**
+ * Construye el error de una respuesta del portal que no fue la esperada, usando **lo que el
+ * portal realmente dijo** en vez de una causa inferida.
+ *
+ * Deja el texto del portal en `err.mensajePortal` para que el consumidor pueda mostrarlo tal
+ * cual: es más útil y más honesto que cualquier traducción nuestra.
+ *
+ * @param {string} html - cuerpo de la respuesta
+ * @param {string} fallback - mensaje si el portal no dijo nada reconocible
+ * @returns {Error & { code?: string, mensajePortal?: string }}
+ */
+function errorDeRespuestaPortal(html = '', fallback = 'respuesta inesperada del portal') {
+  const alertas = extraerAlertasPortal(html);
+  const texto = alertas.join(' | ');
+
+  if (/recaptcha/i.test(html) && !texto) {
+    const err = new Error('El SII activó el captcha en el respaldo MIPYME: no se puede automatizar mientras esté encendido');
+    err.code = 'RESPALDO_CAPTCHA';
+    return err;
+  }
+
+  // ⚠️ UN alert es un veredicto; VARIOS son el catálogo del template.
+  //
+  // Medido el 19/08/2026 con EMPRESA EJEMPLO: una respuesta trajo cinco mensajes encadenados y
+  // contradictorios entre sí ("no está autorizado", "debe hacerlo el representante legal",
+  // "no existe información en MIPYME"…). Eso no es el SII dictaminando: son todas las ramas
+  // de error que el template define, ninguna ejecutada. Tomarlo por veredicto marcó al
+  // comercio como "sin datos" y **abortó un backfill que venía funcionando**.
+  //
+  // La página realmente rechazada (Comercio D) trae **un solo** alert, seguido de
+  // `history.back()`.
+  if (alertas.length > 1) {
+    const err = new Error(
+      `El portal devolvió una página con ${alertas.length} mensajes de error del template, ` +
+      'sin un veredicto único. No se puede concluir nada: revisar el HTML capturado por SII_HTTP_DEBUG_DIR.'
+    );
+    err.code = 'RESPALDO_INDETERMINADO';
+    err.mensajesPortal = alertas;
+    return err;
+  }
+
+  if (texto) {
+    const err = new Error(`El portal MIPYME respondió: "${texto}"`);
+    err.mensajePortal = texto;
+    if (/no existe informaci[oó]n/i.test(texto)) err.code = 'RESPALDO_SIN_DATOS';
+    else if (/captcha/i.test(texto)) err.code = 'RESPALDO_CAPTCHA';
+    else err.code = 'RESPALDO_RECHAZADO';
+    return err;
+  }
+
+  // Sin alert: el título es lo único que queda, pero NO alcanza para afirmar una causa.
+  if (/Seleccionar empresa/i.test(html)) {
+    const err = new Error('El portal devolvió la página de ingreso ("Seleccionar empresa") sin ningún mensaje. Causa no determinada: revisar el HTML capturado por SII_HTTP_DEBUG_DIR.');
+    err.code = 'RESPALDO_SIN_EMPRESA';
+    return err;
+  }
+
+  return new Error(fallback);
+}
+
 function _cookieObjToStr(obj) {
   return Object.entries(obj).map(([k, v]) => `${k}=${v}`).join('; ');
 }
@@ -64,6 +172,37 @@ const SII_TLS_OPTS = {
 // una convención de un producto Windows específico hardcodeada en una librería
 // genérica de DTE — en Linux creaba esa ruta igual, porque Node no la valida.
 const SESSION_CACHE_PATH = path.join(resolveDataDir(), 'sii_session_cache.json');
+/** TTL de una sesión cacheada. El SII tolera ~2 h de inactividad; se refresca al validarla. */
+const SESSION_CACHE_TTL_MS = 90 * 60 * 1000;
+/** Destino al que el SII redirige tras autenticar con certificado. */
+const TARGET = 'https://misiir.sii.cl/cgi_misii/siihome.cgi';
+/** Intentos de autenticación ante fallas de red/TLS (el primero incluido). */
+const AUTH_MAX_INTENTOS = 3;
+
+/**
+ * ¿Es una falla de red/TLS que conviene reintentar?
+ *
+ * ⚠️ Medido el 18/08/2026: el SII devuelve **`EPROTO` de forma intermitente** al abrir la
+ * conexión TLS con certificado (`rsa_pss ... last octet invalid`). Reintentando con el mismo
+ * certificado funciona. **No es señal de certificado vencido ni no habilitado**, aunque lo
+ * parezca: interpretarlo así marca clientes sanos como rotos.
+ *
+ * Solo entran errores de transporte, que fallan **antes** de que el SII cree la sesión. Un
+ * error de negocio del SII (límite de sesiones, credenciales) nunca se reintenta: repetirlo
+ * empeora el problema.
+ */
+function esErrorTransitorio(err) {
+  if (!err) return false;
+  if (err.code === 'SII_LIMITE_SESIONES') return false;
+  const CODES = new Set([
+    'EPROTO', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+    'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ERR_SSL_PACKET_LENGTH_TOO_LONG',
+  ]);
+  if (err.code && CODES.has(err.code)) return true;
+  return /socket hang up|timeout|ECONNRESET|EPROTO/i.test(err.message || '');
+}
+/** Tope de sesiones guardadas a la vez. Evita que el archivo crezca con la base de clientes. */
+const SESSION_CACHE_MAX = 200;
 
 /**
  * Registro global de instancias SiiPortalAuth por certHash (singleton por certificado).
@@ -288,8 +427,6 @@ class SiiPortalAuth {
    * @throws {Error} Si la autenticación falla
    */
   async autenticar() {
-    const TARGET = 'https://misiir.sii.cl/cgi_misii/siihome.cgi';
-
     // ── 1a. Store compartido (cubre sesiones de CafSolicitor/SiiSession) ────────
     const storedStr = SiiSessionStore.get(this._certHash);
     if (storedStr) {
@@ -319,6 +456,30 @@ class SiiPortalAuth {
     }
 
     // ── 2. Nueva autenticación ────────────────────────────────────────────────
+    // Se reintenta SOLO ante fallas de red/TLS (ver `esErrorTransitorio`). Es seguro porque
+    // esas fallan ANTES de que el SII cree la sesión, así que no dejan sesiones colgadas.
+    let ultimo;
+    for (let intento = 1; intento <= AUTH_MAX_INTENTOS; intento++) {
+      try {
+        return await this._autenticarNuevo();
+      } catch (err) {
+        ultimo = err;
+        if (!esErrorTransitorio(err) || intento === AUTH_MAX_INTENTOS) throw err;
+        const espera = 1000 * Math.pow(2, intento - 1);
+        console.warn(`[SiiPortalAuth] Falla transitoria al autenticar (${err.code || err.message.slice(0, 50)}), reintento ${intento + 1}/${AUTH_MAX_INTENTOS} en ${espera} ms`);
+        await new Promise((r) => setTimeout(r, espera));
+      }
+    }
+    throw ultimo;
+  }
+
+  /**
+   * Un intento de autenticación nueva contra el SII, sin reintentos.
+   *
+   * ⚠️ El límite de sesiones NO se reintenta: cada intento empeora el problema.
+   * @private
+   */
+  async _autenticarNuevo() {
     const cookieJar = {};
 
     await this._request(
@@ -341,10 +502,12 @@ class SiiPortalAuth {
     // Verificar mensaje de límite de sesiones
     if (r2.body.includes('m\u00e1ximo de sesiones') || r2.body.includes('maximo de sesiones') ||
         r2.body.includes('01.01.215.500.709')) {
-      throw new Error(
+      const errLimite = new Error(
         'SiiPortalAuth: límite de sesiones SII alcanzado.\n' +
         'Cierra sesión en sii.cl y espera ~30 min, o las sesiones anteriores expirarán solas.'
       );
+      errLimite.code = 'SII_LIMITE_SESIONES';
+      throw errLimite;
     }
 
     const autenticado = Object.keys(cookieJar).some(k => k.startsWith('NETSCAPE_LIVEWIRE'));
@@ -388,51 +551,110 @@ class SiiPortalAuth {
     }
   }
 
-  /** Lee sesión cacheada del disco para el cert dado. @private */
-  static _cargarSesionCache(certHash) {
+  /**
+   * Lee el archivo de cache completo, normalizado al formato v2.
+   *
+   * ⚠️ El formato v1 guardaba **una sola sesión** (`{ certHash, ts, cookies }`). En un servidor
+   * multi-tenant eso significa que cada certificado pisa al anterior y todos terminan
+   * re-autenticando en cada pasada, que es justo lo que dispara el bloqueo del SII por
+   * "máximo de sesiones autenticadas". v2 es un mapa por `certHash`.
+   *
+   * El v1 que encuentre se **migra**, no se descarta: perder la sesión vigente al desplegar
+   * esta versión forzaría un re-login innecesario.
+   *
+   * @private
+   */
+  static _leerArchivoCache() {
     try {
-if (!fs.existsSync(SESSION_CACHE_PATH)) {
-        console.log('[SiiPortalAuth] Cache: archivo no existe →', SESSION_CACHE_PATH);
-        return null;
-      }
+      if (!fs.existsSync(SESSION_CACHE_PATH)) return { v: 2, sesiones: {}, existia: false };
       const data = JSON.parse(fs.readFileSync(SESSION_CACHE_PATH, 'utf8'));
-      if (data.certHash !== certHash) {
-        console.log(`[SiiPortalAuth] Cache: cert no coincide (guardado=${data.certHash} actual=${certHash})`);
-        return null;
+      if (data && data.v === 2 && data.sesiones) return { ...data, existia: true };
+      if (data && data.certHash && data.cookies) {
+        return { v: 2, sesiones: { [data.certHash]: { ts: data.ts, cookies: data.cookies } }, existia: true };
       }
-      const edadMin = Math.round((Date.now() - data.ts) / 60000);
-      // TTL: 90 minutos (SII permite ~2h de inactividad; se refresca en cada validación)
-      if (Date.now() - data.ts > 90 * 60 * 1000) {
-        console.log(`[SiiPortalAuth] Cache: sesión expirada (edad=${edadMin} min, TTL=90 min)`);
-        return null;
-      }
-      console.log(`[SiiPortalAuth] Cache: sesión encontrada`);
-      return data.cookies;
+      return { v: 2, sesiones: {}, existia: true };
     } catch (err) {
       console.warn('[SiiPortalAuth] Cache: error leyendo caché →', err.message);
-      return null;
+      return { v: 2, sesiones: {}, existia: false };
     }
   }
 
-  /** Guarda sesión en disco. @private */
+  /** Lee sesión cacheada del disco para el cert dado. @private */
+  static _cargarSesionCache(certHash) {
+    const { sesiones, existia } = SiiPortalAuth._leerArchivoCache();
+    if (!existia) {
+      console.log('[SiiPortalAuth] Cache: archivo no existe →', SESSION_CACHE_PATH);
+      return null;
+    }
+    const entrada = sesiones[certHash];
+    if (!entrada) {
+      console.log(`[SiiPortalAuth] Cache: sin sesión para este certificado (guardadas=${Object.keys(sesiones).length})`);
+      return null;
+    }
+    const edadMin = Math.round((Date.now() - entrada.ts) / 60000);
+    if (Date.now() - entrada.ts > SESSION_CACHE_TTL_MS) {
+      console.log(`[SiiPortalAuth] Cache: sesión expirada (edad=${edadMin} min, TTL=${SESSION_CACHE_TTL_MS / 60000} min)`);
+      return null;
+    }
+    console.log('[SiiPortalAuth] Cache: sesión encontrada');
+    return entrada.cookies;
+  }
+
+  /** Guarda sesión en disco, sin pisar las de los otros certificados. @private */
   static _guardarSesionCache(certHash, cookieJar) {
     try {
       fs.mkdirSync(path.dirname(SESSION_CACHE_PATH), { recursive: true });
-      fs.writeFileSync(SESSION_CACHE_PATH, JSON.stringify({
-        certHash,
-        ts: Date.now(),
-        cookies: cookieJar,
-      }), 'utf8');
-      const cookieKeys = Object.keys(cookieJar);
-      console.log(`[SiiPortalAuth] Cache: sesión guardada`);
+
+      // Se relee justo antes de escribir: con varias réplicas escribiendo el mismo archivo,
+      // partir de una copia vieja en memoria borraría las sesiones que otro proceso guardó.
+      const archivo = SiiPortalAuth._leerArchivoCache();
+      delete archivo.existia;
+      archivo.sesiones[certHash] = { ts: Date.now(), cookies: cookieJar };
+
+      // Poda: primero lo expirado, después las más viejas si igual se pasa del tope. Sin esto
+      // el archivo crece sin límite con la base de clientes.
+      const ahora = Date.now();
+      for (const [k, v] of Object.entries(archivo.sesiones)) {
+        if (ahora - v.ts > SESSION_CACHE_TTL_MS) delete archivo.sesiones[k];
+      }
+      const claves = Object.keys(archivo.sesiones);
+      if (claves.length > SESSION_CACHE_MAX) {
+        claves
+          .sort((a, b) => archivo.sesiones[a].ts - archivo.sesiones[b].ts)
+          .slice(0, claves.length - SESSION_CACHE_MAX)
+          .forEach((k) => delete archivo.sesiones[k]);
+      }
+
+      // Escritura atómica: un lector concurrente nunca ve un JSON a medio escribir.
+      const tmp = `${SESSION_CACHE_PATH}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(archivo), 'utf8');
+      fs.renameSync(tmp, SESSION_CACHE_PATH);
+      console.log(`[SiiPortalAuth] Cache: sesión guardada (total=${Object.keys(archivo.sesiones).length})`);
     } catch (err) {
       console.warn('[SiiPortalAuth] Cache: error guardando caché →', err.message);
     }
   }
 
-  /** Borra la sesión cacheada (útil para forzar re-login). */
-  static limpiarSesionCache() {
-    try { fs.unlinkSync(SESSION_CACHE_PATH); } catch { /* ignorar */ }
+  /**
+   * Borra sesiones cacheadas (útil para forzar re-login).
+   * @param {string} [certHash] - si se omite, borra **todas**.
+   */
+  static limpiarSesionCache(certHash) {
+    if (!certHash) {
+      try { fs.unlinkSync(SESSION_CACHE_PATH); } catch { /* ignorar */ }
+      return;
+    }
+    try {
+      const archivo = SiiPortalAuth._leerArchivoCache();
+      delete archivo.existia;
+      if (!archivo.sesiones[certHash]) return;
+      delete archivo.sesiones[certHash];
+      const tmp = `${SESSION_CACHE_PATH}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(archivo), 'utf8');
+      fs.renameSync(tmp, SESSION_CACHE_PATH);
+    } catch (err) {
+      console.warn('[SiiPortalAuth] Cache: error limpiando caché →', err.message);
+    }
   }
 
   /**
@@ -1160,6 +1382,146 @@ if (!fs.existsSync(SESSION_CACHE_PATH)) {
     };
 
     return { emisor, cookieJar };
+  }
+
+  // ─── Respaldo MIPYME — descarga del XML firmado completo ────────────────────
+
+  /**
+   * Descarga el XML firmado completo de los DTE emitidos o recibidos de una empresa, desde el
+   * "Respaldo de archivos MIPYME" del portal (www1.sii.cl/cgi-bin/Portal001).
+   *
+   * Es la única vía que entrega el **documento completo**: detalle línea por línea, `CdgItem`
+   * del proveedor, referencias y TED. `obtenerDetalleDtes()` solo trae metadatos y
+   * `obtenerResumenRegistro()` solo totales mensuales.
+   *
+   * ⚠️ El SII corta en **20 documentos por descarga**: con 21 devuelve una página de error, no
+   * un XML recortado (medido 18/08/2026: 20 → OK, 21 → error). Por eso el rango se trocea solo
+   * partiendo por la mitad hasta que cada tramo quepa, y se devuelve un XML por tramo.
+   *
+   * ⚠️ Requiere **solo el certificado digital**, no estar certificado como emisor.
+   *
+   * ⚠️ El captcha existe en el formulario pero hoy va vacío. Si el SII lo enciende, la
+   * respuesta deja de ser XML y se lanza `RESPALDO_CAPTCHA`. No reintentar en loop: no se
+   * resuelve solo.
+   *
+   * Ver `docs/RESPALDO_MIPYME_PORTAL.md` para el contrato completo y los hallazgos.
+   *
+   * @param {string} rut - RUT de la empresa sin DV ni puntos (ej. '76543210')
+   * @param {string} dv  - Dígito verificador (ej. '6')
+   * @param {Object} opciones
+   * @param {'ENV'|'RCP'} [opciones.origen='ENV'] - ENV = emitidos, RCP = recibidos
+   * @param {string} opciones.desde - AAAA-MM-DD
+   * @param {string} opciones.hasta - AAAA-MM-DD
+   * @param {string} [opciones.tipoDoc=''] - Código de tipo DTE; vacío = todos
+   * @param {number} [opciones.reintentos=3] - Intentos por request (el portal es lento)
+   * @param {(t: {desde:string,hasta:string,total:number,xml:string}) => Promise<void>} [opciones.onTramo]
+   *   Modo streaming: se invoca por cada tramo descargado y el XML **no** se acumula en el
+   *   resultado. Obligatorio para históricos grandes: sin esto todos los XML quedan en memoria
+   *   hasta el final (~6,4 KB por documento, o sea ~7 MB para 1.100 documentos).
+   * @param {Object} [opciones.cookieJar] - Sesión ya autenticada
+   * @returns {Promise<{ total: number, tramos: Array<{desde:string,hasta:string,total:number,xml?:string}> }>}
+   *   Con `onTramo`, los tramos vienen sin `xml` (ya se entregó por callback).
+   */
+  async descargarRespaldoMipyme(rut, dv, opciones = {}) {
+    const {
+      origen = 'ENV', desde, hasta, tipoDoc = '',
+      reintentos = 3, cookieJar = null, onTramo = null,
+    } = opciones;
+
+    if (!desde || !hasta) throw new Error('descargarRespaldoMipyme: faltan `desde` y `hasta` (AAAA-MM-DD)');
+    if (origen !== 'ENV' && origen !== 'RCP') {
+      throw new Error(`descargarRespaldoMipyme: origen debe ser 'ENV' (emitidos) o 'RCP' (recibidos), no '${origen}'`);
+    }
+
+    const jar = cookieJar || await this.autenticar();
+    // El portal viejo espera este flag; SiiPortalAuth no lo setea porque no lo necesita el resto.
+    jar['usa_firma_central'] = 'true';
+
+    const URL_LISTA = `${RESPALDO_BASE}/lista_documentos.cgi`;
+    const cabeceras = {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Origin': 'https://www1.sii.cl',
+      'Referer': URL_LISTA,
+    };
+    const comunes = { RUT_EMP: rut, DV_EMP: dv, RUT_RECP: '', FOLIO: '', FOLIOHASTA: '', RZN_SOC: '', TPO_DOC: tipoDoc, ESTADO: '', ORDEN: '' };
+
+    const reintentar = async (fn, etiqueta) => {
+      let ultimo;
+      for (let i = 1; i <= reintentos; i++) {
+        try { return await fn(); } catch (e) {
+          ultimo = e;
+          // Estos no se arreglan reintentando: el portal ya dio su veredicto.
+          if (['RESPALDO_CAPTCHA', 'RESPALDO_SIN_EMPRESA', 'RESPALDO_SIN_DATOS', 'RESPALDO_RECHAZADO', 'RESPALDO_INDETERMINADO'].includes(e.code)) throw e;
+          if (i < reintentos) await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, i - 1)));
+        }
+      }
+      throw new Error(`${etiqueta}: falló tras ${reintentos} intentos — ${ultimo.message}`);
+    };
+
+    /** Consulta el listado y devuelve cuántos documentos hay en el rango. */
+    const contar = (d, h) => reintentar(async () => {
+      const body = new URLSearchParams({
+        'recaptcha-response': '', ORIGEN: origen, FEC_DESDE: d, FEC_HASTA: h,
+        NUM_PAG: '1', TPO_ARCHIVO: 'dte', ...comunes,
+      }).toString();
+      const res = await this._request(URL_LISTA, { method: 'POST', cookieJar: jar, body, headers: cabeceras });
+      const html = res.body || '';
+
+      // El total manda: si está, la respuesta es buena aunque la página traiga algún alert
+      // incidental. Recién si no está se investiga por qué.
+      const m = html.match(/total de documentos[^0-9]{0,40}(\d+)/i);
+      if (m) return parseInt(m[1], 10);
+
+      throw errorDeRespuestaPortal(html, 'no se pudo leer el total de documentos del listado');
+    }, `listado ${d}..${h}`);
+
+    /** Baja el XML de un rango que ya se sabe que cabe en el tope. */
+    const bajar = (d, h) => reintentar(async () => {
+      const qs = new URLSearchParams({ ...comunes, ORIGEN: origen, FEC_DESDE: d, FEC_HASTA: h, DOWNLOAD: 'XML' }).toString();
+      const res = await this._request(`${RESPALDO_BASE}/download.cgi?${qs}`, { cookieJar: jar, headers: { Referer: URL_LISTA } });
+      const cuerpo = res.body || '';
+      if (cuerpo.trimStart().startsWith('<?xml')) return cuerpo;
+      throw errorDeRespuestaPortal(cuerpo, 'la descarga no devolvió XML');
+    }, `descarga ${d}..${h}`);
+
+    // Parte el rango por la mitad hasta que cada tramo quepa en RESPALDO_MAX_DOCS.
+    const aDia = (s) => new Date(`${s}T00:00:00Z`);
+    const aIso = (x) => x.toISOString().slice(0, 10);
+    const tramos = [];
+    const dividir = async (d, h) => {
+      const n = await contar(d, h);
+      if (n === 0) return;
+      if (n <= RESPALDO_MAX_DOCS) { tramos.push({ desde: d, hasta: h, total: n }); return; }
+      const medio = aIso(new Date((aDia(d).getTime() + aDia(h).getTime()) / 2));
+      if (medio === h || medio === d) {
+        // Un solo día con más de 20 documentos: el SII no deja bajarlo y no hay cómo partirlo.
+        throw new Error(`El ${d} tiene ${n} documentos y el SII solo permite ${RESPALDO_MAX_DOCS} por descarga. No es divisible por fecha.`);
+      }
+      const siguiente = aIso(new Date(aDia(medio).getTime() + 86400000));
+      await dividir(d, medio);
+      await dividir(siguiente, h);
+    };
+    await dividir(desde, hasta);
+
+    // ⚠️ Del MÁS NUEVO al más viejo. El troceo por bisección deja los tramos en orden
+    // cronológico, así que sin esto el consumidor recibe primero lo más antiguo del rango y
+    // espera todas las descargas para ver lo último. Al revés, el primer tramo ya trae los
+    // documentos recientes, que es lo que el usuario está mirando.
+    tramos.sort((a, b) => b.desde.localeCompare(a.desde));
+
+    let total = 0;
+    for (const t of tramos) {
+      const xml = await bajar(t.desde, t.hasta);
+      total += t.total;
+      if (onTramo) {
+        // Modo streaming: el consumidor persiste y el XML se suelta enseguida. Sin esto, un
+        // histórico grande queda entero en memoria (~6,4 KB por documento).
+        await onTramo({ desde: t.desde, hasta: t.hasta, total: t.total, xml });
+      } else {
+        t.xml = xml;
+      }
+    }
+    return { total, tramos };
   }
 }
 

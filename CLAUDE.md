@@ -44,6 +44,11 @@ Published as `@devlas/dte-sii` (MIT). Used internally by `el consumidor` via `cr
 ├── cert/                 ← SII certification helpers
 ├── utils/                ← Additional utility modules
 └── docs/                 ← SII documentation references
+    └── RESPALDO_MIPYME_PORTAL.md  ← ⚠️ leer antes de tocar la descarga de DTE completos
+        desde el portal: contrato exacto (POST a lista_documentos.cgi, luego GET a
+        download.cgi), ORIGEN=ENV/RCP, captcha hoy apagado pero puede encenderse, tope de
+        20 documentos medido, y §7bis — el portal viejo responde sus rechazos por alert()
+        de JavaScript con HTTP 200, NO en el HTML ni en el <title>
 ```
 
 ---
@@ -150,12 +155,12 @@ en un servidor Linux, igual se crea esa ruta (Node no valida el formato), pero:
   default en la mayoría de PaaS), la sesión se pierde en cada deploy → cada redeploy fuerza un
   re-login completo contra el SII. Deploys frecuentes pueden disparar el bloqueo de "máximo de
   sesiones autenticadas" para el RUT.
-- **Nota aparte, incluso con `DATADIR` persistente**: el cache guarda **una sola sesión a la
-  vez** (compara `certHash` contra lo guardado — `SiiPortalAuth.js` método `_cargarSesionCache`).
-  En un servidor multi-tenant (muchos comercios, cada uno con su propio certificado), el cache
-  se pisa cada vez que se usa un certificado distinto al último guardado. El beneficio real de
-  persistirlo en un volumen no es "evitar todo re-login" (eso ya no aplica con múltiples
-  certificados activos) — es evitar perderlo **en cada redeploy** para el comercio que más lo usa.
+- **Desde 2.16.0 el cache es un mapa por `certHash`** (`_leerArchivoCache` /
+  `_guardarSesionCache`), así que múltiples comercios conviven sin pisarse. Antes guardaba una
+  sola sesión y cada certificado invalidaba al anterior, lo que hacía que **todos** re-autenticaran
+  en cada pasada. Con el mapa, el volumen persistente sí evita el re-login de toda la base, no
+  solo el del comercio más activo. La escritura es atómica y relee antes de escribir, para que
+  dos réplicas sobre el mismo volumen no se borren las sesiones entre sí.
 
 `FolioService`/`CafSolicitor` tienen un mecanismo relacionado pero separado vía
 `process.env.SII_SESSION_PATH` (ruta a un archivo, no a un directorio) — mismo riesgo de

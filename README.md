@@ -25,6 +25,7 @@ npm install @devlas/dte-sii
 - [Libros electrónicos y RCOF](#libros-electrónicos-y-rcof)
 - [Gestión de folios](#gestión-de-folios)
 - [Sesión y autenticación con el SII](#sesión-y-autenticación-con-el-sii)
+- [Descargar el XML completo desde el portal (Respaldo MIPYME)](#descargar-el-xml-completo-desde-el-portal-respaldo-mipyme)
 - [Aceptación y reclamo de DTE (WsReclamo)](#aceptación-y-reclamo-de-dte-wsreclamo)
 - [Estados SII: Interpretación de respuestas](#estados-sii-interpretación-de-respuestas)
 - [Manejo de errores](#manejo-de-errores)
@@ -568,6 +569,41 @@ const datos = await auth.obtenerDatosEmpresa()
 const cookies = await SiiPortalAuth.getCookieStringForPfx(cert)
 ```
 
+#### Caché de sesión: un mapa por certificado
+
+Un login contra `zeusr.sii.cl` es un handshake con certificado, **caro y contado por el SII**,
+que bloquea el RUT por *"máximo de sesiones autenticadas"*. Por eso las cookies se cachean en
+disco, en `$DATADIR/sii_session_cache.json`, con un TTL de 90 minutos.
+
+Desde **2.16.0 el caché es un mapa por huella de certificado**. Antes guardaba una sola sesión,
+así que en un servidor multi-tenant cada certificado invalidaba al anterior y **todos**
+re-autenticaban en cada pasada: el costo crecía lineal con la base de clientes.
+
+- El formato viejo se **migra**, no se descarta.
+- Poda automática: expiradas primero, y tope de 200 entradas.
+- Escritura atómica y relectura previa, para que dos réplicas sobre el mismo volumen no se
+  borren las sesiones entre sí.
+
+```javascript
+SiiPortalAuth.limpiarSesionCache(certHash)   // borra una
+SiiPortalAuth.limpiarSesionCache()           // borra todas
+```
+
+> ⚠️ **En un servidor, apunta `DATADIR` a un volumen persistente.** Sin eso el caché vive en el
+> filesystem del contenedor y se pierde en cada redeploy, forzando un re-login de toda la base.
+
+#### Reintento ante fallas de red/TLS
+
+`autenticar()` reintenta 3 veces con espera progresiva (1s, 2s, 4s) ante errores de transporte.
+
+> ⚠️ El SII devuelve **`EPROTO` de forma intermitente** al abrir la conexión TLS con certificado
+> (`rsa_pss ... last octet invalid`), y reintentando con el **mismo** certificado funciona. **No
+> es señal de certificado vencido ni no habilitado**, aunque lo parezca. Interpretarlo así marca
+> como rotos certificados que están sanos.
+
+El **límite de sesiones nunca se reintenta** (cada intento empeora el bloqueo) y se distingue por
+`err.code === 'SII_LIMITE_SESIONES'`.
+
 ### SiiSession: sesiones HTTP autenticadas
 
 ```javascript
@@ -577,6 +613,91 @@ const session = new SiiSession(new Certificado(fs.readFileSync('empresa.pfx'), '
 await session.loginWithCertificate()
 const resp = await session.request('GET', 'https://herculesr.sii.cl/...')
 ```
+
+---
+
+## Descargar el XML completo desde el portal (Respaldo MIPYME)
+
+`descargarRespaldoMipyme()` baja el **XML firmado completo** de los DTE emitidos o recibidos
+desde el "Respaldo de archivos MIPYME" del portal (`www1.sii.cl/cgi-bin/Portal001`).
+
+Es la única vía que entrega el **documento entero**: detalle línea por línea, `CdgItem` del
+proveedor, referencias y TED. `obtenerDetalleDtes()` solo trae metadatos y
+`obtenerResumenRegistro()` solo totales mensuales.
+
+**Requiere únicamente el certificado digital**, no estar certificado como emisor.
+
+> 🔴 **Existe SOLO en producción: no hay ambiente de certificación.** Medido sobre
+> `/cgi-bin/Portal001/lista_documentos.cgi`: `www1.sii.cl` responde 200, `maullin.sii.cl`
+> redirige a `Error404` y `www4c.sii.cl` da 404 (para contrastar, una ruta real de maullin
+> redirige al login de certificación, no a un 404).
+>
+> Consecuencia para cualquier consumidor: con el resto del sistema apuntando a maullin, este
+> método **igual lee documentos reales del contribuyente**. Es de solo lectura contra el SII,
+> pero escribe facturas reales en la base del entorno que lo llame. Un entorno de desarrollo
+> necesita una puerta explícita; no alcanza con mirar la variable de ambiente del DTE, porque
+> esta función no tiene ambientes.
+
+```javascript
+const auth = new SiiPortalAuth({ pfxBuffer, pfxPassword })
+
+const { total, tramos } = await auth.descargarRespaldoMipyme('76543210', '6', {
+  origen: 'RCP',            // 'ENV' emitidos | 'RCP' recibidos
+  desde:  '2026-01-01',
+  hasta:  '2026-08-18',
+  tipoDoc: '',              // vacío = todos
+  reintentos: 3,
+})
+// tramos: [{ desde, hasta, total, xml }, ...] — un XML por tramo
+```
+
+### Modo streaming (`onTramo`) — obligatorio para históricos grandes
+
+Sin `onTramo` **todos los XML quedan en memoria hasta el final**: ~6,4 KB por documento, o sea
+unos 7 MB para 1.100 documentos, y crece lineal.
+
+```javascript
+await auth.descargarRespaldoMipyme(rut, dv, {
+  origen: 'RCP', desde, hasta,
+  onTramo: async (t) => { await guardar(t.xml) },   // se persiste y se suelta
+})
+// con onTramo, los tramos del resultado vienen SIN `xml`
+```
+
+### Qué hay que saber del portal
+
+| | |
+|---|---|
+| **Tope de 20 por descarga** | Es del servidor, no cosmético. Con 21 devuelve **HTML de error**, no un XML recortado. El método trocea el rango solo, del **más reciente al más viejo**. |
+| **Un día con más de 20** | No se puede partir más por fecha: se lanza error explícito. Tiene salida cortando por `TPO_DOC` (un tipo de DTE por consulta). ⚠️ **No** usar `FOLIO`/`FOLIOHASTA`: borran `FEC_HASTA` en silencio y devuelven otro conjunto. |
+| **Encoding** | El XML viene en **ISO-8859-1**. Leerlo como utf8 rompe los acentos. |
+| **Captcha** | Hoy va vacío, pero el SII puede encenderlo sin avisar → `RESPALDO_CAPTCHA`. |
+| **Alcance** | Solo lo registrado en el sistema de facturación **gratuito** del SII. Un comercio que ya migró a otro sistema no encuentra ahí sus documentos nuevos. |
+
+> 🔴 **El portal viejo comunica sus rechazos por `alert()` de JavaScript, con HTTP 200** — no en
+> el HTML visible ni en el `<title>`, que dice otra cosa. Y la página **válida** trae además un
+> `//alert(...)` **comentado**. Clasificar por título, limpiar los `<script>` antes de parsear, o
+> creerle al alert comentado: las tres cosas producen diagnósticos falsos.
+
+Los errores traen **`err.mensajePortal`** con el texto exacto del SII. **Mostrar ese texto, no
+una traducción propia.**
+
+⚠️ **`SIN_DATOS` no es lo mismo que `INDETERMINADO`.** El primero es un veredicto definitivo
+("acá no hay nada") y el consumidor puede cerrar ese período para siempre. Los otros dos
+significan "no se pudo concluir" y "no pudimos preguntar": tratarlos igual cerró en falso un
+período que ya tenía 24 documentos bajados.
+
+| código | qué pasó | ¿reintentar? |
+|---|---|---|
+| `RESPALDO_SIN_DATOS` | el RUT no tiene información en MIPYME | no |
+| `RESPALDO_CAPTCHA` | el SII encendió el captcha | no |
+| `RESPALDO_RECHAZADO` | rechazo con un texto que no conocemos; llega literal | no |
+| `RESPALDO_INDETERMINADO` | **varios** mensajes del template, sin veredicto único; llegan en `err.mensajesPortal` | sí, más tarde |
+| `RESPALDO_SIN_EMPRESA` | página de ingreso sin ningún alert; causa no determinada | no |
+
+Contrato completo, respuestas reales y los errores que cuestan tiempo (es **POST** no GET;
+`ORIGEN=ENV` no `EMI`; el listado es obligatorio antes de la descarga) en
+[`docs/RESPALDO_MIPYME_PORTAL.md`](docs/RESPALDO_MIPYME_PORTAL.md).
 
 ---
 
@@ -814,7 +935,7 @@ import type {
 | `FolioService` | `FolioService.js` | Consulta, solicita y anula folios ante el SII |
 | `CafSolicitor` | `CafSolicitor.js` | Solicitud automatizada de CAF al SII |
 | `SiiSession` | `SiiSession.js` | Sesiones HTTP autenticadas con certificado (cookie jar) |
-| `SiiPortalAuth` | `SiiPortalAuth.js` | Autenticación al portal SII; obtiene datos de empresa; Singleton por cert |
+| `SiiPortalAuth` | `SiiPortalAuth.js` | Autenticación al portal SII; datos de empresa; RCV; **respaldo MIPYME (XML completo)**; caché de sesión por certificado |
 
 ### Libros y reportes
 

@@ -3,6 +3,154 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.16.0] - 2026-08-18
+
+### Agregado (robustez)
+
+- **`autenticar()` reintenta ante fallas de red/TLS** (3 intentos, espera 1s/2s/4s).
+
+  ⚠️ Medido contra el SII: devuelve **`EPROTO` de forma intermitente** al abrir la conexión TLS
+  con certificado (`rsa_pss ... last octet invalid`), y reintentando con el **mismo** certificado
+  funciona. **No es señal de certificado vencido ni no habilitado**, aunque lo parezca: sin
+  reintento, un error transitorio se lee como "el certificado del cliente está roto".
+
+  🔴 El **límite de sesiones del SII no se reintenta** — ahora se marca con
+  `err.code = 'SII_LIMITE_SESIONES'`. Cada intento empeora ese bloqueo.
+
+- **`descargarRespaldoMipyme(..., { onTramo })`** — modo streaming. Se invoca por cada tramo
+  descargado y el XML **no** se acumula en el resultado.
+
+  Necesario para históricos grandes: sin esto todos los XML quedan en memoria hasta el final,
+  ~6,4 KB por documento (unos 7 MB para 1.100 documentos, y crece lineal).
+
+  ```js
+  await auth.descargarRespaldoMipyme(rut, dv, {
+    origen: 'RCP', desde, hasta,
+    onTramo: async (t) => { await guardar(t.xml); },   // se persiste y se suelta
+  });
+  ```
+
+- **Los tramos se entregan del MÁS RECIENTE al más viejo.** El troceo por bisección los dejaba
+  en orden cronológico, así que el consumidor recibía primero lo más antiguo del rango y tenía
+  que esperar todas las descargas para ver lo último — justo lo que el usuario está mirando.
+
+  Verificado contra el portal con un mes de 52 documentos: 3 tramos (19, 19, 14), ninguno
+  excede el tope, los 52 llegan completos, y el primero es el de la quincena más reciente.
+
+### Cambiado
+
+- **El cache de sesión del portal pasa a ser un mapa por `certHash`.** Antes guardaba **una
+  sola sesión** y comparaba el hash: en un servidor multi-tenant cada certificado pisaba al
+  anterior, así que todos re-autenticaban en cada pasada. Un login contra `zeusr.sii.cl` es un
+  handshake con certificado, caro y contado por el SII, que bloquea por *"máximo de sesiones
+  autenticadas"*. El costo crecía lineal con la base de clientes.
+
+  Verificado contra producción con dos certificados reales: ambas sesiones conviven y ambas se
+  reutilizan, sin logins nuevos.
+
+  - **El formato v1 se migra, no se descarta**: al desplegar esta versión la sesión vigente
+    sobrevive en vez de forzar un re-login.
+  - **Poda automática**: se descartan las expiradas y, si aún se pasa de 200 entradas, las más
+    viejas. El archivo no crece con la base de clientes.
+  - **Escritura atómica** (archivo temporal + `rename`) y **relectura antes de escribir**, para
+    que dos réplicas escribiendo el mismo volumen no se borren las sesiones entre sí.
+  - `limpiarSesionCache(certHash)` ahora borra **una**; sin argumento sigue borrando todas.
+
+### Agregado
+
+- **`SiiPortalAuth.descargarRespaldoMipyme(rut, dv, opciones)`** — descarga el **XML firmado
+  completo** de los DTE emitidos o recibidos desde el "Respaldo de archivos MIPYME" del portal
+  (`www1.sii.cl/cgi-bin/Portal001`).
+
+  Es la única vía que entrega el **documento completo**: detalle línea por línea, `CdgItem` del
+  proveedor, referencias y TED. `obtenerDetalleDtes()` solo trae metadatos y
+  `obtenerResumenRegistro()` solo totales mensuales.
+
+  ```js
+  const { total, tramos } = await auth.descargarRespaldoMipyme('76543210', '6', {
+    origen: 'RCP', desde: '2026-01-01', hasta: '2026-08-18',
+  });
+  ```
+
+  **Solo requiere el certificado digital, no estar certificado como emisor.** Consultar el
+  portal nunca exigió certificación; es requisito para emitir.
+
+  Habilita importar facturas de proveedor sin depender de que el emisor mande el XML a la
+  casilla de intercambio.
+
+### ⚠️ Comportamiento del SII que hay que conocer
+
+- **Tope duro de 20 documentos por descarga**, medido contra el portal: 20 devuelve XML, 21
+  devuelve `<title>Error al contribuyente</title>`. **No es un XML recortado**: quien no valide
+  que la respuesta empieza con `<?xml` va a leer una página HTML como "sin documentos". El
+  método trocea el rango por mitades hasta que cada tramo quepa (validado bajando 44 documentos
+  en 3 tramos).
+
+- **Un solo día con más de 20 documentos** no se puede partir más por fecha, y el método lanza
+  error explícito en vez de bajar de menos en silencio.
+
+  ✅ Pero sí tiene salida, medida contra el portal: **cortar por `TPO_DOC`**. Cada tipo de DTE
+  es una consulta aparte y la unión cubre el día completo. ⚠️ **No usar `FOLIO`/`FOLIOHASTA`
+  para esto**: borran silenciosamente `FEC_HASTA` y devuelven otro conjunto de documentos (con
+  filtro de folios un rango de 389 devolvió 541). Ver `docs/RESPALDO_MIPYME_PORTAL.md` §7.
+
+- **El captcha existe pero hoy va vacío.** Si el SII lo enciende, se lanza `RESPALDO_CAPTCHA` y
+  **no se reintenta**: no se resuelve solo.
+
+- 🔴 **El portal viejo responde por `alert()` de JavaScript, no por HTML.** Ante un rechazo
+  devuelve **HTTP 200** con el motivo real dentro de un `<script>`, mientras el `<title>` dice
+  algo distinto y el HTML visible va vacío:
+
+  ```html
+  <title>Seleccionar empresa</title>
+  <script>alert('No existe información en MIPYME para el rut ingresado');history.back();</script>
+  ```
+
+  ⚠️ Clasificar por `<title>`, o limpiar el HTML con `.replace(/<script...>/g,'')` antes de
+  leerlo, borra exactamente lo único que trae la respuesta. Las dos cosas pasaron durante esta
+  investigación y llevaron a afirmar **tres causas equivocadas seguidas** sobre una página que
+  decía la respuesta en la primera línea.
+
+  Ahora `extraerAlertasPortal()` lee esos mensajes y `errorDeRespuestaPortal()` los propaga
+  intactos en **`err.mensajePortal`**. El total de documentos tiene prioridad: si está, la
+  respuesta se toma como buena aunque la página traiga algún alert incidental.
+
+  ⚠️ **Y el error inverso:** la página de resultados **válida** trae un
+  `//alert("Maximo numero de docmentos para respaldar: 20...")` **comentado** en el template. Un
+  extractor ingenuo lo toma por bueno y convierte un listado correcto en un error inventado.
+  `extraerAlertasPortal()` descarta los alerts comentados en su línea.
+
+  ⚠️ **Y un tercer caso: VARIOS alerts son el catálogo del template, no un veredicto.** Una
+  respuesta trajo cinco mensajes encadenados y contradictorios entre sí ("no está autorizado",
+  "debe hacerlo el representante legal", "no existe información en MIPYME"…). Tomarlo por
+  veredicto marcó a un comercio como "sin datos" y **abortó un backfill que venía trayendo 24
+  documentos correctamente**. La página realmente rechazada trae **un solo** alert, seguido de
+  `history.back()`.
+
+  | código | cuándo |
+  |---|---|
+  | `RESPALDO_SIN_DATOS` | el RUT no tiene información en MIPYME (nada que respaldar) |
+  | `RESPALDO_CAPTCHA` | el SII encendió el captcha |
+  | `RESPALDO_RECHAZADO` | rechazo con un texto que no conocemos; llega literal |
+  | `RESPALDO_INDETERMINADO` | varios mensajes del template, sin veredicto único. Llega en `err.mensajesPortal` |
+  | `RESPALDO_SIN_EMPRESA` | página de ingreso **sin** alert; causa no determinada |
+
+  ⚠️ Para el consumidor la distinción importa: `RESPALDO_SIN_DATOS` es un veredicto definitivo
+  y cierra el período; `RESPALDO_INDETERMINADO` y `RESPALDO_CAPTCHA` significan "no se pudo
+  concluir" y "no pudimos preguntar", y deben reintentarse.
+
+  Ninguno se reintenta **dentro de la misma corrida**. **Mostrar `err.mensajePortal` en la UI**,
+  no una traducción propia.
+
+  Los **recibidos** incluyen documentos de cualquier emisor, no solo del sistema gratuito de
+  facturación del SII.
+
+- El XML viene en **ISO-8859-1**: leerlo con `latin1`.
+
+Contrato completo, respuestas reales y los errores que cuestan tiempo (es POST no GET;
+`ORIGEN=ENV` no `EMI`; el listado es obligatorio antes de la descarga) en
+`docs/RESPALDO_MIPYME_PORTAL.md`.
+
 ## [2.15.0] - 2026-08-18
 
 ### Agregado
