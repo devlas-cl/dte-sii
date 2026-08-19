@@ -697,7 +697,7 @@ período que ya tenía 24 documentos bajados.
 
 Contrato completo, respuestas reales y los errores que cuestan tiempo (es **POST** no GET;
 `ORIGEN=ENV` no `EMI`; el listado es obligatorio antes de la descarga) en
-[`docs/RESPALDO_MIPYME_PORTAL.md`](docs/RESPALDO_MIPYME_PORTAL.md).
+la sección de arriba.
 
 ---
 
@@ -879,7 +879,7 @@ const require = createRequire(import.meta.url)
 const { Certificado, CAF, DTE, EnviadorSII } = require('@devlas/dte-sii')
 ```
 
-**TypeScript con ESM** (patrón usado en `el consumidor`):
+**TypeScript con ESM** :
 
 ```typescript
 import { createRequire } from 'module'
@@ -1001,7 +1001,7 @@ El directorio `cert/` contiene los helpers necesarios para ejecutar el proceso d
 - Generación de muestras impresas
 
 ```javascript
-// Uso desde el consumidor
+// Uso desde un proyecto ESM
 const { CertFolioHelper } = require('@devlas/dte-sii')
 ```
 

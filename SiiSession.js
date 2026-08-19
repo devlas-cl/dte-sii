@@ -374,7 +374,7 @@ class SiiSession {
     if (!body || !body.includes('superado el m')) return false;
 
     // Guardar HTML para diagnóstico — solo si el consumidor definió dónde.
-    // Antes esto apuntaba a `../el consumidor/debug/sii-sessions`: la librería
+    // Antes esto apuntaba a un directorio del proyecto consumidor: la librería
     // nombraba a un repo consumidor y asumía que estaba como carpeta hermana, así que
     // en cualquier otra instalación escribía en un lugar inesperado o fallaba en silencio.
     saveDebugFile(resolveDebugDir(this.debugDir), `demasiadas-sesiones-${Date.now()}.html`, body);

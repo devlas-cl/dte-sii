@@ -194,7 +194,7 @@ class CafSolicitor {
    * Detecta la página de bloqueo duro de timbraje del SII.
    *
    * El SII usa al menos DOS redacciones para la misma página de rechazo:
-   *   - "NO SE AUTORIZA TIMBRAJE ELECTRÓNICO"  (la documentada en PLAN-MEJORAS-CAF.md)
+   *   - "NO SE AUTORIZA TIMBRAJE ELECTRÓNICO"  (ver el CHANGELOG)
    *   - "NO AUTORIZA TIMBRAJE ELECTRÓNICA"     (observada 2026-07-22 en tipo 56)
    *
    * Detectar solo la primera hacía que la segunda cayera al genérico

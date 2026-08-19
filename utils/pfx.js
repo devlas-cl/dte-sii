@@ -183,7 +183,7 @@ function extractSubjectFields(cert) {
  * 1.3.6.1.4.1.8321.1 — reservado bajo la normativa chilena de firma
  * electrónica (Ley 19.799). A diferencia de serialNumber/OU/CN, que son
  * convención de cada CA, este OID es consistente entre CAs (verificado
- * contra Acepta, IDOK y Signapis — ver docs/EXTRACCION_RUT_CERTIFICADO.md).
+ * contra Acepta, IDOK y Signapis).
  * @param {forge.pki.Certificate} cert - Certificado
  * @returns {string|null} RUT o null
  */

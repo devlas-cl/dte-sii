@@ -5,7 +5,7 @@
 **CJS Node.js library** for Chilean electronic invoicing (DTE — Documento Tributario Electrónico).
 Handles XML generation, digital signing, SII SOAP web services, CAF management and full SII certification.
 
-Published as `@devlas/dte-sii` (MIT). Used internally by `el consumidor` via `createRequire`.
+Published as `@devlas/dte-sii` (MIT). Consumed from ESM projects via `createRequire`.
 
 ---
 
@@ -43,12 +43,7 @@ Published as `@devlas/dte-sii` (MIT). Used internally by `el consumidor` via `cr
 ├── utils.js              ← Shared helpers (RUT, date formatting, etc.)
 ├── cert/                 ← SII certification helpers
 ├── utils/                ← Additional utility modules
-└── docs/                 ← SII documentation references
-    └── RESPALDO_MIPYME_PORTAL.md  ← ⚠️ leer antes de tocar la descarga de DTE completos
-        desde el portal: contrato exacto (POST a lista_documentos.cgi, luego GET a
-        download.cgi), ORIGEN=ENV/RCP, captcha hoy apagado pero puede encenderse, tope de
-        20 documentos medido, y §7bis — el portal viejo responde sus rechazos por alert()
-        de JavaScript con HTTP 200, NO en el HTML ni en el <title>
+└── docs/                 ← SII reference material (public SII PDFs and schemas only)
 ```
 
 ---
@@ -73,14 +68,41 @@ Published as `@devlas/dte-sii` (MIT). Used internally by `el consumidor` via `cr
 
 ## Rules
 
+### 🔴 This repo is PUBLIC — no real data, ever
+
+`github.com/devlas-cl/dte-sii` is **open source, not open contribution**: anyone can read every
+file and every commit. It is a generic tool, not a Devlas-specific one.
+
+**Never commit:**
+
+| Prohibido | Usar en su lugar |
+|---|---|
+| RUTs de empresas reales (clientes, proveedores, o propios) | RUTs inventados con formato válido: `76543210-K`, `77111222-3` |
+| Nombres de empresas reales | `EMPRESA EJEMPLO SPA`, `Comercio B`, `PROVEEDOR EJEMPLO SPA` |
+| Contraseñas, claves de cifrado, cadenas de conexión, tokens | nada: van en variables de entorno del consumidor |
+| Certificados `.pfx`/`.p12`/`.pem`, aunque sean de prueba | generarlos en el test, o `.gitignore` |
+| Rutas locales (`/Users/...`, `/private/tmp/...`) | rutas relativas o genéricas |
+| Nombres de repos privados del consumidor | "el consumidor", "un proyecto ESM" |
+| Documentos internos de planificación (`PLAN-*.md`, análisis, mediciones) | van al repo del consumidor, no acá |
+
+**Sí corresponde acá:** `README.md`, `CHANGELOG.md`, `LICENSE`, este `CLAUDE.md`, el código, los
+tests, y en `docs/` solo material público del SII (PDFs oficiales, XSD). Nada más.
+
+⚠️ **Los ejemplos de RUT tienen que ser inventados incluso cuando el hallazgo se midió con un
+certificado real.** La afirmación técnica se conserva ("medido contra el portal con un
+certificado de producción"); lo que se saca es de quién era.
+
+⚠️ **Limpiar un archivo no limpia el historial.** Si un dato real llega a pushearse, queda en los
+commits y en los forks. La revisión va **antes** del push, no después.
+
 ### Integrity
 - This library directly interfaces with the Chilean SII (Tax Authority). Any bug can cause invalid DTE submission or failed certification.
-- Test changes manually before updating the version used by `el consumidor`.
+- Test changes manually before publishing a new version.
 - The `cert/` folder contains SII-specific certification flows — treat changes there with extra care.
 
 ### Versioning
 - Follow semver: patch for bugfixes, minor for new features, major for breaking changes.
-- Breaking changes affect all consumers — coordinate with `el consumidor` before bumping major.
+- Breaking changes affect all consumers — announce them in the CHANGELOG before bumping major.
 
 ### Clean Code
 - No `console.log` left in production paths — use structured error returns or thrown errors.
@@ -99,7 +121,7 @@ Published as `@devlas/dte-sii` (MIT). Used internally by `el consumidor` via `cr
 node -e "const { DTE } = require('.')"   # quick smoke test
 ```
 
-## Integration in el consumidor
+## Integration from an ESM project
 
 ```ts
 // ESM → CJS interop pattern (required in every file that uses this lib)

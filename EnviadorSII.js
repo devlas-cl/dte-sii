@@ -1195,7 +1195,7 @@ class EnviadorSII {
 
     const [rutNum, dv] = rutEmisor.split('-');
     // Fallback a rutEmisor si el certificado no expone RUT (ver
-    // docs/EXTRACCION_RUT_CERTIFICADO.md) — evita un TypeError por .split
+    // ver el JSDoc de Certificado) — evita un TypeError por .split
     // sobre null cuando el PFX no tiene el RUT en ningún campo conocido.
     const rutEnvia = this.certificado.rut || rutEmisor;
     const [rutEnviaNum, dvEnvia] = rutEnvia.split('-');

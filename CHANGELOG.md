@@ -92,7 +92,7 @@ Versionado [SemVer](https://semver.org/lang/es/).
   ✅ Pero sí tiene salida, medida contra el portal: **cortar por `TPO_DOC`**. Cada tipo de DTE
   es una consulta aparte y la unión cubre el día completo. ⚠️ **No usar `FOLIO`/`FOLIOHASTA`
   para esto**: borran silenciosamente `FEC_HASTA` y devuelven otro conjunto de documentos (con
-  filtro de folios un rango de 389 devolvió 541). Ver `docs/RESPALDO_MIPYME_PORTAL.md` §7.
+  filtro de folios un rango de 389 devolvió 541). Ver esta sección §7.
 
 - **El captcha existe pero hoy va vacío.** Si el SII lo enciende, se lanza `RESPALDO_CAPTCHA` y
   **no se reintenta**: no se resuelve solo.
@@ -149,7 +149,7 @@ Versionado [SemVer](https://semver.org/lang/es/).
 
 Contrato completo, respuestas reales y los errores que cuestan tiempo (es POST no GET;
 `ORIGEN=ENV` no `EMI`; el listado es obligatorio antes de la descarga) en
-`docs/RESPALDO_MIPYME_PORTAL.md`.
+esta sección.
 
 ## [2.15.0] - 2026-08-18
 
@@ -178,7 +178,7 @@ Contrato completo, respuestas reales y los errores que cuestan tiempo (es POST n
 - **El fallback del set de guía pasa de 1 a 3.** Solo aplica cuando el set no trae
   `cafRequired`. El valor sale de tráfico real: en 17 corridas registradas el set vino siempre
   con `cafRequired: { 52: 3 }` y 3 casos, así que 1 timbraba de menos. Coincide con el fallback
-  que ya usaba `el consumidor`, o sea que la divergencia lib/consumidor queda resuelta.
+  que ya usaba el consumidor, o sea que la divergencia lib/consumidor queda resuelta.
 
 Propuesto por WB. La firma con `sets` se acordó tras detectar que la versión sin argumentos
 rompía los modos de set aislado.
@@ -492,7 +492,7 @@ corrida reintentaba para siempre. Ahora 1 día en producción, 180 en certificac
 Anular pasó de ser el primer remedio al último: es el único con costo (activa el factor de
 anulación del SII) y el único que puede empeorar la situación que intenta arreglar. Medido
 el 14/08/2026 con 72 documentos emitidos en maullin — ver
-`el consumidor/docs/mediciones/2026-08-14-cupo-folios-maullin.md`.
+las mediciones internas del consumidor.
 
 ## [2.13.3] - 2026-08-13
 
@@ -684,7 +684,7 @@ Ver *Corregido → TED con acentos*. `sanitizeSiiText` queda **sin cambios**.
 
 #### `SiiPortalAuth.obtenerEmisor()`
 
-Movido a la librería desde el proyecto consumidor (antes `getEmisorFromPortal.js`), donde
+Movido a la librería desde el consumidor (antes `getEmisorFromPortal.js`), donde
 no correspondía: la librería es la que sabe hablar con el portal.
 
 #### `FolioService.consultarTope()`

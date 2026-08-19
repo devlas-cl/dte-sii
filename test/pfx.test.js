@@ -5,7 +5,7 @@
  * de un test runner — se ejecuta con `node test/pfx.test.js`.
  *
  * Cubre el orden de extracción documentado en
- * docs/EXTRACCION_RUT_CERTIFICADO.md: SAN OID 1.3.6.1.4.1.8321.1 primero,
+ * SAN OID 1.3.6.1.4.1.8321.1 primero,
  * luego serialNumber -> OU -> CN como fallback.
  */
 

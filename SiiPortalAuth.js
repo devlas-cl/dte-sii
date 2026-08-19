@@ -1404,7 +1404,7 @@ class SiiPortalAuth {
    * respuesta deja de ser XML y se lanza `RESPALDO_CAPTCHA`. No reintentar en loop: no se
    * resuelve solo.
    *
-   * Ver `docs/RESPALDO_MIPYME_PORTAL.md` para el contrato completo y los hallazgos.
+   * Ver el README para el contrato completo y los hallazgos del portal.
    *
    * @param {string} rut - RUT de la empresa sin DV ni puntos (ej. '76543210')
    * @param {string} dv  - Dígito verificador (ej. '6')
