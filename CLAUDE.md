@@ -43,7 +43,8 @@ Published as `@devlas/dte-sii` (MIT). Consumed from ESM projects via `createRequ
 ├── utils.js              ← Shared helpers (RUT, date formatting, etc.)
 ├── cert/                 ← SII certification helpers
 ├── utils/                ← Additional utility modules
-└── docs/                 ← SII reference material (public SII PDFs and schemas only)
+└── docs/                 ← Solo material PUBLICO del SII: PDFs oficiales, XSD y
+                          ejemplos del propio SII. Nada nuestro, nada de clientes.
 ```
 
 ---
@@ -118,8 +119,21 @@ commits y en los forks. La revisión va **antes** del push, no después.
 ## Commands
 
 ```bash
-node -e "const { DTE } = require('.')"   # quick smoke test
+node -e "const { DTE } = require('.')"      # smoke test de carga
+for f in test/*.test.js; do node "$f"; done # suite completa (sin red)
+npm pack --dry-run                          # que se publica a npm realmente
 ```
+
+### Antes de publicar o pushear
+
+```bash
+# Barrido de datos reales. Debe devolver 0 en todo.
+grep -rniE "[0-9]{7,8}-[0-9kK]" --include="*.js" --include="*.md" . | grep -v node_modules
+```
+
+Los RUTs que SÍ corresponden: `60803000-K` (el del SII), los sintéticos de ejemplo
+(`76543210-K`, `11111111-1`) y los de los ejemplos oficiales del SII en `docs/libros/`.
+Cualquier otro es un dato real que no debe estar.
 
 ## Integration from an ESM project
 

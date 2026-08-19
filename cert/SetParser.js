@@ -1016,7 +1016,21 @@ function generarEstructuraLibroCompras(set, opts = {}) {
       NroDoc: doc.folio,
       TasaImp: tasaIva,
       FchDoc: new Date().toISOString().split('T')[0], // Se debe ajustar
-      RUTDoc: '60803000-K', // RUT por defecto para certificación
+      // Contraparte de relleno del libro de COMPRAS de certificación: los documentos del set
+      // son ficticios y va emparejada con `RznSoc: 'Razon Social'`, también un marcador.
+      //
+      // ⚠️ Este valor SÍ llega al SII: `LibroCompras.generarDesdeEstructuras()` hace
+      // `{ ...doc }` y el RUTDoc entra tal cual al XML que se declara. No es código muerto.
+      //
+      // Se usa el RUT del propio SII porque cumple las tres cosas que hacen falta: existe como
+      // contribuyente (si el SII validara existencia, pasa), es público y no es dato personal
+      // de nadie, y ya se usa en este repo como contraparte (`RutReceptor` de los envíos).
+      //
+      // ⚠️ Antes acá había un RUT tomado de la documentación de otro sistema de facturación,
+      // que resultaba ser el de una persona real. NO poner un RUT de un ejemplo ajeno, y
+      // evitar `11111111-1`: tiene DV válido pero es el dummy más conocido de Chile y varios
+      // sistemas lo rechazan por eso.
+      RUTDoc: '60803000-K',
       RznSoc: 'Razon Social',
     };
 

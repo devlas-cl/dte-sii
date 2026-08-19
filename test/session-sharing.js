@@ -8,7 +8,7 @@
  *   node test/session-sharing.js
  *
  *   # Con integración contra SII (requiere PFX real):
- *   PFX_PATH=/ruta/cert.pfx PFX_PASS=contraseña RUT_EMISOR=76192083-9 node test/session-sharing.js --integration
+ *   PFX_PATH=/ruta/cert.pfx PFX_PASS=contraseña RUT_EMISOR=76543210-K node test/session-sharing.js --integration
  *   SII_AMBIENTE=certificacion|produccion  (default: certificacion)
  */
 
@@ -94,7 +94,7 @@ async function main() {
 
   if (!runIntegration) {
     console.log('\n💡 Para integración contra SII real:');
-    console.log('   PFX_PATH=/ruta/cert.pfx PFX_PASS=pass RUT_EMISOR=76192083-9 node test/session-sharing.js --integration');
+    console.log('   PFX_PATH=/ruta/cert.pfx PFX_PASS=pass RUT_EMISOR=76543210-K node test/session-sharing.js --integration');
   } else {
     console.log('\n📋 Suite 4: Integración — sesión compartida SiiPortalAuth ↔ CafSolicitor');
     console.log(`   PFX_PATH:    ${pfxPath}`);

@@ -37,7 +37,7 @@ class CafSolicitor {
   /**
    * @param {Object} options - Opciones de configuración
    * @param {string} options.ambiente - 'certificacion' o 'produccion'
-   * @param {string} options.rutEmisor - RUT del emisor (ej: 76192083-9)
+   * @param {string} options.rutEmisor - RUT del emisor (ej: 76543210-K)
    * @param {string} options.pfxPath - Ruta absoluta al certificado PFX
    * @param {string} options.pfxPassword - Contraseña del certificado
    * @param {string} [options.baseDir] - Directorio base para guardar archivos

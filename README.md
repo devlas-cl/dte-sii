@@ -70,7 +70,7 @@ const caf  = new CAF(fs.readFileSync('caf_33.xml', 'utf8'))
 const dte = new DTE({
   Encabezado: {
     IdDoc:   { TipoDTE: 33, Folio: 1 },
-    Emisor:  { RUTEmisor: '76354771-K', RznSoc: 'Mi Empresa SpA', GiroEmis: 'Software', DirOrigen: 'Av. Ejemplo 123', CmnaOrigen: 'Santiago', Acteco: 620200 },
+    Emisor:  { RUTEmisor: '76543210-K', RznSoc: 'Mi Empresa SpA', GiroEmis: 'Software', DirOrigen: 'Av. Ejemplo 123', CmnaOrigen: 'Santiago', Acteco: 620200 },
     Receptor: { RUTRecep: '12345678-9', RznSocRecep: 'Cliente SA', GiroRecep: 'Comercio', DirRecep: 'Calle 456', CmnaRecep: 'Providencia' },
   },
   Detalle: [
@@ -82,7 +82,7 @@ dte.generarXML().timbrar(caf).firmar(cert)
 
 const envio = new EnvioDTE({ certificado: cert })
 envio.agregar(dte)
-envio.setCaratula({ RutEmisor: '76354771-K', RutReceptor: '60803000-K', FchResol: '2024-01-15', NroResol: 123 })
+envio.setCaratula({ RutEmisor: '76543210-K', RutReceptor: '60803000-K', FchResol: '2024-01-15', NroResol: 123 })
 envio.generar()
 
 const enviador = new EnviadorSII(cert, 'produccion') // o 'certificacion'
@@ -122,7 +122,7 @@ const dte = new DTE({
   tipo: 33,
   folio: 1,
   emisor: {
-    rut: '76354771-K', razonSocial: 'Mi Empresa SpA',
+    rut: '76543210-K', razonSocial: 'Mi Empresa SpA',
     giro: 'Desarrollo de software', direccion: 'Av. Ejemplo 123',
     comuna: 'Santiago', actividadEconomica: 620200,
   },
@@ -159,7 +159,7 @@ const { EnvioDTE, EnviadorSII } = require('@devlas/dte-sii')
 const envio = new EnvioDTE({ certificado: cert })
 envio.agregar(dte)
 envio.setCaratula({
-  RutEmisor:   '76354771-K',
+  RutEmisor:   '76543210-K',
   RutReceptor: '60803000-K', // RUT del SII para envíos propios
   FchResol:    '2024-01-15',
   NroResol:    123,
@@ -179,14 +179,14 @@ const resultado = await enviador.enviarDteSoap(envio)
 // Estado del sobre (EnvioDTE)
 const estadoSobre = await enviador.consultarEstado({
   trackId: resultado.trackId,
-  rutEmisor: '76354771-K',
+  rutEmisor: '76543210-K',
 })
 // estadoSobre.esExitoso / esIntermedio / esRechazado
 // estadoSobre.codigo   → 'EPR', 'RPR', 'RSC', etc.
 
 // Estado de un DTE individual
 const estadoDte = await enviador.consultarEstadoDte({
-  rutEmisor:   '76354771-K',
+  rutEmisor:   '76543210-K',
   rutReceptor: '12345678-9',
   tipoDte:     33,
   folio:       1,
@@ -245,13 +245,13 @@ const fs = require('fs')
 const cert = new Certificado(fs.readFileSync('empresa_cert.pfx'), 'clave')
 const caf  = new CAF(fs.readFileSync('caf_39_cert.xml', 'utf8'))
 
-const dte = new DTE({ tipo: 39, folio: 1, emisor: { rut: '76354771-K', ... }, items: [ ... ] })
+const dte = new DTE({ tipo: 39, folio: 1, emisor: { rut: '76543210-K', ... }, items: [ ... ] })
 dte.generarXML().timbrar(caf).firmar(cert)
 
 const envio = new EnvioBOLETA({ certificado: cert })
 envio.agregar(dte)
 envio.setCaratula({
-  RutEmisor: '76354771-K',
+  RutEmisor: '76543210-K',
   FchResol:  '2019-10-18',  // fecha de resolución de certificación (entregada por el SII)
   NroResol:  0,             // siempre 0 en certificación
 })
@@ -272,13 +272,13 @@ const fs = require('fs')
 const cert = new Certificado(fs.readFileSync('empresa_prod.pfx'), 'clave')
 const caf  = new CAF(fs.readFileSync('caf_39_prod.xml', 'utf8'))
 
-const dte = new DTE({ tipo: 39, folio: 1, emisor: { rut: '76354771-K', ... }, items: [ ... ] })
+const dte = new DTE({ tipo: 39, folio: 1, emisor: { rut: '76543210-K', ... }, items: [ ... ] })
 dte.generarXML().timbrar(caf).firmar(cert)
 
 const envio = new EnvioBOLETA({ certificado: cert })
 envio.agregar(dte)
 envio.setCaratula({
-  RutEmisor: '76354771-K',
+  RutEmisor: '76543210-K',
   FchResol:  '2024-01-15',  // fecha real de resolución SII de la empresa
   NroResol:  123,           // número real de resolución SII de la empresa
 })
@@ -304,7 +304,7 @@ service.cargarCAF(fs.readFileSync('caf_39.xml', 'utf8'))
 
 const boleta = await service.crearBoleta({
   folio:      1,
-  emisor:     { rut: '76354771-K', razonSocial: 'Mi Empresa', giro: 'Software', ... },
+  emisor:     { rut: '76543210-K', razonSocial: 'Mi Empresa', giro: 'Software', ... },
   items:      [{ nombre: 'Producto', cantidad: 1, precioConIva: 10000 }],
   resolucion: {
     fecha:  process.env.SII_AMBIENTE === 'certificacion' ? '2019-10-18' : '2024-01-15',
@@ -324,8 +324,8 @@ const { LibroCompraVenta, Certificado } = require('@devlas/dte-sii')
 
 const libro = new LibroCompraVenta()
 libro.setCaratula({
-  RutEmisorLibro: '76354771-K',
-  RutEnvia:       '76354771-K',
+  RutEmisorLibro: '76543210-K',
+  RutEnvia:       '76543210-K',
   PeriodoTributario: '2024-06',
   FchResol: '2024-01-15', NroResol: 123,
   TipoOperacion: 'VENTA',  // o 'COMPRA'
@@ -350,7 +350,7 @@ const { ConsumoFolio, CAF, Certificado } = require('@devlas/dte-sii')
 
 const rcof = new ConsumoFolio()
 rcof.setCaratula({
-  RutEmisor:  '76354771-K',
+  RutEmisor:  '76543210-K',
   FchResol:   '2024-01-15',
   NroResol:   0,
   FchInicio:  '2024-06-15',
@@ -396,7 +396,7 @@ const fingerprint = createCafFingerprint(cafXml)           // hash único del CA
 
 // Reservar el siguiente folio disponible del rango del CAF
 const folio = registry.reserveNextFolio({
-  rutEmisor:      '76354771-K',
+  rutEmisor:      '76543210-K',
   tipoDte:        caf.getTipoDTE(),
   folioDesde:     caf.getFolioDesde(),
   folioHasta:     caf.getFolioHasta(),
@@ -408,7 +408,7 @@ const folio = registry.reserveNextFolio({
 
 // Marcar folio como enviado al recibir trackId del SII
 registry.markFolioSent({
-  rutEmisor: '76354771-K', tipoDte: 33, folio,
+  rutEmisor: '76543210-K', tipoDte: 33, folio,
   folioDesde: caf.getFolioDesde(), folioHasta: caf.getFolioHasta(),
   ambiente: 'produccion', cafFingerprint: fingerprint,
   trackId: '0245283324',
@@ -422,7 +422,7 @@ const { resolveCafPath } = require('@devlas/dte-sii')
 
 const cafPath = resolveCafPath({
   tipoDte:       33,
-  rutEmisor:     '76354771-K',
+  rutEmisor:     '76543210-K',
   requiredCount: 1,          // necesito al menos 1 folio disponible
   ambiente:      'produccion',
 })
@@ -440,7 +440,7 @@ const { FolioService, Certificado } = require('@devlas/dte-sii')
 
 const service = new FolioService({
   ambiente:    'produccion',
-  rutEmisor:   '76354771-K',
+  rutEmisor:   '76543210-K',
   certificado: new Certificado(fs.readFileSync('empresa.pfx'), 'clave'),
 })
 
@@ -494,7 +494,7 @@ const fs   = require('fs')
 const path = require('path')
 
 const CAF_DIR    = path.join(__dirname, 'cafs')
-const RUT        = '76354771-K'
+const RUT        = '76543210-K'
 const AMBIENTE   = 'produccion'
 const TIPO_DTE   = 33
 const UMBRAL     = 10   // solicitar nuevo CAF cuando queden menos de N folios
@@ -715,7 +715,7 @@ const ws = new WsReclamo(new Certificado(fs.readFileSync('empresa.pfx'), 'clave'
 
 // Consultar historial de eventos de un DTE
 const eventos = await ws.listarEventosHistDoc({
-  rutEmisor:   '76354771-K',
+  rutEmisor:   '76543210-K',
   tipoDTE:     33,
   folio:       1,
   rutReceptor: '12345678-9',
@@ -726,7 +726,7 @@ const estado = await ws.consultarEstadoReceptor({ ... })
 
 // Registrar aceptación (ACD) o reclamo (RCD)
 await ws.ingresarAceptacion({
-  rutEmisor: '76354771-K', tipoDTE: 33, folio: 1,
+  rutEmisor: '76543210-K', tipoDTE: 33, folio: 1,
   accion: 'ACD', // ACD=Aceptado, RCD=Reclamado, ERM=Otorga Mercaderías
 })
 ```
@@ -797,7 +797,7 @@ const { configure, configureRetry } = require('@devlas/dte-sii')
 // Configuración global (aplicar al inicio de la app)
 configure({
   ambiente:          'produccion',  // 'produccion' | 'certificacion'
-  defaultRutEmisor:  '76354771-K',
+  defaultRutEmisor:  '76543210-K',
   tokenCacheTtlMs:   300_000,       // 5 minutos (default)
 })
 

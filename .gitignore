@@ -3,5 +3,28 @@ node_modules/
 .DS_Store
 test-output/
 test-muestras.js
-docs/hars_portal_sii
+
+# ── Nunca versionar: este repo es PUBLICO (ver CLAUDE.md) ────────────────────
+# Certificados digitales, en cualquier formato. Un .pfx commiteado no se puede
+# "desfiltrar": queda en el historial y en los forks.
+*.pfx
+*.p12
+*.pem
+*.key
+*.crt
+
+# Variables de entorno: claves de cifrado, credenciales del SII, conexiones.
+.env
+.env.*
+
+# Capturas de trafico y volcados de depuracion contra el SII: llevan cookies de
+# sesion, RUTs reales y a veces el XML firmado de un contribuyente.
 *.har
+docs/hars_portal_sii
+debug/
+sii_session_cache.json
+sii_http_debug/
+
+# Salidas de corridas reales (DTE emitidos, libros, sobres).
+*.xml.out
+salida/
