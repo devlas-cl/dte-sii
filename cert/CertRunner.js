@@ -492,51 +492,116 @@ class CertRunner {
 
   _cafReusable(tipoDte, cantidad) {
     try {
-      const cafPath = this.folioService.findLatestCaf(tipoDte);
-      if (!cafPath || !fs.existsSync(cafPath)) return null;
-      // Ya se emitió con él: reusarlo repetiría folios y el SII rechaza el envío entero.
-      if (fs.existsSync(`${cafPath}.usado`)) {
-        console.log(` Tipo ${tipoDte}: el CAF previo ya se usó para emitir — se pedirá uno nuevo`);
-        return null;
-      }
-      const rango = this._rangoDelCaf(cafPath);
-      if (rango && this._rangoYaConsumido(tipoDte, rango.desde, rango.hasta)) {
-        console.log(` Tipo ${tipoDte}: los folios ${rango.desde}-${rango.hasta} ya se emitieron `
-          + '(otra copia del mismo CAF) — se pedirá uno nuevo');
-        return null;
-      }
+      // ⚠️ Se recorren TODOS los CAF del tipo, no solo el último.
+      //
+      // Cuando el SII raciona el timbraje, un pedido de 4 folios puede haber quedado
+      // repartido en un CAF de 3 y otro de 1 (ver FolioService.solicitarCafPorTandas).
+      // Mirando solo el último se concluía "no alcanza" y se pedían folios nuevos,
+      // dejando los anteriores timbrados y sin usar — que es exactamente lo que el SII
+      // cuenta en contra del cupo, o sea que el reintento empeoraba el problema que
+      // intentaba resolver.
+      // `listarCafs` es de 2.17.0. El fallback cubre a un `folioService` inyectado con la
+      // forma vieja: sin él, la excepción caería en el catch de abajo y el resultado sería
+      // "no hay CAF reusable", que dispara un timbraje nuevo teniendo folios en mano.
+      const rutas = typeof this.folioService.listarCafs === 'function'
+        ? this.folioService.listarCafs(tipoDte)
+        : [this.folioService.findLatestCaf(tipoDte)].filter(Boolean);
+      if (!rutas.length) return null;
 
       // Require local, igual que en _construirCafObjects (línea ~2110): `../index` cierra
       // el ciclo con este archivo, así que importarlo arriba deja CAF sin definir.
       const { CAF } = require('../index');
-      const caf = new CAF(fs.readFileSync(cafPath, 'utf8'));
-
-      // Doble chequeo del RUT, aunque findLatestCaf ya filtre. Firmar un timbre con el CAF
-      // de otro contribuyente hace que el SII rechace el envío ENTERO con `RFR - Rechazado
-      // por Error en Firma`, y el síntoma aparece etapas más adelante (la declaración de
-      // simulación se traba porque el envío tiene rechazos). Un fallo así de caro no puede
-      // depender de que una función de otro archivo siga filtrando bien.
-      const rutCaf = String(caf.da?.RE ?? '').replace(/\./g, '').trim().toUpperCase();
       const rutMio = String(this.config.emisor.rut).replace(/\./g, '').trim().toUpperCase();
-      if (rutCaf !== rutMio) {
-        console.warn(
-          `[CertRunner] CAF previo del tipo ${tipoDte} DESCARTADO: es del RUT ${rutCaf}, ` +
-          `no del emisor ${rutMio} (${cafPath})`
+
+      const candidatos = [];
+      const rangosVistos = new Set();
+      const descartes = [];
+
+      for (const cafPath of rutas) {
+        if (!fs.existsSync(cafPath)) continue;
+        // Ya se emitió con él: reusarlo repetiría folios y el SII rechaza el envío entero.
+        if (fs.existsSync(`${cafPath}.usado`)) {
+          descartes.push('ya se usó para emitir');
+          continue;
+        }
+
+        const rango = this._rangoDelCaf(cafPath);
+        if (rango && this._rangoYaConsumido(tipoDte, rango.desde, rango.hasta)) {
+          descartes.push(`folios ${rango.desde}-${rango.hasta} ya emitidos (otra copia del mismo CAF)`);
+          continue;
+        }
+
+        const caf = new CAF(fs.readFileSync(cafPath, 'utf8'));
+
+        // Doble chequeo del RUT, aunque listarCafs ya filtre. Firmar un timbre con el CAF
+        // de otro contribuyente hace que el SII rechace el envío ENTERO con `RFR - Rechazado
+        // por Error en Firma`, y el síntoma aparece etapas más adelante (la declaración de
+        // simulación se traba porque el envío tiene rechazos). Un fallo así de caro no puede
+        // depender de que una función de otro archivo siga filtrando bien.
+        const rutCaf = String(caf.da?.RE ?? '').replace(/\./g, '').trim().toUpperCase();
+        if (rutCaf !== rutMio) {
+          console.warn(
+            `[CertRunner] CAF previo del tipo ${tipoDte} DESCARTADO: es del RUT ${rutCaf}, ` +
+            `no del emisor ${rutMio} (${cafPath})`
+          );
+          continue;
+        }
+
+        const desde = caf.getFolioDesde();
+        const hasta = caf.getFolioHasta();
+        if (!Number.isFinite(desde) || !Number.isFinite(hasta)) continue;
+
+        // El MISMO CAF vive en dos árboles con el mismo contenido (ver _foliosUsadosPath),
+        // así que sin deduplicar por rango se contarían dos veces los mismos folios y el
+        // set se quedaría sin numeración a mitad de camino.
+        const clave = `${desde}-${hasta}`;
+        if (rangosVistos.has(clave)) continue;
+        rangosVistos.add(clave);
+
+        candidatos.push({ path: cafPath, desde, hasta });
+      }
+
+      if (!candidatos.length) {
+        const motivos = [...new Set(descartes)].join('; ');
+        console.log(
+          ` Tipo ${tipoDte}: sin CAF previo reusable${motivos ? ` (${motivos})` : ''} — se pedirá uno nuevo`
         );
         return null;
       }
 
-      const desde = caf.getFolioDesde();
-      const hasta = caf.getFolioHasta();
-      if (!Number.isFinite(desde) || !Number.isFinite(hasta)) return null;
-
-      // Cuántos folios de ese rango quedan libres según el contador de ESTA corrida.
-      // Si el helper ya consumió parte del rango, lo que queda es lo que sirve.
+      // Descuento del contador de ESTA corrida: si el helper ya reservó folios de este
+      // tipo, no vuelven a estar disponibles. Va sobre el total y no por CAF porque el
+      // contador es por tipo, no por rango.
       const yaUsados = this.folioHelper.usedFolios.get(tipoDte)?.size ?? 0;
-      const disponibles = (hasta - desde + 1) - yaUsados;
-      if (disponibles < cantidad) return null;
+      const disponibles = candidatos.reduce((n, c) => n + (c.hasta - c.desde + 1), 0) - yaUsados;
+      if (disponibles <= 0) return null;
 
-      return { path: cafPath, desde, hasta };
+      // Se juntan desde el folio más bajo, y solo los que hagan falta.
+      //
+      // Los dos criterios importan. Del folio más bajo porque los documentos quedan
+      // numerados como si vinieran de un rango contiguo, y porque gastar primero lo más
+      // viejo es lo que baja FOLIOS_DISP más rápido. Y solo los necesarios porque
+      // `_marcarCafsConsumidos` marca como usados TODOS los CAF que reciba: incluir uno
+      // que el plan no llega a tocar quema esos folios sin haber emitido nada con ellos.
+      candidatos.sort((a, b) => a.desde - b.desde);
+      const elegidos = [];
+      let acumulado = 0;
+      for (const c of candidatos) {
+        if (acumulado >= cantidad) break;
+        elegidos.push(c);
+        acumulado += (c.hasta - c.desde + 1);
+      }
+
+      return {
+        path: elegidos[0].path,
+        paths: elegidos.map(e => e.path),
+        desde: elegidos[0].desde,
+        hasta: elegidos[elegidos.length - 1].hasta,
+        /** Folios libres que aportan los CAF elegidos. */
+        total: Math.min(acumulado, disponibles),
+        /** false = hay folios en disco, pero no alcanzan para el plan. */
+        alcanza: disponibles >= cantidad,
+      };
     } catch (err) {
       // Un CAF ilegible no puede tumbar la corrida: se pide uno nuevo y listo.
       console.warn(`[CertRunner] No se pudo evaluar el CAF previo del tipo ${tipoDte}: ${err.message}`);
@@ -621,6 +686,36 @@ class CertRunner {
           );
           continue;
         }
+
+        // ── Cupo corto pero nada que limpiar ────────────────────────────────────
+        //
+        // FOLIOS_DISP es, textual en el formulario del SII, "considerando el timbraje
+        // histórico de documentos y de los documentos emitidos y/o anulados, la empresa
+        // posee folios disponibles o sin utilizar, por un total de N". O sea:
+        // timbrados - emitidos - anulados. Y anulable es exactamente ese conjunto: la
+        // página de anulación aclara que solo acepta "folios que no han sido
+        // recepcionados por el SII".
+        //
+        // Con N=0 la limpieza no puede anular nada, pero igual se intentaba, porque los
+        // candidatos NO salen de ahí: `consultarFolios` los saca del listado de
+        // TIMBRAJES (af_anular2), que lista los rangos autorizados sin decir si se usaron.
+        // Medido el 19/08/2026 (RUT 76543210-K): MAX_AUTOR=3 para 4 folios con
+        // FOLIOS_DISP=0, y la corrida gastó 43 de sus 70 requests intentando anular
+        // folios ya emitidos, uno por uno, para terminar con "0 anulados" y un error que
+        // además decía lo contrario de lo que pasaba ("el SII tiene bloqueado el
+        // timbraje", cuando el SII estaba autorizando 3).
+        //
+        // ⚠️ `=== 0` estricto, nunca `!foliosDisp`: con el timbraje BLOQUEADO el SII no
+        // publica el campo y queda `null` (ver FolioService.consultarTope), y ese caso
+        // sí necesita la limpieza, que es lo único que puede destrabarlo.
+        if (tope.foliosDisp === 0) {
+          console.log(
+            ` Tipo ${tipoDte}: sin limpieza previa — MAX_AUTOR=${tope.maxAutor} para ` +
+            `${necesarios} folio(s), pero FOLIOS_DISP=0: no hay folios sin utilizar que ` +
+            'anular ni recuperar. El tope lo fija el SII por historial, se pedirá en tandas.'
+          );
+          continue;
+        }
         // Un solo mensaje según el motivo: con el timbraje bloqueado el SII no publica
         // MAX_AUTOR ni FOLIOS_DISP, así que el texto de racionamiento saldría con `null`
         // en los dos números y confundiría a quien lea el log.
@@ -691,10 +786,13 @@ class CertRunner {
       // Reusarlos es seguro: los sets se envían recién cuando TODOS los CAF están en mano,
       // así que si el intento anterior falló, esos folios nunca se emitieron.
       const previo = this._cafReusable(Number(tipoDte), Number(cantidad));
-      if (previo) {
-        cafs[tipoDte] = previo.path;
+      if (previo?.alcanza) {
+        cafs[tipoDte] = previo.paths.length > 1 ? previo.paths : previo.path;
         emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
-        console.log(` ✓ CAF tipo ${tipoDte} reusado del intento anterior (folios ${previo.desde}-${previo.hasta})`);
+        console.log(
+          ` ✓ CAF tipo ${tipoDte} reusado del intento anterior (folios ${previo.desde}-${previo.hasta}` +
+          `${previo.paths.length > 1 ? `, ${previo.paths.length} CAF` : ''})`
+        );
         continue;
       }
 
@@ -711,10 +809,18 @@ class CertRunner {
       // devuelve sin gastar cupo. Por eso va acá: después de reusar lo que hay en disco y
       // antes de `solicitarCafExacto`, que pide folios nuevos y, si falla, anula.
       //
-      // Solo se intenta con el timbraje bloqueado. Con cupo disponible pedir es más simple
-      // y no cuesta nada; la reobtención implica un request por rango para descartar los
-      // anulados, que el listado del SII no distingue.
-      if (this._topeConsultado?.[tipoDte]?.bloqueado) {
+      // Se intenta cuando hay folios timbrados y sin utilizar, que es el pool sobre el que
+      // trabaja: `FOLIOS_DISP > 0`, o el timbraje bloqueado (ahí el SII no publica el campo
+      // y queda `null`, así que hay que intentar a ciegas). Con FOLIOS_DISP=0 todos los
+      // folios timbrados ya se emitieron y reobtener devolvería folios consumidos:
+      // `listarReobtenibles` filtra los anulados pero no distingue usados, así que emitir
+      // con ellos haría que el SII rechace el envío entero por folio repetido.
+      //
+      // Antes el gate era solo `bloqueado`, y con cupo corto sin bloqueo se saltaba
+      // derecho a pedir folios nuevos teniendo folios ya autorizados a mano. Pedir gasta
+      // cupo; reobtener no.
+      const topeTipo = this._topeConsultado?.[tipoDte];
+      if (topeTipo?.bloqueado || (topeTipo?.foliosDisp ?? 0) > 0) {
         const reob = await this.folioService.reobtenerCaf({
           tipoDte: Number(tipoDte), cantidad: Number(cantidad),
         });
@@ -733,32 +839,82 @@ class CertRunner {
         console.warn(`[CertRunner] Tipo ${tipoDte}: reobtención no sirvió — ${reob.motivo}`);
       }
 
-      // solicitarCafExacto (no ConFallback): la simulación genera un plan fijo de
-      // documentos y muere si falta un folio, así que un CAF corto no sirve. El
-      // método aborta antes de emitir si el SII no autoriza lo suficiente, anula
-      // folios sin utilizar para destrabar el tope, y reintenta.
-      const res = await this.folioService.solicitarCafExacto({
-        tipoDte: Number(tipoDte),
-        cantidad: Number(cantidad),
-      });
+      // ── Cómo pedir: de una o en tandas ──────────────────────────────────────
+      //
+      // `solicitarCafExacto` exige que UN CAF cubra la cantidad y, si no, anula folios
+      // sin utilizar y reintenta. Eso es lo correcto cuando el cupo está corto POR esos
+      // folios (FOLIOS_DISP > 0) y cuando el timbraje está bloqueado.
+      //
+      // Con FOLIOS_DISP=0 no aplica: no hay nada que anular ni que reobtener, el tope lo
+      // fija el SII por historial y no se mueve esperando (medido: 24 h con el mismo
+      // MAX_AUTOR=3 para 4 folios, RUT 76543210-K). Ahí la única vía es juntar el rango
+      // en varios timbrajes, que los sets soportan de fábrica porque `_tomarFolio` acepta
+      // una lista de CAF y salta al siguiente cuando se agota un rango.
+      const racionadoPorHistorial =
+        topeTipo?.foliosDisp === 0 &&
+        topeTipo?.maxAutor != null &&
+        topeTipo.maxAutor < Number(cantidad);
+
+      // Folios que ya están en disco pero no alcanzaban solos. En el camino normal se
+      // ignoran (se pide un rango que cubra todo y estos quedan para después), pero acá
+      // son la mitad del asunto: si el intento anterior alcanzó a timbrar 3 de 4, pedir
+      // los 4 de nuevo desperdicia esos 3 y encima sube FOLIOS_DISP, que es lo que aprieta
+      // el tope. Se cuentan como cubiertos y al SII se le pide solo la diferencia.
+      const parciales = racionadoPorHistorial && previo && !previo.alcanza ? previo : null;
+      const faltante = Number(cantidad) - (parciales?.total ?? 0);
+      if (parciales) {
+        console.log(
+          ` Tipo ${tipoDte}: ${parciales.total} folio(s) ya timbrados en disco ` +
+          `(${parciales.desde}-${parciales.hasta}) — se pedirán ${faltante} al SII`
+        );
+      }
+
+      const res = racionadoPorHistorial
+        ? await this.folioService.solicitarCafPorTandas({
+            tipoDte: Number(tipoDte),
+            cantidad: faltante,
+            topeInicial: topeTipo,
+          })
+        : await this.folioService.solicitarCafExacto({
+            tipoDte: Number(tipoDte),
+            cantidad: Number(cantidad),
+          });
 
       if (!res.ok) {
         const detalle = [
           res.maxAutor != null ? `MAX_AUTOR=${res.maxAutor}` : null,
           res.foliosDisp != null ? `FOLIOS_DISP=${res.foliosDisp}` : null,
         ].filter(Boolean).join(', ');
+        // Dos causas con remedios opuestos. Antes las dos salían con el mismo texto, y en
+        // el caso de abajo el mensaje mandaba a anular folios que no existen: el 19/08/2026
+        // un comercio recibió "el SII tiene bloqueado el timbraje" mientras el SII le
+        // estaba autorizando 3 folios y no tenía ni uno sin utilizar.
+        const remedio = res.foliosDisp === 0
+          ? 'No hay folios sin utilizar que anular ni recuperar: el tope lo fija el SII ' +
+            'según el historial de timbraje y emisión de este tipo de documento.'
+          : 'El SII limita el timbraje cuando hay folios ya autorizados sin utilizar; ' +
+            'emite o anula documentos electrónicos de este tipo y reintenta.';
+        const cubiertos = res.otorgados + (parciales?.total ?? 0);
         throw new Error(
-          `Folios insuficientes para tipo ${tipoDte}: se requieren ${cantidad} y el SII ` +
-          `otorgó ${res.otorgados}${detalle ? ` (${detalle})` : ''}. ` +
-          `El SII limita el timbraje cuando hay folios ya autorizados sin utilizar; ` +
-          `emite o anula documentos electrónicos de este tipo y reintenta. ` +
+          `Folios insuficientes para tipo ${tipoDte}: se requieren ${cantidad} y hay ` +
+          `${cubiertos}${detalle ? ` (${detalle})` : ''}. ${remedio} ` +
           `[${res.errorCode}] ${res.error || ''}`.trim()
         );
       }
 
-      cafs[tipoDte] = res.cafPath;
+      // `solicitarCafPorTandas` devuelve varios; `solicitarCafExacto`, uno solo. Los
+      // parciales van primero: el set numera de menor a mayor y son los folios más viejos,
+      // así que gastarlos antes es también lo que baja FOLIOS_DISP más rápido.
+      const rutas = [
+        ...(parciales?.paths ?? []),
+        ...(res.cafPaths ?? (res.cafPath ? [res.cafPath] : [])),
+      ];
+      cafs[tipoDte] = rutas.length > 1 ? rutas : rutas[0];
       emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
-      console.log(` ✓ CAF tipo ${tipoDte} (${res.otorgados} folios)`);
+      console.log(
+        ` ✓ CAF tipo ${tipoDte} (${res.otorgados + (parciales?.total ?? 0)} folios` +
+        `${rutas.length > 1 ? ` en ${rutas.length} CAF` : ''})`
+      );
     }
     
     return cafs;
@@ -2395,12 +2551,17 @@ class CertRunner {
     // Solicitar CAFs frescos
     const cafs = await this.solicitarCafs(cafRequired);
     
-    // Cargar objetos CAF
+    // Cargar objetos CAF. Un tipo puede traer VARIOS CAF cuando el SII racionó el
+    // timbraje y el rango se juntó en tandas: `Simulacion._tomarFolio` recorre la lista.
     const cafObjects = {};
     const { CAF } = require('../index');
-    for (const [tipo, cafPath] of Object.entries(cafs)) {
-      const cafXml = fs.readFileSync(cafPath, 'utf8');
-      cafObjects[tipo] = new CAF(cafXml);
+    for (const [tipo, ref] of Object.entries(cafs)) {
+      const rutas = Array.isArray(ref) ? ref : [ref];
+      const objetos = rutas.map(p => new CAF(fs.readFileSync(p, 'utf8')))
+        // De menor a mayor folio: los documentos del plan quedan numerados como si
+        // vinieran de un rango contiguo.
+        .sort((a, b) => a.getFolioDesde() - b.getFolioDesde());
+      cafObjects[tipo] = objetos.length > 1 ? objetos : objetos[0];
     }
 
     // Crear simulación

@@ -221,7 +221,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
   // ignora en silencio) y el getter real revienta sin un certificado cargado, lo que
   // haría pasar este test por la excepción en vez de por la lógica que se quiere probar.
   const conFolioService = (fn) => Object.defineProperty(runner, 'folioService',
-    { value: { findLatestCaf: fn }, configurable: true });
+    { value: { findLatestCaf: fn, listarCafs: (t) => [fn(t)].filter(Boolean) }, configurable: true });
   conFolioService(() => copiaA);
   assert.strictEqual(runner._cafReusable(33, 1), null,
     'un CAF ya emitido no se reusa aunque la copia encontrada no tenga marcador: '
@@ -235,6 +235,123 @@ function emitirSets(helper, { limpiarEntreSets }) {
 
   fs.rmSync(raiz, { recursive: true, force: true });
   console.log('✓ CAF consumido: no se reusa ni desde otra copia del mismo archivo');
+}
+
+// ── 7. Dos CAF parciales del mismo tipo se suman ────────────────────────────────
+//
+// Cuando el SII raciona el timbraje, un pedido de 4 folios queda repartido (3 + 1). Si
+// `_cafReusable` mira solo el CAF más reciente, concluye "no alcanza" y pide folios
+// nuevos: los 3 anteriores quedan timbrados sin usar y el SII los cuenta EN CONTRA del
+// cupo, o sea que el reintento empeora el bloqueo. Medido el 19/08/2026 en el RUT
+// 76543210-K (MAX_AUTOR=3 para 4 folios, FOLIOS_DISP=0).
+{
+  const fs   = require('fs');
+  const os   = require('os');
+  const path = require('path');
+  const CertRunner = require('../cert/CertRunner');
+
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'caf-parciales-'));
+  // Llave real: el constructor de CAF la parsea y revienta con una de mentira.
+  const sk = require('crypto')
+    .generateKeyPairSync('rsa', { modulusLength: 512,
+      privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+      publicKeyEncoding:  { type: 'pkcs1', format: 'pem' } }).privateKey;
+  const cafXml = (d, h) =>
+    '<AUTORIZACION><CAF><DA><RE>77111222-3</RE><TD>33</TD>' +
+    `<RNG><D>${d}</D><H>${h}</H></RNG></DA></CAF>` +
+    `<RSASK>${sk}</RSASK></AUTORIZACION>`;
+
+  const dir = path.join(raiz, 'auto-caf', '77111222-3', 'ts', '33');
+  fs.mkdirSync(dir, { recursive: true });
+  const tanda1 = path.join(dir, 'caf-33-100-102.xml'); // 3 folios
+  const tanda2 = path.join(dir, 'caf-33-103-103.xml'); // 1 folio
+  fs.writeFileSync(tanda1, cafXml(100, 102));
+  fs.writeFileSync(tanda2, cafXml(103, 103));
+
+  const runner = Object.create(CertRunner.prototype);
+  runner.stateDir = raiz;
+  runner.config = { emisor: { rut: '77111222-3' } };
+  runner.folioHelper = { usedFolios: new Map() };
+  Object.defineProperty(runner, 'folioService', {
+    // Más reciente primero, como devuelve `listarCafs` de verdad.
+    value: { listarCafs: () => [tanda2, tanda1] },
+    configurable: true,
+  });
+
+  const solo = runner._cafReusable(33, 3);
+  assert.strictEqual(solo.paths.length, 1, 'para 3 folios alcanza con la tanda de 3');
+  assert.strictEqual(solo.alcanza, true);
+
+  const juntos = runner._cafReusable(33, 4);
+  assert.strictEqual(juntos.alcanza, true, 'dos CAF parciales que suman 4 cubren un plan de 4');
+  assert.strictEqual(juntos.paths.length, 2, 'se devuelven los dos CAF, no solo el último');
+  assert.strictEqual(juntos.desde, 100, 'el rango arranca en el folio más bajo');
+  assert.strictEqual(juntos.hasta, 103, 'y termina en el más alto');
+
+  // Si no alcanzan, igual se devuelven: al SII se le pide solo la diferencia. Pedir el
+  // total de nuevo desperdiciaría estos folios y subiría FOLIOS_DISP, que es lo que
+  // aprieta el tope.
+  const corto = runner._cafReusable(33, 5);
+  assert.strictEqual(corto.alcanza, false, 'se avisa que no cubren el plan completo');
+  assert.strictEqual(corto.total, 4, 'pero se informa cuánto aportan');
+
+  // La misma copia en los dos árboles no puede contarse dos veces: son los mismos folios.
+  const dirB = path.join(raiz, 'caf', 'certificacion', '77111222-3', '33', 'ts');
+  fs.mkdirSync(dirB, { recursive: true });
+  const copiaDeTanda1 = path.join(dirB, 'caf-33-100-102.xml');
+  fs.writeFileSync(copiaDeTanda1, cafXml(100, 102));
+  Object.defineProperty(runner, 'folioService', {
+    value: { listarCafs: () => [tanda1, copiaDeTanda1] },
+    configurable: true,
+  });
+  const duplicado = runner._cafReusable(33, 4);
+  assert.strictEqual(duplicado.total, 3, 'dos copias del mismo rango son 3 folios, no 6');
+  assert.strictEqual(duplicado.alcanza, false, 'y por lo tanto no cubren un plan de 4');
+  assert.strictEqual(duplicado.paths.length, 1, 'se entrega una sola copia, no las dos');
+
+  fs.rmSync(raiz, { recursive: true, force: true });
+  console.log('✓ CAF parciales: se suman rangos distintos y se deduplican las copias');
+}
+
+// ── 8. La simulación también reparte folios entre varios CAF ────────────────────
+//
+// Los sets ya lo hacían (bloque 6), la simulación no: recibía UN objeto CAF por tipo y
+// leía su rango directo. Ese era el único punto que impedía cubrir un plan con folios
+// timbrados en tandas, que es la salida cuando el SII raciona el cupo (MAX_AUTOR=3 para
+// un plan de 4, medido el 19/08/2026 en el RUT 76543210-K).
+{
+  const Simulacion = require('../cert/Simulacion');
+  const CertFolioHelper = require('../cert/CertFolioHelper');
+
+  const cafFalso = (desde, hasta) => ({
+    getFolioDesde: () => desde,
+    getFolioHasta: () => hasta,
+  });
+
+  const sim = Object.create(Simulacion.prototype);
+  const helper = new CertFolioHelper();
+  const a = cafFalso(100, 102);
+  const b = cafFalso(103, 103);
+
+  const tomados = [];
+  for (let i = 0; i < 4; i++) tomados.push(sim._tomarFolio([a, b], 33, helper));
+
+  assert.deepStrictEqual(tomados.map(t => t.folio), [100, 101, 102, 103],
+    'los 4 folios del plan salen de los dos CAF, en orden y sin repetir');
+  assert.deepStrictEqual(tomados.map(t => t.caf === a), [true, true, true, false],
+    'cada folio vuelve con el CAF que lo contiene: el 103 con el segundo, no con el primero');
+
+  assert.throws(() => sim._tomarFolio([a, b], 33, helper), /No hay más folios disponibles/,
+    'agotados los dos rangos, falla en vez de emitir un folio fuera de rango');
+
+  // Un solo CAF, sin lista: el comportamiento de siempre.
+  const solo = sim._tomarFolio(cafFalso(500, 500), 61, new CertFolioHelper());
+  assert.strictEqual(solo.folio, 500, 'un CAF suelto sigue funcionando igual');
+
+  assert.throws(() => sim._tomarFolio(undefined, 34, helper), /No hay CAF para tipo 34/,
+    'sin CAF el error nombra el tipo, como antes');
+
+  console.log('✓ Simulación: un plan se cubre con folios repartidos en varios CAF');
 }
 
 console.log('\nTodos los checks de folios consolidados pasaron.');

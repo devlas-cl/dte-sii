@@ -39,9 +39,48 @@ class Simulacion {
   }
 
   /**
+   * Reserva el siguiente folio de un tipo, aceptando UNO o VARIOS CAF.
+   *
+   * El SII raciona el timbraje: cuando el cupo por solicitud es menor a lo que pide el
+   * plan, los folios llegan repartidos en varios CAF (ver
+   * `FolioService.solicitarCafPorTandas`). Cada CAF firma con su propia llave, así que
+   * hay que devolver también CUÁL se usó, para timbrar el documento con ese y no con el
+   * primero de la lista.
+   *
+   * Los sets ya funcionaban así (`SetBase._tomarFolio`); la simulación no, porque recibía
+   * un objeto CAF por tipo. Ese era el único punto que impedía repartir un rango.
+   *
+   * @private
+   * @returns {{ caf: Object, folio: number }}
+   */
+  _tomarFolio(cafRef, tipoDte, folioHelper) {
+    const lista = (Array.isArray(cafRef) ? cafRef : [cafRef]).filter(Boolean);
+    if (!lista.length) {
+      throw new Error(`No hay CAF para tipo ${tipoDte}`);
+    }
+
+    let ultimoError = null;
+    for (const caf of lista) {
+      try {
+        const folio = folioHelper.reserveNextFolio({
+          tipoDte,
+          folioDesde: caf.getFolioDesde(),
+          folioHasta: caf.getFolioHasta(),
+        });
+        return { caf, folio };
+      } catch (err) {
+        // Rango agotado: se pasa al CAF siguiente. Cualquier otro error sí es fatal.
+        if (!/No hay más folios disponibles/.test(err.message)) throw err;
+        ultimoError = err;
+      }
+    }
+    throw ultimoError;
+  }
+
+  /**
    * Genera el EnvioDTE de simulación a partir de las estructuras
    * @param {Object} estructuras - Estructuras del set de pruebas
-   * @param {Object} cafs - { tipoDte: CAF } pre-cargados
+   * @param {Object} cafs - { tipoDte: CAF | CAF[] } pre-cargados
    * @param {Object} folioHelper - Helper para gestionar folios
    * @param {Object} [options] - Opciones
    * @param {string} [options.fechaEmision] - Fecha de emisión (default: hoy)
@@ -61,17 +100,7 @@ class Simulacion {
 
     for (const doc of plan) {
       const tipoDte = Number(doc.tipoDte || 33);
-      const caf = cafs[tipoDte];
-      if (!caf) {
-        throw new Error(`No hay CAF para tipo ${tipoDte}`);
-      }
-
-      // Obtener folio desde el CAF
-      const folio = folioHelper.reserveNextFolio({
-        tipoDte,
-        folioDesde: caf.getFolioDesde(),
-        folioHasta: caf.getFolioHasta(),
-      });
+      const { caf, folio } = this._tomarFolio(cafs[tipoDte], tipoDte, folioHelper);
       const base = doc.referenciaCaso ? docRefs[doc.referenciaCaso] : null;
 
       // Resolver items

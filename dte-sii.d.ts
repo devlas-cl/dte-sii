@@ -653,6 +653,44 @@ export class FolioService {
    * rechazan).
    */
   reobtenerCaf(options: { tipoDte: number; cantidad: number }): Promise<ReobtenerCafResult | null>;
+  /** El CAF más reciente de un tipo para este RUT y ambiente, o null. */
+  findLatestCaf(tipoDte: number): string | null;
+  /**
+   * Todos los CAF de un tipo en disco, del más reciente al más viejo.
+   *
+   * Hace falta cuando el SII raciona el timbraje y un rango queda repartido en
+   * varios CAF: mirando solo el último se concluye "no alcanza" y se piden folios
+   * nuevos, dejando los anteriores timbrados y sin usar.
+   */
+  listarCafs(tipoDte: number): string[];
+  /**
+   * Cubre `cantidad` folios en varios timbrajes cuando el SII no autoriza tantos de
+   * una vez.
+   *
+   * Es para el caso `FOLIOS_DISP = 0` con `MAX_AUTOR` corto: no hay folios sin usar
+   * que anular ni recuperar, el tope lo fija el SII por historial y no se mueve
+   * esperando. Se corta apenas una tanda no aporta folios nuevos, porque cada
+   * timbraje parcial sube `FOLIOS_DISP` y puede bajar el tope siguiente.
+   */
+  solicitarCafPorTandas(options: {
+    tipoDte: number;
+    cantidad: number;
+    maxTandas?: number;
+    topeInicial?: FolioTope | null;
+  }): Promise<SolicitarCafTandasResult>;
+}
+
+export interface SolicitarCafTandasResult {
+  ok: boolean;
+  /** CAF obtenidos, uno por tanda. Los sets y la simulación aceptan la lista completa. */
+  cafPaths: string[];
+  /** Folios cubiertos entre todas las tandas. */
+  otorgados: number;
+  maxAutor: number | null;
+  foliosDisp: number | null;
+  /** `TOPE_SII_INSUFICIENTE` cuando el SII no llegó a cubrir la cantidad pedida. */
+  errorCode?: string;
+  error?: string;
 }
 
 export interface FolioRegistryOptions {

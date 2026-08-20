@@ -142,6 +142,24 @@ class FolioService {
    * @returns {string|null} - Ruta al CAF o null
    */
   findLatestCaf(tipoDte) {
+    return this.listarCafs(tipoDte)[0] ?? null;
+  }
+
+  /**
+   * Todos los CAF de un tipo que hay en disco para este RUT y ambiente, del más
+   * reciente al más viejo.
+   *
+   * `findLatestCaf` devuelve solo el primero, que alcanza mientras un CAF cubra
+   * la cantidad completa. Cuando el SII raciona el timbraje eso deja de valer: un
+   * pedido de 4 folios puede haber quedado repartido en un CAF de 3 y otro de 1, y
+   * mirando solo el último se concluye "no alcanza" y se vuelven a pedir folios
+   * nuevos, dejando los anteriores timbrados y sin usar (que es justo lo que el SII
+   * cuenta en contra del cupo).
+   *
+   * @param {number} tipoDte
+   * @returns {string[]} rutas ordenadas por mtime descendente
+   */
+  listarCafs(tipoDte) {
     const matches = [];
     
     // Helper para buscar recursivamente
@@ -195,9 +213,8 @@ class FolioService {
     const canonicalDir = path.join(this.debugDir, 'caf', this.ambiente, this.rutEmisor, String(tipoDte));
     searchRecursive(canonicalDir);
 
-    if (!matches.length) return null;
     matches.sort((a, b) => b.mtime - a.mtime);
-    return matches[0].filePath;
+    return matches.map(m => m.filePath);
   }
 
   /**
@@ -456,7 +473,16 @@ class FolioService {
       result.errorCode === 'MAX_AUTOR_INSUFICIENTE' ||
       result.errorCode === 'TIMBRAJE_BLOQUEADO';
 
-    if (!result.success && recuperable && permitirAnular) {
+    // ⚠️ `!== 0` estricto. FOLIOS_DISP es el total de folios timbrados y sin utilizar,
+    // que es exactamente el conjunto anulable (el SII solo anula folios "que no han sido
+    // recepcionados"). Con 0 la anulación no puede prosperar y solo gasta requests: el
+    // 19/08/2026 una corrida intentó anular 4 folios ya emitidos, uno por uno, para
+    // terminar en `SIN_FOLIOS_ANULABLES` y un mensaje que culpaba a folios inexistentes.
+    // Con el timbraje BLOQUEADO el SII no publica el campo y queda `null`, y ese caso sí
+    // necesita intentarlo.
+    const hayQueAnular = result.foliosDisp !== 0;
+
+    if (!result.success && recuperable && permitirAnular && hayQueAnular) {
       console.warn(
         `[FolioService] Tipo ${tipoDte}: ${result.errorCode} — anulando folios sin utilizar y reintentando...`
       );
@@ -539,6 +565,96 @@ class FolioService {
     }
 
     return { ok: true, cafPath: result.cafPath, otorgados, ...base };
+  }
+
+  /**
+   * Cubre `cantidad` folios en varios timbrajes cuando el SII no autoriza tantos de
+   * una vez.
+   *
+   * `solicitarCafExacto` exige que UN CAF cubra todo y aborta si `MAX_AUTOR` no da.
+   * Eso es correcto para no agravar el racionamiento cuando hay folios sin usar
+   * (anular/reobtener sí destraba ese caso), pero deja sin salida el caso contrario:
+   * `FOLIOS_DISP=0` y `MAX_AUTOR` chico porque el SII raciona por historial. Ahí no
+   * hay nada que anular ni que reobtener, y la única vía es pedir de a tandas.
+   *
+   * Medido el 19/08/2026 (RUT 76543210-K, maullin): el set de simulación necesita 4
+   * folios de tipo 33, el SII autorizaba 3 con FOLIOS_DISP=0, y el tope siguió en 3
+   * durante 24 h. Esperar no lo mueve.
+   *
+   * Los sets aceptan varios CAF por tipo (`SetBase._tomarFolio` recorre la lista y
+   * salta al siguiente cuando se agota un rango), así que juntar tandas es
+   * transparente para quien genera los documentos.
+   *
+   * ⚠️ Cada tanda sube `FOLIOS_DISP` y puede bajar el `MAX_AUTOR` de la siguiente. Por
+   * eso se corta apenas una tanda no aporta folios nuevos, en vez de insistir: cada
+   * pedido inútil deja folios timbrados que después juegan en contra.
+   *
+   * @param {Object} params
+   * @param {number} params.tipoDte
+   * @param {number} params.cantidad - folios a cubrir en total
+   * @param {number} [params.maxTandas=4] - tope duro de viajes al portal
+   * @param {Object} [params.topeInicial] - resultado de `consultarTope` ya en mano, para
+   *   no repetir el sondeo de la primera tanda (cuesta ~3 requests al portal).
+   * @returns {Promise<{ ok: boolean, cafPaths: string[], otorgados: number,
+   *   maxAutor: number|null, foliosDisp: number|null, errorCode?: string, error?: string }>}
+   */
+  async solicitarCafPorTandas({ tipoDte, cantidad, maxTandas = 4, topeInicial = null }) {
+    if (!this.cafSolicitor) {
+      throw new Error('FolioService: CafSolicitor no inicializado (se requiere pfxPath y pfxPassword)');
+    }
+
+    const objetivo = Number(cantidad);
+    const cafPaths = [];
+    let cubiertos = 0;
+    let tope = null;
+
+    for (let tanda = 1; tanda <= maxTandas && cubiertos < objetivo; tanda++) {
+      tope = (tanda === 1 && topeInicial) ? topeInicial : await this.consultarTope({ tipoDte });
+      const faltan = objetivo - cubiertos;
+
+      // `sinTope` = el SII no publica MAX_AUTOR, o sea no está racionando este tipo:
+      // se pide todo lo que falta de una.
+      const pedir = tope.sinTope ? faltan : Math.min(tope.maxAutor ?? 0, faltan);
+      if (pedir <= 0) {
+        console.warn(
+          `[FolioService] Tipo ${tipoDte}: tanda ${tanda} sin cupo ` +
+          `(MAX_AUTOR=${tope.maxAutor}, FOLIOS_DISP=${tope.foliosDisp}) — se corta con ${cubiertos}/${objetivo}`
+        );
+        break;
+      }
+
+      console.log(
+        `[FolioService] Tipo ${tipoDte}: tanda ${tanda} pide ${pedir} folio(s) ` +
+        `(faltan ${faltan}; MAX_AUTOR=${tope.maxAutor ?? 'sin tope'}, FOLIOS_DISP=${tope.foliosDisp ?? 'sin dato'})`
+      );
+
+      const res = await this.cafSolicitor.solicitar({ tipoDte, cantidad: pedir, minCantidad: 1 });
+      const otorgados = res.success ? this._contarFoliosCaf(res.cafPath) : 0;
+      if (!otorgados) {
+        console.warn(
+          `[FolioService] Tipo ${tipoDte}: tanda ${tanda} no entregó folios ` +
+          `(${res.errorCode || 'sin código'}: ${res.error || 'sin detalle'}) — se corta`
+        );
+        break;
+      }
+
+      cafPaths.push(res.cafPath);
+      cubiertos += otorgados;
+      console.log(`[FolioService] Tipo ${tipoDte}: tanda ${tanda} entregó ${otorgados} folio(s) — ${cubiertos}/${objetivo}`);
+    }
+
+    const base = { maxAutor: tope?.maxAutor ?? null, foliosDisp: tope?.foliosDisp ?? null };
+    if (cubiertos < objetivo) {
+      return {
+        ok: false, cafPaths, otorgados: cubiertos, ...base,
+        errorCode: 'TOPE_SII_INSUFICIENTE',
+        error:
+          `El SII autorizó ${cubiertos} folio(s) de los ${objetivo} que necesita el tipo ${tipoDte}, ` +
+          `repartidos en ${cafPaths.length} timbraje(s). No hay folios sin utilizar que anular ni recuperar ` +
+          `(FOLIOS_DISP=${base.foliosDisp}): el tope lo fija el SII según el historial de timbraje y emisión.`,
+      };
+    }
+    return { ok: true, cafPaths, otorgados: cubiertos, ...base };
   }
 
   /**

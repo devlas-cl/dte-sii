@@ -3,6 +3,64 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.17.0] - 2026-08-19
+
+### Agregado
+
+- **`FolioService.solicitarCafPorTandas()`** — cubre N folios en varios timbrajes cuando el SII
+  no autoriza tantos de una vez, y devuelve la lista de CAF.
+
+- **`FolioService.listarCafs(tipoDte)`** — todos los CAF de un tipo en disco, no solo el último
+  (`findLatestCaf` pasa a ser un envoltorio de este).
+
+### Corregido (racionamiento de folios del SII)
+
+El formulario de timbraje publica dos números y hasta ahora se usaba solo uno. `MAX_AUTOR` es
+cuánto autoriza el SII por solicitud; **`FOLIOS_DISP` es cuántos folios timbrados y sin utilizar
+tiene la empresa**, textual: *"considerando el timbraje histórico de documentos y de los
+documentos emitidos y/o anulados, la empresa posee folios disponibles o sin utilizar, por un
+total de N"*.
+
+Ese segundo número es la precondición de las dos operaciones de rescate, porque las dos trabajan
+sobre ese mismo conjunto: anular solo acepta folios "que no han sido recepcionados por el SII", y
+reobtener devuelve el CAF de folios ya autorizados para poder emitirlos.
+
+- **Con `FOLIOS_DISP = 0` ya no se intenta anular ni reobtener.** No hay nada que anular ni que
+  recuperar, pero se intentaba igual porque los candidatos no salen de ahí: salen del listado de
+  **timbrajes** (`af_anular2`), que lista los rangos autorizados sin decir si se usaron.
+
+  Medido el 19/08/2026: una corrida con `MAX_AUTOR=3` para un plan de 4 gastó **43 de sus 70
+  requests** intentando anular folios ya emitidos, uno por uno, para terminar en `0 anulados`.
+
+  ⚠️ El chequeo es `=== 0` estricto. Con el timbraje **bloqueado** el SII no publica el campo y
+  queda `null`, y ese caso sí necesita intentarlo: es lo único que puede destrabarlo.
+
+- **La reobtención se dispara con `FOLIOS_DISP > 0`, no solo con el timbraje bloqueado.** Con cupo
+  corto sin bloqueo se saltaba derecho a pedir folios nuevos teniendo folios ya autorizados a mano.
+  Pedir gasta cupo; reobtener no.
+
+- **`Simulacion` acepta varios CAF por tipo.** Los sets ya lo hacían (`SetBase._tomarFolio`); la
+  simulación recibía un objeto CAF por tipo y leía su rango directo, y era el único punto que
+  impedía cubrir un plan con folios timbrados en tandas. Cada folio se timbra con la llave del CAF
+  que lo contiene, no con la del primero de la lista.
+
+- **El reuso de CAF previos suma rangos parciales.** Antes miraba solo el más reciente y devolvía
+  "no alcanza" si por sí solo no cubría la cantidad, así que un timbraje repartido en 3+1 se
+  descartaba entero y se pedían folios nuevos, dejando los anteriores sin usar (que es justo lo que
+  el SII cuenta en contra del cupo). Ahora junta rangos distintos, deduplica las dos copias en
+  disco del mismo CAF, y toma solo los que hagan falta.
+
+- **Lo timbrado en un intento fallido se aprovecha en el siguiente.** Cuando el SII racionaba y
+  quedaban folios en disco que no cubrían el plan, el reintento pedía el total otra vez: los
+  anteriores se desperdiciaban Y subían `FOLIOS_DISP`, que es lo que aprieta el tope. Ahora cuentan
+  como cubiertos y al SII se le pide solo la diferencia, así que cada intento acumula en vez de
+  gastar. Los parciales van primero en la lista, que además es lo que baja `FOLIOS_DISP` más rápido.
+
+- **El mensaje de error distingue las dos causas.** Con `FOLIOS_DISP > 0` el remedio es emitir o
+  anular; con `0` no hay nada que hacer localmente. Antes las dos salían con el mismo texto, y en
+  el segundo caso decía *"el SII tiene bloqueado el timbraje"* mientras el SII estaba autorizando
+  folios.
+
 ## [2.16.0] - 2026-08-18
 
 ### Agregado (robustez)
