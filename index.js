@@ -95,6 +95,7 @@ const {
 
   // Referencia
   buildSetReferencia,
+  buildRazonCorreccion,
   buildDocReferencia,
   buildAnulacionReferencia,
   buildCorreccionTextoReferencia,
@@ -317,6 +318,7 @@ module.exports = {
   // Referencia
   // ─────────────────────────────────────────
   buildSetReferencia,
+  buildRazonCorreccion,
   buildDocReferencia,
   buildAnulacionReferencia,
   buildCorreccionTextoReferencia,

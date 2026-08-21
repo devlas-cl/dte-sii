@@ -96,7 +96,7 @@ class SetCompra extends SetBase {
    * @private
    */
   async _generarFacturaCompra(caso, cafPath) {
-    const { DTE, CAF, buildDetalleCompra, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalleCompra, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     const { caf, cafXml, folio } = this._tomarFolio(cafPath);
@@ -107,7 +107,7 @@ class SetCompra extends SetBase {
     const totales = this._calcularTotalesFacturaCompra(detalle);
     
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     const dteDatos = {
       Encabezado: {
@@ -146,7 +146,7 @@ class SetCompra extends SetBase {
    * @private
    */
   async _generarNotaCredito(caso, cafPath) {
-    const { DTE, CAF, buildDetalleCompra, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalleCompra, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     const { caf, cafXml, folio } = this._tomarFolio(cafPath);
@@ -163,7 +163,7 @@ class SetCompra extends SetBase {
     const totales = this._calcularTotalesFacturaCompra(detalle);
     
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     // Referencia al documento original
     const docReferencia = {
@@ -172,7 +172,7 @@ class SetCompra extends SetBase {
       FolioRef: docRef.folio,
       FchRef: docRef.fecha,
       CodRef: caso.codRef,
-      RazonRef: caso.razonRef,
+      RazonRef: buildRazonCorreccion({ codRef: caso.codRef, razonRef: caso.razonRef, receptor: this.config.receptor }),
     };
     
     const dteDatos = {
@@ -212,7 +212,7 @@ class SetCompra extends SetBase {
    * @private
    */
   async _generarNotaDebito(caso, cafPath) {
-    const { DTE, CAF, buildDetalleCompra, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalleCompra, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     const { caf, cafXml, folio } = this._tomarFolio(cafPath);
@@ -229,7 +229,7 @@ class SetCompra extends SetBase {
     const totales = this._calcularTotalesFacturaCompra(detalle);
     
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     // Referencia al documento original
     const docReferencia = {
@@ -238,7 +238,7 @@ class SetCompra extends SetBase {
       FolioRef: docRef.folio,
       FchRef: docRef.fecha,
       CodRef: caso.codRef,
-      RazonRef: caso.razonRef,
+      RazonRef: buildRazonCorreccion({ codRef: caso.codRef, razonRef: caso.razonRef, receptor: this.config.receptor }),
     };
     
     const dteDatos = {

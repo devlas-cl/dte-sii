@@ -78,7 +78,7 @@ class SetGuia extends SetBase {
    * @private
    */
   async _generarGuia(caso, cafPath) {
-    const { DTE, CAF, buildDetalleGuia, calcularTotalesDesdeDetalle, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalleGuia, calcularTotalesDesdeDetalle, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     // Cargar CAF
@@ -99,7 +99,7 @@ class SetGuia extends SetBase {
     
     // Referencia del set de pruebas
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     // Construir IdDoc con campos específicos de guía
     // Orden XSD: TipoDTE, Folio, FchEmis, ..., TipoDespacho, IndTraslado

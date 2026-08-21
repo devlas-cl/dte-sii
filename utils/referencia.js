@@ -21,11 +21,19 @@
  * @param {number} [nroLinRef=1] - Número de línea de referencia
  * @returns {Object} Objeto de referencia formateado
  */
-function buildSetReferencia(casoId, fecha, nroLinRef = 1) {
+function buildSetReferencia(casoId, fecha, { folio, nroLinRef = 1 } = {}) {
+  // FolioRef debe ser el folio del DTE que lleva la referencia, no una constante.
+  // Se recibe en un objeto y no como tercer posicional a propósito: la firma
+  // anterior era (casoId, fecha, nroLinRef), así que cualquier llamada antigua
+  // llega acá con folio === undefined y falla ruidosamente en vez de emitir un
+  // FolioRef equivocado pero plausible.
+  if (!Number.isInteger(folio) || folio <= 0) {
+    throw new Error('buildSetReferencia: se requiere { folio } con el folio propio del DTE que lleva la referencia');
+  }
   return {
     NroLinRef: nroLinRef,
     TpoDocRef: 'SET',
-    FolioRef: 1,
+    FolioRef: folio,
     FchRef: fecha,
     RazonRef: `CASO ${casoId}`,
   };
@@ -136,8 +144,8 @@ function buildCorreccionMontosReferencia({ tipoDte, folio, fecha, razonRef, nroL
  * @param {Object} docRef - Referencia al documento (sin NroLinRef)
  * @returns {Array} Array con ambas referencias ordenadas
  */
-function buildReferenciasNcNd(casoId, fechaEmision, docRef) {
-  const setRef = buildSetReferencia(casoId, fechaEmision, 1);
+function buildReferenciasNcNd(casoId, fechaEmision, docRef, { folio } = {}) {
+  const setRef = buildSetReferencia(casoId, fechaEmision, { folio, nroLinRef: 1 });
   const documentoRef = { ...docRef, NroLinRef: 2 };
   return [setRef, documentoRef];
 }
@@ -155,6 +163,35 @@ const CODIGOS_REFERENCIA = {
 // EXPORTS
 // ============================================
 
+/**
+ * Compone la razón que se envía en una referencia de corrección.
+ *
+ * El SII exige que una corrección de texto (CodRef=2) lleve los literales
+ * "Dice:" y "debe decir:" en la RazonRef; su ausencia es causa de rechazo. La
+ * razón del set asignado describe el caso ("CORRIGE GIRO DEL RECEPTOR") y no
+ * tiene esa forma, así que la razón cruda se conserva como evidencia del caso
+ * y la que se envía se compone acá desde el receptor del documento.
+ *
+ * Las anulaciones (CodRef=1) y las correcciones de monto (CodRef=3) no llevan
+ * esos literales: se devuelven tal cual.
+ *
+ * @param {Object} params
+ * @param {number} params.codRef - Código de referencia del SII
+ * @param {string} params.razonRef - Razón cruda del set asignado
+ * @param {Object} [params.receptor] - Receptor del documento
+ * @returns {string} Razón a enviar
+ */
+function buildRazonCorreccion({ codRef, razonRef, receptor }) {
+  if (Number(codRef) !== CODIGOS_REFERENCIA.CORRIGE_TEXTO) return razonRef;
+  const razon = String(razonRef || '');
+  if (/dice:/i.test(razon) && /debe decir:/i.test(razon)) return razonRef;
+  const giro = String(receptor?.giro || '').trim();
+  if (!giro) {
+    throw new Error('buildRazonCorreccion: una corrección de texto (CodRef=2) requiere el giro del receptor para componer "Dice: … y debe decir: …"');
+  }
+  return `Dice: ${giro} y debe decir: ${giro} CORREGIDO`;
+}
+
 module.exports = {
   // Referencias
   buildSetReferencia,
@@ -163,6 +200,7 @@ module.exports = {
   buildCorreccionTextoReferencia,
   buildCorreccionMontosReferencia,
   buildReferenciasNcNd,
+  buildRazonCorreccion,
 
   // Constantes
   CODIGOS_REFERENCIA,

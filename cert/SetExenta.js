@@ -101,7 +101,7 @@ class SetExenta extends SetBase {
    * @private
    */
   async _generarFacturaExenta(caso, cafPath) {
-    const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     const { caf, cafXml, folio } = this._tomarFolio(cafPath);
@@ -112,7 +112,7 @@ class SetExenta extends SetBase {
     const totales = calcularTotalesDesdeDetalle(detalle, { soloExento: true });
     
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     const dteDatos = {
       Encabezado: {
@@ -151,7 +151,7 @@ class SetExenta extends SetBase {
    * @private
    */
   async _generarNotaCredito(caso, cafPath) {
-    const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     const { caf, cafXml, folio } = this._tomarFolio(cafPath);
@@ -168,7 +168,7 @@ class SetExenta extends SetBase {
     const totales = calcularTotalesDesdeDetalle(detalle, { soloExento: true });
     
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     // Referencia al documento original
     const docReferencia = {
@@ -177,7 +177,7 @@ class SetExenta extends SetBase {
       FolioRef: docRef.folio,
       FchRef: docRef.fecha,
       CodRef: caso.codRef,
-      RazonRef: caso.razonRef,
+      RazonRef: buildRazonCorreccion({ codRef: caso.codRef, razonRef: caso.razonRef, receptor: this.config.receptor }),
     };
     
     const dteDatos = {
@@ -217,7 +217,7 @@ class SetExenta extends SetBase {
    * @private
    */
   async _generarNotaDebito(caso, cafPath) {
-    const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalle, calcularTotalesDesdeDetalle, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     const { caf, cafXml, folio } = this._tomarFolio(cafPath);
@@ -234,7 +234,7 @@ class SetExenta extends SetBase {
     const totales = calcularTotalesDesdeDetalle(detalle, { soloExento: true });
     
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     // Referencia al documento original
     const docReferencia = {
@@ -243,7 +243,7 @@ class SetExenta extends SetBase {
       FolioRef: docRef.folio,
       FchRef: docRef.fecha,
       CodRef: caso.codRef,
-      RazonRef: caso.razonRef,
+      RazonRef: buildRazonCorreccion({ codRef: caso.codRef, razonRef: caso.razonRef, receptor: this.config.receptor }),
     };
     
     const dteDatos = {

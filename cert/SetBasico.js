@@ -100,7 +100,7 @@ class SetBasico extends SetBase {
    * @private
    */
   async _generarFactura(caso, cafPath) {
-    const { DTE, CAF, buildDetalle, calcularTotalesDesdeItems, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalle, calcularTotalesDesdeItems, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     // Cargar CAF
@@ -125,7 +125,7 @@ class SetBasico extends SetBase {
     
     // Referencia del set de pruebas
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     
     // Construir DTE
     const dteDatos = {
@@ -168,7 +168,7 @@ class SetBasico extends SetBase {
    * @private
    */
   async _generarNotaCredito(caso, cafPath) {
-    const { DTE, CAF, buildDetalle, calcularTotalesDesdeItems, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalle, calcularTotalesDesdeItems, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     // Obtener documento referenciado
@@ -205,14 +205,14 @@ class SetBasico extends SetBase {
     
     // Referencias
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     const docReferencia = {
       NroLinRef: 2,
       TpoDocRef: base.tipoDte,
       FolioRef: base.folio,
       FchRef: base.fecha,
       CodRef: caso.codRef,
-      RazonRef: caso.razonRef,
+      RazonRef: buildRazonCorreccion({ codRef: caso.codRef, razonRef: caso.razonRef, receptor: this.config.receptor }),
     };
     
     // Construir DTE
@@ -253,7 +253,7 @@ class SetBasico extends SetBase {
    * @private
    */
   async _generarNotaDebito(caso, cafPath) {
-    const { DTE, CAF, buildDetalle, calcularTotalesDesdeItems, buildSetReferencia } = require('../index');
+    const { DTE, CAF, buildDetalle, calcularTotalesDesdeItems, buildSetReferencia, buildRazonCorreccion } = require('../index');
     const fs = require('fs');
     
     // Obtener documento referenciado
@@ -274,14 +274,14 @@ class SetBasico extends SetBase {
     
     // Referencias
     const fechaEmision = this._getFechaEmision();
-    const setReferencia = buildSetReferencia(caso.id, fechaEmision);
+    const setReferencia = buildSetReferencia(caso.id, fechaEmision, { folio });
     const docReferencia = {
       NroLinRef: 2,
       TpoDocRef: base.tipoDte,
       FolioRef: base.folio,
       FchRef: base.fecha,
       CodRef: caso.codRef,
-      RazonRef: caso.razonRef,
+      RazonRef: buildRazonCorreccion({ codRef: caso.codRef, razonRef: caso.razonRef, receptor: this.config.receptor }),
     };
     
     // Construir DTE

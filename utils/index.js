@@ -123,6 +123,7 @@ const {
   buildCorreccionTextoReferencia,
   buildCorreccionMontosReferencia,
   buildReferenciasNcNd,
+  buildRazonCorreccion,
   CODIGOS_REFERENCIA,
 } = require('./referencia');
 
@@ -245,6 +246,7 @@ module.exports = {
   buildCorreccionTextoReferencia,
   buildCorreccionMontosReferencia,
   buildReferenciasNcNd,
+  buildRazonCorreccion,
   CODIGOS_REFERENCIA,
 
   // ─────────────────────────────────────────

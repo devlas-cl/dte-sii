@@ -3,6 +3,47 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [3.0.0] - 2026-08-21
+
+Dos defectos que producían XML válido contra el XSD y rechazable por el SII. Encontrados
+inspeccionando a mano un set básico ya firmado, listo para enviar, en el laboratorio de
+certificación.
+
+### Cambiado — **BREAKING**
+
+#### `buildSetReferencia()` ahora exige el folio del DTE que lleva la referencia
+
+`FolioRef` estaba **fijo en `1`** y la firma no recibía folio, así que era imposible que
+llevara el valor correcto. El manual de certificación lo define como *"folio del DTE
+propio"*.
+
+En un set básico de 8 documentos —folios T33 1-4, T61 1-3, T56 1— salían las 8
+referencias con `FolioRef 1`: cinco equivocadas y tres correctas por casualidad, las que
+son el primer documento de su tipo.
+
+La firma pasa de `(casoId, fecha, nroLinRef)` a `(casoId, fecha, { folio, nroLinRef })`.
+El folio va en un objeto **a propósito**: como el tercer posicional antes era `nroLinRef`,
+cualquier llamada con la forma antigua llega con `folio === undefined` y lanza, en vez de
+emitir un `FolioRef` equivocado pero plausible. `buildReferenciasNcNd()` recibe el mismo
+objeto.
+
+### Corregido
+
+#### Una corrección de texto no llevaba los literales que el SII exige
+
+`CodRef=2` requiere que la `RazonRef` contenga `Dice:` y `debe decir:`; su ausencia es
+causa de rechazo. La razón que se enviaba era la descripción del caso tal como viene del
+set asignado —`CORRIGE GIRO DEL RECEPTOR`—, que no tiene esa forma.
+
+Se agrega `buildRazonCorreccion({ codRef, razonRef, receptor })`, que compone la razón
+enviada desde el giro del receptor y deja intactas las anulaciones (`CodRef=1`) y las
+correcciones de monto (`CodRef=3`). La razón cruda del set se conserva como evidencia del
+caso. `determinarCodRef()` no cambió: ya mapeaba `CORRIGE` + `GIRO` a `2` — el código
+estaba bien y solo la redacción estaba mal.
+
+Aplicado en `SetBasico`, `SetExenta` y `SetCompra`, donde se arma la referencia al
+documento corregido y el receptor ya está resuelto.
+
 ## [2.17.0] - 2026-08-19
 
 ### Agregado

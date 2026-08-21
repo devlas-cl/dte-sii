@@ -860,7 +860,8 @@ export function buildDetalleCompra(items: ItemSimple[], options?: BuildDetalleOp
 export function buildDescuentoGlobal(descuentoPct: number, glosa?: string): DscRcgGlobal[] | null;
 
 // Referencia
-export function buildSetReferencia(casoId: string, fecha: string, nroLinRef?: number): Referencia;
+export function buildSetReferencia(casoId: string, fecha: string, opciones: { folio: number; nroLinRef?: number }): Referencia;
+export function buildRazonCorreccion(params: { codRef: number; razonRef: string; receptor?: { giro?: string } }): string;
 export function buildDocReferencia(params: DocReferenciaParams): Referencia;
 export function buildAnulacionReferencia(params: AnulacionReferenciaParams): Referencia;
 export function buildCorreccionTextoReferencia(params: CorreccionReferenciaParams): Referencia;
@@ -1000,6 +1001,7 @@ export const utils: {
   buildDescuentoGlobal: typeof buildDescuentoGlobal;
 
   buildSetReferencia: typeof buildSetReferencia;
+  buildRazonCorreccion: typeof buildRazonCorreccion;
   buildDocReferencia: typeof buildDocReferencia;
   buildAnulacionReferencia: typeof buildAnulacionReferencia;
   buildCorreccionTextoReferencia: typeof buildCorreccionTextoReferencia;
