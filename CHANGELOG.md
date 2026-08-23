@@ -3,6 +3,13 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [3.0.1] - 2026-08-23
+
+### Corregido
+
+- Los RUT emitidos en sobres y documentos eliminan ceros de relleno del número,
+  conservando siempre su dígito verificador.
+
 ## [3.0.0] - 2026-08-21
 
 Dos defectos que producían XML válido contra el XSD y rechazable por el SII. Encontrados

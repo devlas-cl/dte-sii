@@ -170,8 +170,8 @@ class EnvioDTE extends EnvioBase {
     });
     
     this.caratula = {
-      RutEmisor: caratula.RutEmisor,
-      RutEnvia: caratula.RutEnvia,
+      RutEmisor: formatRutSii(caratula.RutEmisor),
+      RutEnvia: formatRutSii(caratula.RutEnvia),
       RutReceptor: caratula.RutReceptor || '',
       FchResol: caratula.FchResol,
       NroResol: caratula.NroResol,
