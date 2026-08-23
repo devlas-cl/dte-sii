@@ -15,6 +15,6 @@ test('canonical and punctuated RUTs retain their established shape', () => {
 
 test('degenerate RUT input never becomes empty', () => {
   assert.equal(cleanRut('00000000-0'), '00');
-  assert.equal(formatRutSii('0'), '0-');
+  assert.throws(() => formatRutSii('0'), /demasiado corto/);
   assert.equal(formatRutSii('00000000-0'), '0-0');
 });

@@ -77,7 +77,8 @@ function formatRutWithDots(rut) {
  */
 function formatRutSii(rut) {
   const { numero, dv } = splitRut(rut);
-  if (!numero) return '';
+  if (!numero && !dv) return '';
+  if (!dv) throw new Error('RUT demasiado corto para formato SII');
   return `${numero}-${dv}`;
 }
 

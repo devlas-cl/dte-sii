@@ -3,6 +3,13 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [3.0.2] - 2026-08-23
+
+### Corregido
+
+- El RUT extraído del certificado se normaliza antes de llegar a libros y consumo
+  de folios; entradas demasiado cortas fallan en lugar de emitir `0-`.
+
 ## [3.0.1] - 2026-08-23
 
 ### Corregido
