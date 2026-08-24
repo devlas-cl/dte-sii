@@ -31,7 +31,10 @@ function formatRut(rut) {
  */
 function cleanRut(rut) {
   if (!rut) return '';
-  return rut.replace(/[^0-9kK]/g, '').toUpperCase();
+  const cleaned = rut.replace(/[^0-9kK]/g, '').toUpperCase();
+  if (cleaned.length < 2) return cleaned;
+  const numero = cleaned.slice(0, -1).replace(/^0+(?=\d)/, '');
+  return `${numero || '0'}${cleaned.slice(-1)}`;
 }
 
 /**
@@ -74,7 +77,8 @@ function formatRutWithDots(rut) {
  */
 function formatRutSii(rut) {
   const { numero, dv } = splitRut(rut);
-  if (!numero) return '';
+  if (!numero && !dv) return '';
+  if (!dv) throw new Error('RUT demasiado corto para formato SII');
   return `${numero}-${dv}`;
 }
 

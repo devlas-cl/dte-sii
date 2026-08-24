@@ -8,7 +8,7 @@
   "author": "Devlas SpA <ti@devlas.cl> (https://devlas.cl)",
   "homepage": "https://github.com/devlas-cl/dte-sii",
   "scripts": {
-    "test": "node test/pfx.test.js && node test/folios-consolidados.test.js && node test/c14n-apostrofe.test.js && node test/precargar-plan-corrida.test.js && node test/respaldo-mipyme.test.js"
+    "test": "node test/pfx.test.js && node test/folios-consolidados.test.js && node test/c14n-apostrofe.test.js && node test/precargar-plan-corrida.test.js && node test/respaldo-mipyme.test.js && node --test test/rut.test.js"
   },
   "repository": {
     "type": "git",

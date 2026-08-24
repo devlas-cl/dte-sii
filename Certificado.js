@@ -7,6 +7,7 @@
  */
 
 const forge = require('node-forge');
+const { formatRutSii } = require('./utils/rut');
 const { 
   certError, 
   ERROR_CODES, 
@@ -55,7 +56,7 @@ class Certificado {
     }
     
     // Usar datos extraídos por la utilidad centralizada
-    this.rut = pfxData.rut;
+    this.rut = formatRutSii(pfxData.rut);
     this.nombre = pfxData.cn;
     
 
