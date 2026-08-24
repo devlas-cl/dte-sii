@@ -3,6 +3,16 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [3.1.0] - 2026-08-23
+
+### Corregido
+
+- El texto de un DTE conserva apóstrofes y comillas dobles. Se borraban desde
+  `sanitizeSiiText`, atribuido a problemas de firma XML cuya causa real era otra y
+  ya estaba corregida; el documento decía algo distinto de lo que el SII comparó
+  contra el set asignado. La puntuación tipográfica se pliega a su equivalente
+  Latin-1 en vez de desaparecer, y sigue eliminándose lo que no cabe en Latin-1.
+
 ## [3.0.2] - 2026-08-23
 
 ### Corregido

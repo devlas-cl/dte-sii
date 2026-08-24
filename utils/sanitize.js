@@ -14,7 +14,17 @@
 
 /**
  * Sanitizar texto para DTE SII
- * Elimina caracteres que causan problemas de firma XML
+ *
+ * Pliega a Latin-1 lo que no cabe en Latin-1, y no toca nada más. El texto de un DTE
+ * es el que el SII comparó contra el set que asignó: quitarle un carácter que sí
+ * cabe hace que el documento diga otra cosa.
+ *
+ * Antes se borraban apóstrofes y comillas dobles, atribuido a "problemas de firma
+ * XML". La firma rota de aquel caso (14/08/2026) la causaba `fixEntities()` escapando
+ * el apóstrofe DENTRO de la forma canónica, y está arreglada donde correspondía —ver
+ * `test/c14n-apostrofe.test.js`—, así que borrar el carácter era el remedio de un mal
+ * que ya no existe. Costó un caso real: el 23/08/2026 el set de exentas exigía el ítem
+ * "CAPACITACION USO PLC's CNC" y el documento salió con "PLCs".
  *
  * El envío al SII codifica el XML como ISO-8859-1 vía `Buffer.from(xml, 'latin1')`
  * (EnviadorSII.js), que trunca cada code point a su byte bajo (code & 0xFF) en vez de
@@ -31,9 +41,8 @@
 function sanitizeSiiText(text) {
   if (text === undefined || text === null) return '';
   return String(text)
-    .replace(/[''´`]/g, '')     // Eliminar apóstrofes
-    .replace(/[""]/g, '')       // Eliminar comillas tipográficas
-    .replace(/"/g, '')          // Eliminar comillas dobles ASCII
+    .replace(/[\u2018\u2019]/g, "'")  // Apóstrofes tipográficos -> apóstrofe ASCII
+    .replace(/[\u201C\u201D]/g, '"')  // Comillas tipográficas -> comilla ASCII
     .replace(/[—–]/g, '-')      // Guion largo/corto tipográfico -> guion ASCII
     .replace(/…/g, '...')       // Puntos suspensivos tipográficos -> ASCII
     .replace(/[^\x00-\xFF]/g, '') // Cualquier otro caracter fuera de Latin-1 (emojis, etc.)
