@@ -60,6 +60,9 @@ class DTE {
     this.xml = null;
     this.tedXml = null;
     this.tmstFirma = null;
+    // Export DTEs use the same signing machinery but a different signed
+    // container name. Ordinary documents retain the historical default.
+    this.documentElementName = datos.documentElementName || 'Documento';
   }
   
   _esFormatoSimplificado(datos) {
@@ -202,7 +205,7 @@ class DTE {
     const detalle = this._buildDetalle(det);
     
     this.documento = {
-      Documento: {
+      [this.documentElementName]: {
         '@_ID': this.id,
         Encabezado: { IdDoc: idDoc, Emisor: emisor, Receptor: receptor, ...(enc.Transporte ? { Transporte: enc.Transporte } : {}), Totales: enc.Totales },
         Detalle: detalle,
@@ -295,8 +298,9 @@ class DTE {
     
     this.tedXml = `<TED version="1.0"><DD><RE>${dd.RE}</RE><TD>${dd.TD}</TD><F>${dd.F}</F><FE>${dd.FE}</FE><RR>${dd.RR}</RR><RSR>${rznRecepXml}</RSR><MNT>${dd.MNT}</MNT><IT1>${it1Xml}</IT1>${dd.CAF}<TSTED>${dd.TSTED}</TSTED></DD><FRMT algoritmo="SHA1withRSA">${firma}</FRMT></TED>`;
     
-    this.documento.Documento.TED = '__TED_PLACEHOLDER__';
-    this.documento.Documento.TmstFirma = '__TMSTFIRMA_PLACEHOLDER__';
+    const element = this.documentElementName || 'Documento';
+    this.documento[element].TED = '__TED_PLACEHOLDER__';
+    this.documento[element].TmstFirma = '__TMSTFIRMA_PLACEHOLDER__';
     
     return this;
   }
@@ -345,7 +349,8 @@ class DTE {
     });
     
     // Insertar firma
-    const xmlFirmado = dteXml.replace('</Documento></DTE>', `</Documento>${signatureXml}</DTE>`);
+    const element = this.documentElementName || 'Documento';
+    const xmlFirmado = dteXml.replace(`</${element}></DTE>`, `</${element}>${signatureXml}</DTE>`);
     this.xml = formatBase64InXml(xmlFirmado);
     
     return this;
@@ -386,7 +391,8 @@ class DTE {
   // ============================================
   
   _c14nDocumento(doc) {
-    const documento = doc.getElementsByTagName('Documento')[0];
+    const element = this.documentElementName || 'Documento';
+    const documento = doc.getElementsByTagName(element)[0];
     const dteRoot = doc.getElementsByTagName('DTE')[0];
     if (!documento) return '';
 
@@ -398,7 +404,7 @@ class DTE {
       if (xsiNs) inheritedNs.set('xmlns:xsi', xsiNs);
     }
 
-    let c14n = '<Documento';
+    let c14n = `<${element}`;
     if (inheritedNs.has('xmlns')) c14n += ` xmlns="${inheritedNs.get('xmlns')}"`;
     if (inheritedNs.has('xmlns:xsi')) c14n += ` xmlns:xsi="${inheritedNs.get('xmlns:xsi')}"`;
     const id = documento.getAttribute('ID');
@@ -409,7 +415,7 @@ class DTE {
       c14n += serializeNode(documento.childNodes[i], inheritedNs);
     }
 
-    c14n += '</Documento>';
+    c14n += `</${element}>`;
     return c14n;
   }
   
