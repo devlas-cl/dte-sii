@@ -3,6 +3,29 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.18.2] - 2026-08-24
+
+### Corregido (🔴 una subida cortada se daba por completada)
+
+`INGRESO` **no** es "muestras ya enviadas": es una revisión creada y **sin someter**. El portal
+la deja en ese estado mientras se suben los PDFs, y recién pasa a `POR REVISAR` cuando se llama a
+`solicitaRevisionSII`.
+
+Caso real (24/08/2026): el portal devolvió **HTTP 503** en el archivo 47 de 64 y la subida murió.
+El reintento consultó el estado, vio `INGRESO`, devolvió `alreadyCompleted: true`, la etapa se
+marcó cumplida y la corrida avanzó al Cierre — donde el SII contestó que la empresa seguía en
+DOCUMENTOS IMPRESOS. Quedó una revisión con 47 archivos que el SII no iba a mirar nunca, y el
+proceso trabado dando la subida por hecha.
+
+Dos arreglos:
+
+- **`INGRESO` deja de contar como completada.** Ahora se **retoma esa misma revisión**: se saltea
+  `creaLista`, se reusa su ID y se completa la subida y el sometimiento.
+
+- **Las subidas reintentan ante 5xx** (3 reintentos, espera creciente). Un 5xx no dice nada del
+  archivo, dice que el servicio no está; un 4xx sí es del archivo o de la sesión y ahí se corta.
+  El portal del SII devuelve 503 de forma intermitente, igual que en `QueryEstUp`.
+
 ## [2.18.1] - 2026-08-24
 
 ### Corregido (🔴 el timbre PDF417 salía con la firma inválida)

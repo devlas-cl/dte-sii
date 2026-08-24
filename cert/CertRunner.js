@@ -3842,9 +3842,25 @@ class CertRunner {
       };
     }
 
-    // Si ya hay una revisión activa (no rechazada ni aprobada), no se puede re-subir.
+    // ⚠️ `INGRESO` NO es "ya enviadas": es una revisión creada y **sin someter**.
+    //
+    // El portal deja la revisión en ese estado mientras se suben los PDFs, y solo pasa a
+    // POR REVISAR cuando se llama a `solicitaRevisionSII`. Si la subida se corta a mitad
+    // —el SII devuelve 503 de forma intermitente— queda una revisión con parte de los
+    // archivos que el SII no va a mirar nunca.
+    //
+    // Tratarla como completada fue un bug real (24/08/2026): la subida murió en el archivo
+    // 47 de 64 con un 503, el reintento vio `INGRESO`, devolvió `alreadyCompleted`, la etapa
+    // se marcó cumplida y el pipeline avanzó al Cierre, donde el SII contestó que la empresa
+    // seguía en DOCUMENTOS IMPRESOS. La corrida quedó trabada dando la subida por hecha.
+    //
+    // Ahora se retoma esa misma revisión: se saltea `creaLista` y se sube sobre su ID.
+    const reanudarRevision = estadoActual === 'INGRESO';
+
+    // Si ya hay una revisión activa Y SOMETIDA (no rechazada ni aprobada), no se re-sube.
     // El SII sólo permite crear nueva revisión cuando el estado es RECHAZADO o APROBADO.
-    if (estadoActual && estadoActual !== 'RECHAZADO' && estadoActual !== 'APROBADO') {
+    if (estadoActual && !reanudarRevision
+        && estadoActual !== 'RECHAZADO' && estadoActual !== 'APROBADO') {
       // Extraer detalles adicionales de la respuesta leeImpreso para diagnóstico.
       //
       // ⚠️ NO se intenta sacar de acá la cantidad de documentos. La tabla de strings trae
@@ -3869,9 +3885,27 @@ class CertRunner {
       console.log(` → No hay revisión previa — creando primera revisión`);
     }
 
-    // ── Paso 2: crear nueva lista/revisión (creaLista) ────────────────────────
+    // ── Paso 2: crear la revisión, o retomar la que quedó a medias ────────────
+    let revId = null;
+    let revIdEncoded = null;
+
+    if (reanudarRevision) {
+      // El ID viaja como Long GWT en la respuesta de `leeImpreso`.
+      for (const m of leeResp.body.matchAll(/'([A-Za-z0-9$_]{3,7})'/g)) {
+        const n = decodeGwtLong(m[1]);
+        if (n >= 10000 && n <= 9999999) { revId = n; revIdEncoded = m[1]; break; }
+      }
+      if (revId) {
+        console.log(` → Revisión ${revId} quedó en INGRESO (creada, sin someter) — se retoma y se completa`);
+      } else {
+        console.log(' → Estado INGRESO pero no se pudo leer el ID de revisión — se crea una nueva');
+      }
+    }
+
+    // ── Paso 2b: crear nueva lista/revisión (creaLista) ───────────────────────
     // Params (6): amb=Z, rutNum, dv, proveedor=rutNum, provDv=dv, provNomre=""
     // String table (9): module, policy, svc, method, String type, Z, rutNum, dv, ""
+    if (!revId) {
     const creaBody =
       `7|0|9|${GWT_BASE}|${policyHash}|${GWT_SVC}|creaLista|` +
       `java.lang.String/2004016611|Z|${rutNum}|${dvChar}||` +
@@ -3899,8 +3933,6 @@ class CertRunner {
     }
 
     // Extraer ID de revisión (Long codificado en GWT base64, ej: 'BAqo' = 264872)
-    let revId = null;
-    let revIdEncoded = null;
     for (const m of creaResp.body.matchAll(/'([A-Za-z0-9$_]{3,7})'/g)) {
       const n = decodeGwtLong(m[1]);
       if (n >= 10000 && n <= 9999999) { revId = n; revIdEncoded = m[1]; break; }
@@ -3911,8 +3943,10 @@ class CertRunner {
     if (debugDir) {
       fs.writeFileSync(path.join(debugDir, `pdfte-crea-lista-resp.txt`), creaResp.body, 'utf8');
     }
+    }   // fin del bloque creaLista (se saltea al retomar una revisión en INGRESO)
 
     // ── Paso 3: subir cada PDF ────────────────────────────────────────────────
+    const SUBIDA_MAX_INTENTOS = 4;   // 1 intento + 3 reintentos ante 5xx del portal
     const uploadUrl = `${GWT_BASE}upload`;
     let uploadedCount = 0;
     for (const pdfPath of pdfPaths) {
@@ -3931,7 +3965,7 @@ class CertRunner {
       const closing = Buffer.from(`--${boundary}--\r\n`);
       const formBody = Buffer.concat([partFile, partId, partAmb, closing]);
 
-      const upResp = await makeReq(uploadUrl, {
+      const peticionSubida = {
         method: 'POST',
         body: formBody,
         headers: {
@@ -3942,7 +3976,24 @@ class CertRunner {
           'Pragma': 'no-cache',
         },
         cookies,
-      });
+      };
+      let upResp = await makeReq(uploadUrl, peticionSubida);
+
+      // ⚠️ El portal del SII devuelve 5xx de forma intermitente, y cortar la subida a mitad
+      // deja la revisión con parte de los archivos y sin someter. Pasó el 24/08/2026: un 503
+      // en el archivo 47 de 64 dejó la revisión en INGRESO y la corrida trabada.
+      //
+      // Un 5xx no dice nada del archivo, dice que el servicio no está: se reintenta el mismo
+      // POST. Un 4xx sí es del archivo o de la sesión, y ahí cortar es lo correcto.
+      let intentoSubida = 1;
+      while (upResp.status >= 500 && intentoSubida < SUBIDA_MAX_INTENTOS) {
+        const espera = 2000 * intentoSubida;
+        console.log(` [!] ${filename} → HTTP ${upResp.status}, reintentando en ${espera / 1000}s ` +
+                    `(${intentoSubida}/${SUBIDA_MAX_INTENTOS - 1})`);
+        await sleep(espera);
+        intentoSubida++;
+        upResp = await makeReq(uploadUrl, peticionSubida);
+      }
 
       if (upResp.status !== 200) {
         throw new Error(`pdfdteInternet upload ${filename} → HTTP ${upResp.status}: ${upResp.body.substring(0, 150)}`);
