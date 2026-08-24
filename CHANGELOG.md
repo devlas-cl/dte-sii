@@ -3,6 +3,39 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.18.1] - 2026-08-24
+
+### Corregido (🔴 el timbre PDF417 salía con la firma inválida)
+
+`bwip-js` 4.11.2 corrompía un byte al codificar el TED en modo binario: se le entregaba `0xCD`
+(la `Í` de una razón social) en el offset 214 y el código de barras quedaba con `0x41`, la letra
+`A`. Una diferencia en 752 bytes.
+
+Ese byte cae dentro del bloque `<CAF>`, que va firmado por el SII, así que el timbre quedaba con
+la firma rota y el SII rechazaba la revisión de muestras impresas completa:
+
+```
+Error en CAF: Ha habido alguna alteracion en el CAF entregado por el SII
+Error Tecnico:  TED - Firma invalida
+```
+
+Verificado criptográficamente, sin el SII de por medio: se decodificó el PDF417 del PDF que
+efectivamente se subió y se validó su `<FRMT>` con la llave pública que viene en el propio CAF
+(`<RSAPK>`).
+
+| | RS en el DD | Firma FRMT |
+|---|---|---|
+| barcode con 4.11.2 | `DAAZ QUERO Y COMPAÑÍA` | **inválida** |
+| TED del XML firmado | `DÍAZ QUERO Y COMPAÑÍA` | válida |
+| barcode con 4.11.4 | `DÍAZ QUERO Y COMPAÑÍA` | **válida** |
+
+Dos lecturas independientes coincidieron en el byte corrupto: zxing sobre el PNG extraído del
+PDF, y el propio SII en `leeImpresoDetById`.
+
+⚠️ **Nunca había aparecido porque el byte que se corrompe es una vocal acentuada, y en el timbre
+eso solo puede venir del `<RS>` del CAF** — la razón social tal como la emitió el SII, que no se
+puede sanitizar porque va firmada. Los contribuyentes anteriores no tenían acentos ahí.
+
 ## [2.18.0] - 2026-08-24
 
 ### Corregido (🔴 regresión de 2.17.0: la reobtención reusaba folios ya emitidos)
