@@ -809,20 +809,34 @@ class CertRunner {
       // devuelve sin gastar cupo. Por eso va acá: después de reusar lo que hay en disco y
       // antes de `solicitarCafExacto`, que pide folios nuevos y, si falla, anula.
       //
-      // Se intenta cuando hay folios timbrados y sin utilizar, que es el pool sobre el que
-      // trabaja: `FOLIOS_DISP > 0`, o el timbraje bloqueado (ahí el SII no publica el campo
-      // y queda `null`, así que hay que intentar a ciegas). Con FOLIOS_DISP=0 todos los
-      // folios timbrados ya se emitieron y reobtener devolvería folios consumidos:
-      // `listarReobtenibles` filtra los anulados pero no distingue usados, así que emitir
-      // con ellos haría que el SII rechace el envío entero por folio repetido.
+      // ── Cuándo reobtener: solo si NO se pueden pedir folios nuevos ──────────
       //
-      // Antes el gate era solo `bloqueado`, y con cupo corto sin bloqueo se saltaba
-      // derecho a pedir folios nuevos teniendo folios ya autorizados a mano. Pedir gasta
-      // cupo; reobtener no.
+      // La reobtención es el último recurso antes de anular, no un atajo para ahorrar
+      // cupo, porque tiene un riesgo que pedir folios nuevos no tiene: el listado del
+      // portal **no marca los folios ya emitidos**, y emitir de nuevo con uno hace que el
+      // SII rechace el documento con `(DTE-3-101) Folio ... ya fue recibido en el SII`.
+      //
+      // El filtro `yaEmitido` de abajo tapa lo que sabemos, pero no alcanza solo: el
+      // registro local puede estar incompleto (corridas viejas, disco efímero). Medido el
+      // 24/08/2026: de los folios reobtenidos del tipo 61, los rangos 1-3 y 10 sí estaban
+      // registrados, pero el 4-6 no, y el SII también lo tenía. Los 7 documentos del envío
+      // fueron rechazados.
+      //
+      // Por eso vuelve a exigirse que el cupo NO alcance: con timbraje bloqueado (el SII no
+      // publica MAX_AUTOR y queda `null`) o con un tope racionado por debajo de lo que hace
+      // falta. Con cupo holgado —el caso de esa corrida, MAX_AUTOR=19 para 7 folios— se
+      // piden folios nuevos, que es la vía sin riesgo.
       const topeTipo = this._topeConsultado?.[tipoDte];
-      if (topeTipo?.bloqueado || (topeTipo?.foliosDisp ?? 0) > 0) {
+      const cupoAlcanza = topeTipo?.sinTope === true
+        || (topeTipo?.maxAutor != null && topeTipo.maxAutor >= Number(cantidad));
+      if (topeTipo?.bloqueado || (!cupoAlcanza && (topeTipo?.foliosDisp ?? 0) > 0)) {
         const reob = await this.folioService.reobtenerCaf({
           tipoDte: Number(tipoDte), cantidad: Number(cantidad),
+          // El portal lista folios ya emitidos sin marcarlos: el único que lo sabe es este
+          // registro, el mismo con el que se descartan los CAF de disco unas líneas arriba.
+          // Sin pasarlo, la reobtención devuelve folios ya recibidos por el SII y todo el
+          // envío se rechaza documento por documento.
+          yaEmitido: (r) => this._rangoYaConsumido(Number(tipoDte), r.folioDesde, r.folioHasta),
         });
         if (reob.ok) {
           // Puede ser más de uno: el SII entrega los folios reobtenidos de a uno y cada
@@ -1117,6 +1131,7 @@ class CertRunner {
           await sleep(intervalo);
         } else {
           console.log(` [ERR] Contenido rechazado por SII (ENVIO CON ERRORES O REPAROS): ${(result.nombresConError || []).join(', ')}`);
+          await this._diagnosticarEnviosConError(sets, result.nombresConError, debugPrefix);
           break;
         }
       } else if (result.allRejected) {
@@ -1140,6 +1155,144 @@ class CertRunner {
     }
 
     return lastResult;
+  }
+
+  /**
+   * Cuando el portal dice "ENVIO CON ERRORES O REPAROS", pregunta POR QUÉ.
+   *
+   * El portal de certificación solo da el titular: nombra el set y dice que tiene errores
+   * o reparos, sin un solo dato del documento culpable. El detalle vive en la consulta de
+   * estado del envío, que se hace con el TrackId — y ese TrackId lo tenemos en la mano
+   * desde que se subió el set.
+   *
+   * Hasta acá nadie preguntaba. Caso real (24/08/2026): una corrida quedó trabada con
+   * "SET BASICO, SET GUIA DE DESPACHO" con errores, y en las 105 respuestas HTTP de la
+   * etapa los TrackIds de esos sets aparecían solo en el `DTEUpload` que los creó y en el
+   * formulario que los declaró. Ni el comercio ni nosotros teníamos forma de saber qué
+   * corregir; la corrida siguió a libros, avance y simulación arrastrando el problema.
+   *
+   * ⚠️ Se consulta por SOAP (`QueryEstUp.jws`), NO por el REST de `consultarEstado()`: ese
+   * apunta a `apicert.sii.cl/recursos/v1/boleta.electronica.envio/`, que es el servicio de
+   * BOLETAS. Pasarle el TrackId de un set de facturas devuelve un resultado que no
+   * corresponde, y el diagnóstico saldría equivocado justo cuando más se necesita.
+   *
+   * La respuesta cruda queda en el debug dir y también en la captura HTTP de la librería.
+   *
+   * Nunca es fatal: es diagnóstico. Si la consulta falla, se deja constancia y se sigue.
+   *
+   * @private
+   * @param {Object} sets - El mismo mapa que se declaró: { setBasico: { trackId }, ... }
+   * @param {string[]} nombresConError - Nombres tal como los escribe el portal
+   * @param {string} debugPrefix - Prefijo de los archivos de debug de esta declaración
+   */
+  async _diagnosticarEnviosConError(sets, nombresConError, debugPrefix) {
+    // Espejo de la tabla `patterns` de SiiCertificacion.declararAvance: ahí se traduce de
+    // fila del portal a clave, acá de vuelta a la clave para encontrar el TrackId.
+    const NOMBRE_A_CLAVE = {
+      'SET BASICO': 'setBasico',
+      'SET GUIA DE DESPACHO': 'setGuiaDespacho',
+      'SET FACTURA EXENTA': 'setFacturaExenta',
+      'SET CASO GENERAL FACTURA COMPRA': 'setFacturaCompra',
+      'SET DE SIMULACION': 'setSimulacion',
+      'LIBRO DE VENTAS': 'libroVentas',
+      'LIBRO DE COMPRAS': 'libroCompras',
+      'LIBRO DE COMPRAS PARA EXENTOS': 'libroComprasExentos',
+      'LIBRO DE GUIAS': 'libroGuias',
+    };
+
+    const nombres = nombresConError || [];
+    if (!nombres.length) return;
+
+    console.log('\n──────────────────────────────────────────────────────────');
+    console.log(' DIAGNÓSTICO: consultando al SII por qué rechazó');
+    console.log('──────────────────────────────────────────────────────────');
+
+    let enviador = null;
+    try {
+      enviador = new EnviadorSII(this.certificado, this.ambiente);
+    } catch (err) {
+      console.warn(` [!] No se pudo crear el consultor de estado: ${err.message}`);
+      return;
+    }
+
+    const rut = this.config.emisor.rut;
+
+    // Se consultan TODOS los envíos declarados, no solo los marcados. El contraste es la
+    // mitad del diagnóstico: si el que falló dice RPR y los demás EPR, el problema es de
+    // ese documento; si todos vuelven RCT o RFR, es de la carátula o de la firma y el
+    // portal solo alcanzó a marcar los que ya procesó.
+    const conError = new Set(nombres.map(n => NOMBRE_A_CLAVE[n]).filter(Boolean));
+    const claves = [...new Set([...conError, ...Object.keys(sets || {})])];
+
+    for (const clave of claves) {
+      const nombre = Object.keys(NOMBRE_A_CLAVE).find(n => NOMBRE_A_CLAVE[n] === clave) || clave;
+      const marca = conError.has(clave) ? '[CON ERRORES]' : '[sin marca en el portal]';
+      const trackId = sets?.[clave]?.trackId;
+
+      if (!trackId) {
+        console.log(` [?] ${nombre} ${marca}: sin TrackId a mano — no se puede consultar el detalle`);
+        continue;
+      }
+
+      console.log(`\n ${nombre} ${marca} — TrackId ${trackId}`);
+
+      try {
+        const res = await enviador.consultarEstadoSoap(trackId, rut);
+
+        // Cruda y completa: el resumen de abajo es para leer en el momento, el archivo es
+        // para poder revisar después qué dijo exactamente el SII.
+        try {
+          fs.writeFileSync(
+            path.join(this.debugDir, `${debugPrefix}-estado-${clave}-${trackId}.xml`),
+            res?.xmlRaw || res?.respuesta || JSON.stringify(res, null, 2),
+            'utf8'
+          );
+        } catch { /* el debug no puede tumbar el diagnóstico */ }
+
+        if (!res || res.ok === false) {
+          console.log(`   sin estado: ${res?.error || 'sin detalle'}`);
+          continue;
+        }
+
+        console.log(`   estado=${res.estado ?? '?'}  ${res.mensaje || ''}`.trimEnd());
+        if (res.glosa) console.log(`   glosa: ${res.glosa}`);
+        this._imprimirDetalleEstado(res.xmlRaw);
+      } catch (err) {
+        console.log(`   falló la consulta de estado: ${err.message}`);
+      }
+    }
+    console.log('──────────────────────────────────────────────────────────\n');
+  }
+
+  /**
+   * Saca a la luz el detalle por documento que trae el XML de estado.
+   *
+   * `consultarEstadoSoap` parsea solo ESTADO, GLOSA y NUM_ATENCION, que es lo que necesita
+   * para decidir si seguir esperando. El detalle de los reparos viene en el mismo XML y se
+   * perdía: son las líneas que nombran el documento culpable.
+   *
+   * No se asume una estructura fija — el SII varía los nombres según el tipo de envío — así
+   * que se imprimen los campos que aparezcan y el XML completo queda en el archivo.
+   * @private
+   */
+  _imprimirDetalleEstado(xml) {
+    if (!xml) return;
+
+    // Cualquier bloque que hable de reparos, rechazos o detalle por documento.
+    const bloques = xml.match(/<(DETALLE_REP|REPARO|RECHAZO|DETALLE)[\s\S]{0,600}?<\/\1>/gi) || [];
+    for (const b of bloques.slice(0, 20)) {
+      const campos = [...b.matchAll(/<([A-Z_]+)>([^<]+)<\/\1>/gi)]
+        .map(m => `${m[1]}=${m[2].trim()}`)
+        .filter(t => !/^DETALLE(_REP)?=/.test(t));
+      if (campos.length) console.log(`     · ${campos.join(' | ')}`);
+    }
+    if (bloques.length > 20) console.log(`     · (+${bloques.length - 20} más — ver el XML en el debug)`);
+
+    // Contadores del envío: cuántos documentos aceptó, cuántos objetó. Aunque no haya
+    // bloques de detalle, esto ya dice si el problema es de uno o de todos.
+    const contadores = [...xml.matchAll(/<(NUM_DOC[A-Z_]*|ACEPTADOS|RECHAZADOS|REPAROS)>([^<]+)<\/\1>/gi)]
+      .map(m => `${m[1]}=${m[2].trim()}`);
+    if (contadores.length) console.log(`     · ${contadores.join(' | ')}`);
   }
 
   /**

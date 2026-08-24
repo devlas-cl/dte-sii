@@ -354,4 +354,53 @@ function emitirSets(helper, { limpiarEntreSets }) {
   console.log('✓ Simulación: un plan se cubre con folios repartidos en varios CAF');
 }
 
-console.log('\nTodos los checks de folios consolidados pasaron.');
+// ── 9. La reobtención no puede traer folios ya emitidos ────────────────────────
+//
+// El listado del portal marca los rangos ANULADOS y nada más: un folio que ya viajó al
+// SII dentro de un envío aparece como reobtenible. Emitir de nuevo con él hace que el SII
+// rechace el documento con `(DTE-3-101) Folio para este Tipo de documento ya fue recibido
+// en el SII`.
+//
+// Medido el 24/08/2026: la corrida descartó los CAF de disco por tener folios ya emitidos
+// y, tres líneas después, la reobtención trajo esos mismos folios del portal. Los 7
+// documentos del tipo 61 del envío fueron rechazados.
+(async () => {
+  const FolioService = require('../FolioService');
+
+  const svc = Object.create(FolioService.prototype);
+  const reobtenidos = [];
+  svc.cafSolicitor = {
+    listarReobtenibles: async () => ([
+      { folioDesde: 1,  folioHasta: 3,  cantidad: 3, anulado: false },  // ya emitido
+      { folioDesde: 4,  folioHasta: 6,  cantidad: 3, anulado: false },  // anulado
+      { folioDesde: 20, folioHasta: 22, cantidad: 3, anulado: false },  // sirve
+    ].map((r, i) => (i === 1 ? { ...r, anulado: true } : r))),
+    reobtenerCaf: async (_tipo, rango) => {
+      reobtenidos.push(`${rango.folioDesde}-${rango.folioHasta}`);
+      return { success: true, cafPath: `/tmp/caf-${rango.folioDesde}.xml`,
+        folioDesde: rango.folioDesde, folioHasta: rango.folioHasta };
+    },
+  };
+
+  const yaEmitido = (r) => r.folioDesde === 1 && r.folioHasta === 3;
+
+  const r = await svc.reobtenerCaf({ tipoDte: 61, cantidad: 3, yaEmitido });
+
+  assert.strictEqual(r.ok, true, 'con un rango limpio que alcanza, la reobtención sirve');
+  assert.deepStrictEqual(reobtenidos, ['20-22'],
+    'no se reobtiene el rango ya emitido ni el anulado — solo el limpio');
+
+  // Y si lo único disponible ya se emitió, la reobtención NO sirve: hay que pedir folios
+  // nuevos. Devolver algo acá sería exactamente el bug.
+  const soloEmitidos = Object.create(FolioService.prototype);
+  soloEmitidos.cafSolicitor = {
+    listarReobtenibles: async () => ([{ folioDesde: 1, folioHasta: 7, cantidad: 7, anulado: false }]),
+    reobtenerCaf: async () => { throw new Error('no debería reobtener nada'); },
+  };
+  const r2 = await soloEmitidos.reobtenerCaf({ tipoDte: 61, cantidad: 7, yaEmitido: () => true });
+  assert.strictEqual(r2.ok, false, 'sin rangos limpios la reobtención no sirve');
+  assert.match(r2.motivo, /no alcanzan/, 'y lo dice, para que el llamador pida folios nuevos');
+
+  console.log('✓ Reobtención: descarta los folios ya emitidos, no solo los anulados');
+  console.log('\nTodos los checks de folios consolidados pasaron.');
+})().catch((err) => { console.error(err); process.exit(1); });

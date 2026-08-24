@@ -362,7 +362,7 @@ class FolioService {
    *
    * @returns {Promise<{ ok: boolean, cafPath?: string, motivo?: string, disponibles?: number }>}
    */
-  async reobtenerCaf({ tipoDte, cantidad }) {
+  async reobtenerCaf({ tipoDte, cantidad, yaEmitido = null }) {
     if (!this.cafSolicitor) {
       return { ok: false, motivo: 'CafSolicitor no inicializado' };
     }
@@ -375,11 +375,30 @@ class FolioService {
       return { ok: false, motivo: err.message };
     }
 
-    const usables = rangos.filter(r => !r.anulado);
-    const anulados = rangos.length - usables.length;
+    // ⚠️ El listado del portal NO dice si un folio ya se emitió.
+    //
+    // `anulado` es lo único que marca, y eso deja pasar los folios que ya viajaron al SII
+    // dentro de un envío. Emitir de nuevo con ellos hace que el SII rechace cada documento
+    // con `(DTE-3-101) Folio para este Tipo de documento ya fue recibido en el SII`.
+    //
+    // Pasó de verdad (24/08/2026): la corrida descartó los CAF en disco por tener folios
+    // ya emitidos y, tres líneas después, la reobtención trajo esos mismos folios del
+    // portal y los usó. Los 7 documentos del tipo 61 fueron rechazados.
+    //
+    // Por eso el llamador puede pasar `yaEmitido`: es el mismo registro con el que descarta
+    // los CAF de disco (`CertRunner._rangoYaConsumido`), aplicado también acá. Sin ese dato
+    // la reobtención no puede saberlo, porque el SII no lo publica.
+    const emitidos = yaEmitido
+      ? rangos.filter(r => yaEmitido({ folioDesde: r.folioDesde, folioHasta: r.folioHasta }))
+      : [];
+    const emitidosSet = new Set(emitidos);
+    const usables = rangos.filter(r => !r.anulado && !emitidosSet.has(r));
+    const anulados = rangos.filter(r => r.anulado).length;
     console.log(
       `[FolioService] Tipo ${tipoDte}: ${rangos.length} rango(s) reobtenible(s), ` +
-      `${usables.length} usable(s)${anulados ? `, ${anulados} anulado(s) descartado(s)` : ''}`
+      `${usables.length} usable(s)` +
+      `${anulados ? `, ${anulados} anulado(s) descartado(s)` : ''}` +
+      `${emitidos.length ? `, ${emitidos.length} ya emitido(s) descartado(s)` : ''}`
     );
 
     const total = usables.reduce((n, r) => n + r.cantidad, 0);

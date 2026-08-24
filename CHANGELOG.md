@@ -3,6 +3,63 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [2.18.0] - 2026-08-24
+
+### Corregido (🔴 regresión de 2.17.0: la reobtención reusaba folios ya emitidos)
+
+En 2.17.0 el gate de reobtención pasó de "solo con el timbraje bloqueado" a "siempre que haya
+folios disponibles", con el argumento de que pedir gasta cupo y reobtener no. **Eso rompió la
+invariante más básica: un folio no se reutiliza nunca.**
+
+El listado de reobtención del portal marca los rangos **anulados** y nada más: un folio que ya
+viajó al SII dentro de un envío aparece como reobtenible. Medido el 24/08/2026 en una corrida
+real: la etapa descartó los CAF de disco por tener folios ya emitidos y, tres líneas después, la
+reobtención trajo esos mismos folios del portal. El SII rechazó los 7 documentos del tipo con
+`(DTE-3-101) Folio para este Tipo de documento ya fue recibido en el SII`. Como daño colateral,
+las notas de débito que referenciaban esos folios volvieron con reparo `(REF-2-780) Anulación
+presenta diff. de monto con doc. referenciado`, porque el SII las comparó contra el documento
+que él ya tenía con ese folio.
+
+Dos arreglos, porque uno solo no alcanza:
+
+- **`reobtenerCaf({ yaEmitido })`** — el llamador pasa el mismo registro con el que descarta los
+  CAF de disco, y los rangos ya emitidos se descartan también acá. El SII no publica ese dato,
+  así que la librería no puede saberlo sola.
+
+- **Vuelve a exigirse que el cupo NO alcance** para reobtener: timbraje bloqueado, o `MAX_AUTOR`
+  por debajo de lo necesario. Con cupo holgado se piden folios nuevos, que es la vía sin riesgo.
+  Hace falta además del filtro porque el registro local puede estar incompleto: en esa misma
+  corrida, de los rangos reobtenidos dos estaban registrados como emitidos y uno no, y el SII
+  también lo tenía.
+
+### Agregado (diagnóstico)
+
+- **Cuando el portal responde "ENVIO CON ERRORES O REPAROS", ahora se le pregunta al SII por
+  qué.** El portal de certificación solo da el titular: nombra el set y dice que tiene errores,
+  sin un dato del documento culpable. El detalle vive en la consulta de estado del envío
+  (`QueryEstUp.jws`), que se hace con el TrackId — y ese TrackId ya lo teníamos desde que se
+  subió el set.
+
+  Hasta acá nadie preguntaba. Caso real (24/08/2026): una corrida quedó trabada con dos sets
+  marcados, y en las **105 respuestas HTTP** de la etapa los TrackIds de esos sets aparecían
+  solo en el `DTEUpload` que los creó y en el formulario que los declaró. Ni el consumidor ni
+  el contribuyente tenían forma de saber qué corregir.
+
+  Ahora se imprime tipo de documento, folio, estado y la glosa del SII, más los contadores del
+  envío, y la respuesta cruda queda en `{debugDir}/{prefijo}-estado-{set}-{trackId}.xml`.
+
+  ⚠️ La consulta va por **SOAP**, no por el REST de `consultarEstado()`: ese apunta al servicio
+  de **boletas** (`apicert.sii.cl/recursos/v1/boleta.electronica.envio/`), y pasarle el TrackId
+  de un set de facturas devuelve un resultado que no corresponde.
+
+  Se consultan **todos** los envíos declarados, no solo los marcados: el contraste es la mitad
+  del diagnóstico. Si el que falló dice `RPR` y los demás `EPR`, el problema es de ese
+  documento; si todos vuelven `RCT` o `RFR`, es de la carátula o de la firma y el portal solo
+  alcanzó a marcar los que ya procesó.
+
+  Es diagnóstico puro: corre cuando algo ya falló, así que un error suyo nunca tapa el error
+  que se estaba investigando.
+
 ## [2.17.0] - 2026-08-19
 
 ### Agregado

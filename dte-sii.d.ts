@@ -652,7 +652,16 @@ export class FolioService {
    * el portal reporta como anulados (los documentos emitidos con esos folios se
    * rechazan).
    */
-  reobtenerCaf(options: { tipoDte: number; cantidad: number }): Promise<ReobtenerCafResult | null>;
+  reobtenerCaf(options: {
+    tipoDte: number;
+    cantidad: number;
+    /**
+     * Descarta los rangos que ya se emitieron. El listado del portal solo marca los
+     * ANULADOS, así que sin esto la reobtención devuelve folios que el SII ya recibió y
+     * cada documento vuelve rechazado con `DTE-3-101`.
+     */
+    yaEmitido?: (rango: { folioDesde: number; folioHasta: number }) => boolean;
+  }): Promise<ReobtenerCafResult | null>;
   /** El CAF más reciente de un tipo para este RUT y ambiente, o null. */
   findLatestCaf(tipoDte: number): string | null;
   /**
