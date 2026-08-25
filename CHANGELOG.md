@@ -8,6 +8,38 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Cambiado
+
+- **`formatRutSii` ahora lanza con entradas demasiado cortas.** Antes devolvía
+  siempre un texto, aunque fuera imposible: `"5"` salía como `"5-"`. Ahora lanza
+  `Error`. La entrada vacía sigue devolviendo `""`.
+
+  Es un cambio de contrato en API pública. El camino expuesto es el **emisor**,
+  vía `normalizeEmisor`, que corre en todo `generarXML()`, y la carátula en
+  `Envio.js`, que corre en todo envío. El receptor no pasa por esta función al
+  armar un DTE: `normalizeReceptor` entrega el `RUTRecep` crudo.
+
+  Quien consuma la librería y no valide el RUT del emisor antes de armar el
+  documento pasa de emitir un XML que el SII rechaza, a recibir una excepción en
+  el armado. Es mejor fallar temprano y con mensaje, pero cambia el modo de
+  falla observable y conviene revisar que el llamador lo contemple.
+
+### Corregido
+
+- Los RUT emitidos en sobres y documentos ya no llevan ceros de relleno en el
+  número, conservando su dígito verificador. `<RutEnvia>07654321-6</RutEnvia>`
+  pasa a `<RutEnvia>7654321-6</RutEnvia>`.
+
+  Importa porque el `RE` del TED sale de `Encabezado.Emisor.RUTEmisor` y se
+  compara contra el `RE` del CAF embebido, que el SII emite siempre canónico.
+  Con un RUT rellenado esos dos valores divergían dentro del mismo `<DD>`
+  firmado.
+
+  Cierra una asimetría: la carátula de boletas ya normalizaba y la de documentos
+  no, así que el mismo valor salía distinto según el tipo de envío.
+
+  Gracias a [@fsmw](https://github.com/fsmw) (#1).
+
 ## [2.18.2] - 2026-08-24
 
 ### Corregido (🔴 una subida cortada se daba por completada)

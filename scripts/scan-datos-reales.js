@@ -33,7 +33,11 @@ const RUTS_PERMITIDOS = new Set([
   // RUTs sinteticos de ejemplo, formato valido y sin dueno real
   '76543210-K', '77111222-3', '79555666-7', '79888999-0', '76123456-7',
   '12345678-9', '12345678-K', '11111111-1', '22222222-2',
-  '9876543-2',
+  '9876543-2', '7654321-6',
+  // Formas rellenadas con ceros de los anteriores. Son fixtures de
+  // test/rut.test.js, que prueba justamente que el relleno se quita, asi que
+  // tienen que poder escribirse literales.
+  '07654321-6', '00000010-0', '00000010-K', '00000000-0',
   // El RUT del propio SII
   '60803000-K',
   // RUT generico de consumidor final en boletas. No es un ejemplo: es un valor
