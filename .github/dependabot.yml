@@ -14,10 +14,21 @@ updates:
     commit-message:
       prefix: chore(deps)
     groups:
-      # Las de parche y menores juntas en un PR: son las que casi siempre entran
-      # sin pensar. Las mayores llegan sueltas, porque cada una necesita revisión.
-      menores:
-        update-types: [minor, patch]
+      # Solo los parches se agrupan. Las menores y mayores llegan sueltas, una
+      # por PR, porque cada una necesita mirarse.
+      #
+      # Antes el grupo incluía [minor, patch] y eso resultó estar mal: dos de
+      # estas dependencias están en 0.x (@xmldom/xmldom y xml-c14n), y en 0.x la
+      # convención es que el segundo número hace de mayor, o sea que 0.8 -> 0.9
+      # puede romper igual que 1.x -> 2.x. Dependabot lo clasifica como "minor"
+      # porque mira el dígito, no la convención.
+      #
+      # Con la regla vieja, un salto de @xmldom/xmldom 0.8 -> 0.9 viajó dentro de
+      # un PR rotulado "menores" junto a un parche trivial (PR #8, 24/08/2026).
+      # Esa librería es el parser de XML que usan Signer.js, DTE.js y la
+      # canonicalización: está justo debajo de la firma de los documentos.
+      parches:
+        update-types: [patch]
     ignore:
       # got es solo ESM desde la v12 y esta librería es CommonJS, así que
       # cualquier major rompe el `require('got')` de SiiSession.js con
