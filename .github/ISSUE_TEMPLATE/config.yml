@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Problema de seguridad
+    url: https://github.com/devlas-cl/dte-sii/security/advisories/new
+    about: No abras un issue público. Repórtalo en privado. Ver SECURITY.md.
+  - name: Cómo contribuir
+    url: https://github.com/devlas-cl/dte-sii/blob/master/CONTRIBUTING.md
+    about: Reglas de PR, niveles de evidencia y radio de impacto.

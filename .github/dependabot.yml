@@ -1,0 +1,27 @@
+# Avisos de actualización de dependencias.
+#
+# Esta librería hace criptografía con node-forge, xml-crypto y xml-c14n. Una
+# vulnerabilidad ahí no es cosmética: compromete la firma de documentos
+# tributarios. Por eso conviene enterarse por aviso y no por casualidad.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      # Las de parche y menores juntas en un PR: son las que casi siempre entran
+      # sin pensar. Las mayores llegan sueltas, porque cada una necesita revisión.
+      menores:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(ci)

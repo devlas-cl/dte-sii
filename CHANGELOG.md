@@ -3,6 +3,11 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/).
 
+## [Unreleased]
+
+<!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
+     pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
+
 ## [2.18.2] - 2026-08-24
 
 ### Corregido (🔴 una subida cortada se daba por completada)

@@ -8,7 +8,9 @@
   "author": "Devlas SpA <ti@devlas.cl> (https://devlas.cl)",
   "homepage": "https://github.com/devlas-cl/dte-sii",
   "scripts": {
-    "test": "node test/pfx.test.js && node test/folios-consolidados.test.js && node test/c14n-apostrofe.test.js && node test/precargar-plan-corrida.test.js && node test/respaldo-mipyme.test.js"
+    "test": "for f in test/*.test.js; do echo \"\n── $f\"; node \"$f\" || exit 1; done",
+    "scan": "node scripts/scan-datos-reales.js",
+    "types": "tsc --noEmit --strict --types node dte-sii.d.ts"
   },
   "repository": {
     "type": "git",
@@ -49,5 +51,9 @@
     "*.js",
     "utils/",
     "cert/"
-  ]
+  ],
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^5.9.3"
+  }
 }

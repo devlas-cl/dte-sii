@@ -1,0 +1,70 @@
+name: Reportar un problema
+description: Algo no funciona, o el SII rechaza algo que debería aceptar
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Mientras más específico el reporte, más rápido se resuelve. Los datos de
+        abajo son los que casi siempre hacen falta para reproducir.
+
+        **Este repositorio es público.** No pegues RUTs reales, razones sociales
+        de clientes, certificados ni contenido de un CAF. Reemplázalos por valores
+        inventados antes de enviar; lo que importa es la forma del dato, no el dato.
+
+  - type: input
+    id: version
+    attributes:
+      label: Versión de la librería
+      description: La que aparece en tu package.json o con `npm ls @devlas/dte-sii`
+      placeholder: 2.18.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ambiente
+    attributes:
+      label: Ambiente del SII
+      options:
+        - maullín (certificación)
+        - palena (producción)
+        - no aplica, es un problema local
+    validations:
+      required: true
+
+  - type: input
+    id: tipo_dte
+    attributes:
+      label: Tipo de DTE
+      description: Si aplica. 33 factura, 39 boleta, 61 nota de crédito, etc.
+      placeholder: "33"
+
+  - type: textarea
+    id: que_pasa
+    attributes:
+      label: Qué pasa
+      description: Qué esperabas que ocurriera y qué ocurrió en su lugar.
+    validations:
+      required: true
+
+  - type: textarea
+    id: respuesta_sii
+    attributes:
+      label: Respuesta del SII
+      description: >
+        Si el SII rechazó algo, pega su respuesta literal: estado, glosa y track ID.
+        El estado por sí solo no alcanza para saber qué pasó.
+      render: text
+
+  - type: textarea
+    id: reproducir
+    attributes:
+      label: Cómo reproducirlo
+      description: El código mínimo que lo provoca, con datos inventados.
+      render: javascript
+
+  - type: input
+    id: node
+    attributes:
+      label: Versión de Node y sistema operativo
+      placeholder: Node 20.11 en Ubuntu 22.04

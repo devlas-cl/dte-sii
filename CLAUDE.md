@@ -43,9 +43,17 @@ Published as `@devlas/dte-sii` (MIT). Consumed from ESM projects via `createRequ
 ├── utils.js              ← Shared helpers (RUT, date formatting, etc.)
 ├── cert/                 ← SII certification helpers
 ├── utils/                ← Additional utility modules
+├── scripts/              ← Herramientas de mantenimiento, NO se publican a npm
+│   └── scan-datos-reales.js  ← Barrido previo al push (npm run scan)
+├── .github/              ← CI, plantillas de PR e issues, dependabot, CODEOWNERS
+├── .claude/skills/       ← Reglas para agentes (pr-dte-sii)
 └── docs/                 ← Solo material PUBLICO del SII: PDFs oficiales, XSD y
                           ejemplos del propio SII. Nada nuestro, nada de clientes.
 ```
+
+Documentos de gobernanza en la raíz: `README.md` (uso), `CONTRIBUTING.md` (cómo se
+propone un cambio y qué evidencia lleva), `SECURITY.md` (reporte privado),
+`CHANGELOG.md`, `LICENSE`.
 
 ---
 
@@ -119,21 +127,39 @@ commits y en los forks. La revisión va **antes** del push, no después.
 ## Commands
 
 ```bash
+npm test                                    # suite completa (sin red)
+npm run scan                                # barrido de datos reales
+npm run types                               # verificar dte-sii.d.ts
 node -e "const { DTE } = require('.')"      # smoke test de carga
-for f in test/*.test.js; do node "$f"; done # suite completa (sin red)
 npm pack --dry-run                          # que se publica a npm realmente
 ```
+
+`npm test` recorre `test/*.test.js` con un glob, así que un test nuevo entra solo:
+no hay lista que mantener ni forma de olvidarse de registrarlo.
 
 ### Antes de publicar o pushear
 
 ```bash
-# Barrido de datos reales. Debe devolver 0 en todo.
-grep -rniE "[0-9]{7,8}-[0-9kK]" --include="*.js" --include="*.md" . | grep -v node_modules
+npm run scan
 ```
 
-Los RUTs que SÍ corresponden: `60803000-K` (el del SII), los sintéticos de ejemplo
-(`76543210-K`, `11111111-1`) y los de los ejemplos oficiales del SII en `docs/libros/`.
-Cualquier otro es un dato real que no debe estar.
+`scripts/scan-datos-reales.js` revisa los archivos versionados y falla si encuentra
+un RUT fuera de la lista de permitidos, una ruta local de una máquina, o un
+certificado o `.env` versionado.
+
+Los RUTs que SÍ corresponden están en `RUTS_PERMITIDOS` dentro del script:
+`60803000-K` (el del SII), los sintéticos de ejemplo (`76543210-K`, `11111111-1`) y
+los IDs de caso de los sets de certificación, que coinciden con el patrón de RUT
+sin serlo. Cualquier otro es un dato real que no debe estar.
+
+Agregar un valor a esa lista es una decisión consciente: si aparece uno nuevo, la
+pregunta es de quién es antes de silenciarlo.
+
+### CI
+
+`.github/workflows/ci.yml` corre lo mismo en cada PR: la suite en Node 18, 20 y 22,
+el barrido de datos reales (bloqueante) y el contenido del paquete npm. Nada de eso
+toca al SII ni usa secretos.
 
 ## Integration from an ESM project
 

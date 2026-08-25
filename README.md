@@ -38,6 +38,8 @@ npm install @devlas/dte-sii
 - [Certificación SII](#certificación-sii)
 - [Depuración: captura de llamadas al SII](#depuración-captura-de-llamadas-al-sii)
 - [Ambientes](#ambientes)
+- [Contribuir](#contribuir)
+- [Seguridad](#seguridad)
 - [Licencia](#licencia)
 
 ---
@@ -1077,6 +1079,33 @@ El cuerpo del DTE conserva las tildes: el documento impreso y el XML que recibe 
 se ven correctos. Si generas el PDF417 por tu cuenta, respeta esa misma regla.
 
 ---
+
+## Contribuir
+
+Los PRs son bienvenidos. Antes de escribir código, lee
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+Esta librería emite documentos tributarios reales, así que el estándar de evidencia
+es más alto que en una librería común. En resumen: un PR por cambio, evidencia
+declarada por nivel (lectura, test, artefacto adjunto, respuesta del SII), y trazar
+el radio de impacto, porque un valor que entra acá sale por siete lugares distintos
+y el código de barras firmado es uno de ellos.
+
+```bash
+npm test        # suite completa, sin red ni SII
+npm run scan    # barrido de datos reales (este repo es público)
+npm run types   # verificación de dte-sii.d.ts
+```
+
+Las tres corren en CI sobre cada PR, en Node 18, 20 y 22.
+
+Si trabajas con un agente de código, el repo trae la skill
+[`pr-dte-sii`](.claude/skills/pr-dte-sii/) con estas reglas en formato ejecutable.
+
+## Seguridad
+
+Si encuentras un problema de seguridad, **no abras un issue público**. Ver
+[SECURITY.md](SECURITY.md) para el canal privado y el alcance.
 
 ## Licencia
 

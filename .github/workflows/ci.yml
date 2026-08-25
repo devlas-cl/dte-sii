@@ -1,0 +1,113 @@
+# CI de @devlas/dte-sii
+#
+# Nada de lo que corre acá toca al SII: no hay red, ni certificados, ni CAF, ni
+# secretos. Son todas comprobaciones offline sobre el código. Por eso el trigger
+# es `pull_request`, que en PRs desde forks corre con permisos de solo lectura y
+# sin acceso a secretos.
+#
+# IMPORTANTE: las acciones van pineadas a un SHA de 40 caracteres, no a una etiqueta.
+# Una etiqueta como `v4` es un puntero movible: quien controla ese repositorio
+# puede reapuntarla, y todos los que la usan pasan a ejecutar el código nuevo en
+# su siguiente corrida, sin enterarse. Un SHA es el hash del contenido y no se
+# puede mover. El comentario al lado dice qué versión es, para que se lea.
+#
+# Si el repo tiene activado "Require actions to be pinned to a full-length commit
+# SHA" en Settings > Actions, volver a las etiquetas hace que GitHub rechace este
+# workflow. Dependabot propone los saltos de versión con el SHA ya actualizado.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Un push nuevo sobre la misma rama cancela la corrida anterior.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json declara engines >=18. Probamos que esa promesa sea real.
+        node: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` instala exactamente lo que dice el lock, en un árbol limpio.
+      # Si alguien tocó package.json sin regenerar el lock, falla acá.
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Cargar la librería
+        run: node -e "const { DTE } = require('.'); if (!DTE) throw new Error('index.js no exporta DTE')"
+
+      - name: Tests
+        run: npm test
+
+  tipos:
+    name: Definiciones de TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      # `dte-sii.d.ts` es de lo que dependen enteramente los consumidores en
+      # TypeScript, y no lo valida nada más: no hay compilación que lo cruce con
+      # el código. Un error de sintaxis o un tipo que no existe se publica igual
+      # y solo se nota del otro lado.
+      - name: Verificar dte-sii.d.ts
+        run: npm run types
+
+  datos-reales:
+    name: Barrido de datos reales
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      # Este repositorio es público. Un RUT real, un certificado o una ruta local
+      # que llegue a un commit queda en el historial y en los forks: limpiar el
+      # archivo después no limpia nada. Por eso esto bloquea el merge.
+      - name: Buscar RUTs reales, rutas locales y secretos versionados
+        run: npm run scan
+
+  paquete:
+    name: Contenido del paquete npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      # No falla: deja en el log qué archivos se publicarían realmente, para
+      # notar de una si un cambio metió algo que no corresponde al paquete.
+      - name: Qué se publicaría a npm
+        run: npm pack --dry-run
