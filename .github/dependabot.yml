@@ -18,6 +18,20 @@ updates:
       # sin pensar. Las mayores llegan sueltas, porque cada una necesita revisión.
       menores:
         update-types: [minor, patch]
+    ignore:
+      # got es solo ESM desde la v12 y esta librería es CommonJS, así que
+      # cualquier major rompe el `require('got')` de SiiSession.js con
+      # ERR_REQUIRE_ESM y la librería deja de cargar por completo.
+      #
+      # Verificado el 24/08/2026 en el PR #9 (got 11.8.6 -> 15.1.0): el CI lo
+      # detuvo en el paso "Cargar la librería", primero en Node 18, donde el
+      # require de ESM falla más duro que en 20 y 22.
+      #
+      # Subir de acá exige migrar a `import()` dinámico o cambiar de cliente
+      # HTTP. Es un proyecto en sí mismo, no un bump. Mientras tanto los
+      # parches y menores de la 11.x sí entran.
+      - dependency-name: got
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
