@@ -8,6 +8,28 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.20.0] - 2026-09-01
+
+### Agregado (validacion de largo para NmbItem)
+
+`DTE.js` sanitizaba `NmbItem` (caracteres) pero nunca validaba su largo antes de firmar.
+Un item con nombre de 83 caracteres (el XSD del SII admite 80) pasaba intacto hasta el
+SII, que rechazaba **el sobre completo** — no solo ese documento — al validar el schema.
+Medido el 2026-09-01: 3 boletas de un mismo envio cayeron juntas, 2 de ellas con datos
+validos.
+
+La libreria ya tenia `sanitizeNombreItem` (trunca a 80), exportada pero nunca conectada a
+`DTE.js`. En vez de usarla — truncar en una libreria de serializacion esconde el dato
+malo en silencio, y quien decide si truncar es el consumidor, no la libreria — se agrega
+`assertLargoMaximo(text, maxLength, campo)`, que **lanza** con el campo, el limite y el
+valor. `DTE.js` la usa en los dos sitios donde arma `NmbItem`, antes de firmar.
+
+- **Nuevo:** `assertLargoMaximo()`, exportada en `index.js`/`utils/index.js`/`dte-sii.d.ts`.
+- `DTE.js`: `NmbItem` ahora valida contra 80 caracteres y lanza si se excede.
+- `scripts/scan-datos-reales.js`: se agrega `76543210-3` a `RUTS_PERMITIDOS` — el mismo
+  cuerpo que `76543210-K` (ya citado en `CLAUDE.md`) pero con el digito verificador REAL.
+  Hallazgo de esta sesion: `76543210-K` no es un RUT valido.
+
 ## [2.19.1] - 2026-09-01
 
 ### Corregido (los tipos de reobtención de CAF mentían)

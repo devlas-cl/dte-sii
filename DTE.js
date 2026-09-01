@@ -12,6 +12,7 @@ const { DOMParser } = require('@xmldom/xmldom');
 const {
   sanitizeSiiText,
   sanitizeTedText,
+  assertLargoMaximo,
   formatBase64InXml,
   normalizeEmisor,
   normalizeReceptor,
@@ -21,6 +22,21 @@ const {
   TASA_IVA,
 } = require('./utils');
 const { serializeNode, escapeAttr, escapeText, buildSignedInfo, buildSignature } = require('./utils/c14n');
+
+/**
+ * Sanitiza y valida el nombre de un ítem antes de que entre al XML.
+ *
+ * Lanza si supera los 80 caracteres que admite `NmbItem` en el XSD del SII — el SII
+ * rechaza el SOBRE COMPLETO cuando uno solo de sus documentos falla el schema (medido el
+ * 2026-09-01: 3 boletas cayeron juntas por un ítem de 83 caracteres, 2 de ellas con datos
+ * válidos). Mejor lanzar acá, con el campo y el valor, que dejar que el SII lo rechace
+ * tres pasos después con "Error en Schema" sin decir cuál documento ni por qué.
+ */
+function sanitizeNmbItem(nombre) {
+  const valor = sanitizeSiiText(nombre);
+  assertLargoMaximo(valor, 80, 'NmbItem');
+  return valor;
+}
 
 // ============================================
 // CONSTANTES
@@ -140,7 +156,7 @@ class DTE {
       const det = {
         NroLinDet: idx + 1,
         ...(esItemExento ? { IndExe: 1 } : {}),
-        NmbItem: sanitizeSiiText(item.NmbItem),
+        NmbItem: sanitizeNmbItem(item.NmbItem),
         QtyItem: qty,
         ...(item.UnmdItem ? { UnmdItem: item.UnmdItem } : {}),
         PrcItem: prc,
@@ -247,7 +263,7 @@ class DTE {
   _buildDetalle(det) {
     return (Array.isArray(det) ? det : [det]).map(item => ({
       ...item,
-      NmbItem: sanitizeSiiText(item.NmbItem),
+      NmbItem: sanitizeNmbItem(item.NmbItem),
       ...(item.DscItem ? { DscItem: sanitizeSiiText(item.DscItem) } : {}),
     }));
   }

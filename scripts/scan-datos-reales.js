@@ -34,6 +34,11 @@ const RUTS_PERMITIDOS = new Set([
   '76543210-K', '77111222-3', '79555666-7', '79888999-0', '76123456-7',
   '12345678-9', '12345678-K', '11111111-1', '22222222-2',
   '9876543-2', '7654321-6',
+  // '76543210-3': mismo cuerpo que el primero de la lista, con el digito verificador
+  // REAL (calculado por modulo 11). Se agrega sin sacar el otro porque ya esta citado
+  // en CLAUDE.md y textos externos; usar este para cualquier ejemplo que necesite pasar
+  // una validacion real de RUT.
+  '76543210-3',
   // Formas rellenadas con ceros de los anteriores. Son fixtures de
   // test/rut.test.js, que prueba justamente que el relleno se quita, asi que
   // tienen que poder escribirse literales.

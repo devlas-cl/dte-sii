@@ -888,6 +888,11 @@ export function sanitizeSiiText(text: string): string;
  */
 export function sanitizeTedText(text: string): string;
 export function truncateText(text: string, maxLen: number, preserveWords?: boolean): string;
+/**
+ * Lanza si `text` supera `maxLength` caracteres — para campos con `xs:maxLength` fijo en
+ * el XSD (ej. NmbItem: 80). Se valida el texto YA sanitizado, el que efectivamente va al XML.
+ */
+export function assertLargoMaximo(text: string, maxLength: number, campo: string): void;
 export function sanitizeGiroRecep(giro: string): string;
 export function sanitizeRazonSocial(razonSocial: string): string;
 export function sanitizeNombreItem(nombre: string): string;
@@ -1032,6 +1037,7 @@ export const utils: {
   sanitizeSiiText: typeof sanitizeSiiText;
   sanitizeTedText: typeof sanitizeTedText;
   truncateText: typeof truncateText;
+  assertLargoMaximo: typeof assertLargoMaximo;
   sanitizeGiroRecep: typeof sanitizeGiroRecep;
   sanitizeRazonSocial: typeof sanitizeRazonSocial;
   sanitizeNombreItem: typeof sanitizeNombreItem;

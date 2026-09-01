@@ -119,6 +119,41 @@ function truncateText(text, maxLen, preserveWords = false) {
 }
 
 /**
+ * Lanza si `text` supera `maxLength` caracteres — para campos con `xs:maxLength` fijo en
+ * el XSD del SII (ej. NmbItem: 80).
+ *
+ * ── Por qué lanza y no trunca ─────────────────────────────────────────────────
+ * Esta librería ya tenía `sanitizeNombreItem`/`sanitizeRazonSocial`/etc. (más abajo),
+ * que truncan en silencio — pero nunca se conectaron a los campos que serializa `DTE.js`
+ * (`sanitizeSiiText` corre sola ahí, sin ningún control de largo). El resultado real:
+ * un `NmbItem` de 83 caracteres pasaba intacto y el SII rechazaba recién al validar el
+ * XML — y **rechaza el sobre completo**, no solo ese documento (medido el 2026-09-01,
+ * 3 boletas de un mismo envío cayeron juntas, 2 de ellas con datos válidos).
+ *
+ * Truncar en una librería de serialización es una decisión de negocio disfrazada de
+ * detalle técnico: recorta lo que el cliente ve impreso en su documento tributario, y
+ * hacerlo en silencio esconde el dato malo en vez de exponerlo. Esta librería conoce el
+ * contrato del XSD — le corresponde avisar temprano, con un mensaje que diga campo,
+ * límite y valor, para que el consumidor decida qué hacer (corregir el dato, truncar con
+ * su propia política, etc.) en vez de que el SII lo rechace tres pasos después con un
+ * error genérico de schema.
+ *
+ * @param {string} text - Texto YA sanitizado (post `sanitizeSiiText`) — se valida el que
+ *   efectivamente va al XML, no el original.
+ * @param {number} maxLength
+ * @param {string} campo - Nombre del elemento XSD, para el mensaje de error.
+ * @throws {Error} si `text.length > maxLength`
+ */
+function assertLargoMaximo(text, maxLength, campo) {
+  const valor = String(text ?? '');
+  if (valor.length > maxLength) {
+    throw new Error(
+      `${campo} excede el largo maximo del XSD (${maxLength} caracteres, tiene ${valor.length}): "${valor}"`
+    );
+  }
+}
+
+/**
  * Sanitizar giro para receptor (máximo 40 caracteres)
  * 
  * @param {string} giro - Giro del receptor
@@ -184,6 +219,7 @@ module.exports = {
   sanitizeSiiText,
   sanitizeTedText,
   truncateText,
+  assertLargoMaximo,
   sanitizeGiroRecep,
   sanitizeRazonSocial,
   sanitizeNombreItem,
