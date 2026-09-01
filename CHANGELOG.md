@@ -8,6 +8,43 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.19.1] - 2026-09-01
+
+### Corregido (los tipos de reobtención de CAF mentían)
+
+Tres declaraciones de `dte-sii.d.ts` describían formas que la implementación
+nunca produjo. Compilaban, así que TypeScript daba el visto bueno y el error
+aparecía recién en runtime, como `undefined`.
+
+- **`FolioService.reobtenerCaf`** declaraba `{ paths, folios, descartados } | null`
+  y devuelve `{ ok: true, cafPaths, cafPath }` o `{ ok: false, motivo, disponibles? }`.
+  Ni un solo campo coincidía. El consumidor leía `result.paths`, obtenía
+  `undefined` y el CAF reobtenido nunca se persistía, mientras el log anunciaba
+  éxito. Además **nunca devuelve `null`**, así que `if (!resultado)` no detecta
+  el fallo: `{ ok: false }` es truthy y se sigue al camino de éxito.
+
+  Ahora es una unión discriminada por `ok`, que obliga a comprobarlo.
+
+- **`CafSolicitor.reobtenerCaf`** declaraba `Promise<string | null>` y devuelve
+  un objeto con `success` y, al fallar, un `errorCode` de cuatro valores. El
+  parámetro `rango` tampoco era `{ desde, hasta }`.
+
+- **`CafSolicitor.listarReobtenibles`** declaraba `{ desde, hasta, raw? }` y
+  produce `{ campos, folioDesde, folioHasta, cantidad, anulado }`. `campos`
+  importa: son los ocultos del formulario del portal, y sin ellos el rango no se
+  puede descargar, así que el tipo viejo describía algo inconstruible.
+
+Se agregan `RangoReobtenible` y `ReobtenerRangoResult`.
+
+### Agregado
+
+- **`test/contrato-reobtencion.test.js`**, que compara el `.d.ts` contra la
+  implementación. `npm run types` solo valida que el `.d.ts` sea TypeScript
+  correcto, no que describa lo que el `.js` hace, y ese hueco es justo el que
+  dejó pasar esto.
+
+  Reportado el 01/09/2026 al integrar la librería en un consumidor nuevo.
+
 ## [2.19.0] - 2026-08-25
 
 Primera versión con contribuciones externas. Gracias a

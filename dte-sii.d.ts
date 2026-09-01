@@ -626,14 +626,73 @@ export interface FolioTope {
   bloqueado?: boolean;
 }
 
-export interface ReobtenerCafResult {
-  /** Rutas de los CAF recuperados. El SII entrega los folios de a uno, así que pueden ser varios. */
-  paths: string[];
-  /** Cantidad total de folios recuperados entre todos los rangos. */
-  folios: number;
-  /** Rangos que se descartaron por estar anulados en el SII. */
-  descartados: Array<{ desde: number; hasta: number; motivo: string }>;
+/** Un rango ya autorizado que el portal ofrece para reobtener. */
+export interface RangoReobtenible {
+  /** Campos ocultos del formulario del portal. Hay que devolverlos tal cual para bajar el CAF. */
+  campos: Record<string, string>;
+  folioDesde: number;
+  folioHasta: number;
+  /** Folios que cubre el rango. */
+  cantidad: number;
+  /**
+   * true si el SII anuló el rango. Los documentos emitidos con esos folios se
+   * rechazan, así que hay que saltarlo.
+   *
+   * Ojo: el portal marca los ANULADOS y nada más. Un folio ya emitido aparece
+   * como reobtenible igual, y por eso `FolioService.reobtenerCaf` recibe
+   * `yaEmitido`: ese dato el SII no lo publica.
+   */
+  anulado: boolean;
 }
+
+/** Resultado de `CafSolicitor.reobtenerCaf`, para un solo rango. */
+export type ReobtenerRangoResult =
+  | {
+      success: true;
+      /** Ruta donde quedó el CAF descargado. */
+      cafPath: string;
+      /** El XML del CAF tal como lo entregó el portal. */
+      xml: string;
+      reobtenido: true;
+      folioDesde: number;
+      folioHasta: number;
+      otorgados: number;
+    }
+  | {
+      success: false;
+      errorCode:
+        | 'RANGO_ANULADO'
+        | 'REOBTENCION_SIN_FORMULARIO'
+        | 'REOBTENCION_SIN_DESCARGA'
+        | 'REOBTENCION_SIN_CAF';
+      [extra: string]: unknown;
+    };
+
+/**
+ * Resultado de `FolioService.reobtenerCaf`.
+ *
+ * Union discriminada por `ok` a propósito: obliga a comprobarlo antes de leer
+ * las rutas. El método **nunca devuelve null**, ni siquiera al fallar, así que
+ * `if (!resultado)` no detecta nada.
+ */
+export type ReobtenerCafResult =
+  | {
+      ok: true;
+      /** Rutas de los CAF recuperados. El SII entrega los rangos de a uno, así que pueden ser varios. */
+      cafPaths: string[];
+      /** Atajo al primero de `cafPaths`. */
+      cafPath: string;
+    }
+  | {
+      ok: false;
+      /** Qué impidió completar la reobtención, en texto legible. */
+      motivo: string;
+      /**
+       * Folios que sí se alcanzaron a cubrir, cuando el fallo es por cantidad.
+       * Ausente si el fallo fue antes de mirar los rangos.
+       */
+      disponibles?: number;
+    };
 
 export class FolioService {
   constructor(config?: FolioServiceConfig);
@@ -661,7 +720,7 @@ export class FolioService {
      * cada documento vuelve rechazado con `DTE-3-101`.
      */
     yaEmitido?: (rango: { folioDesde: number; folioHasta: number }) => boolean;
-  }): Promise<ReobtenerCafResult | null>;
+  }): Promise<ReobtenerCafResult>;
   /** El CAF más reciente de un tipo para este RUT y ambiente, o null. */
   findLatestCaf(tipoDte: number): string | null;
   /**
@@ -771,9 +830,17 @@ export class CafSolicitor {
    * ⚠️ El listado incluye rangos ANULADOS sin distinguirlos: solo al abrir cada uno el
    * portal lo avisa. Por eso `reobtenerCaf` hace un request por rango.
    */
-  listarReobtenibles(tipoDte: number): Promise<Array<{ desde: number; hasta: number; raw?: string }>>;
-  /** Descarga el CAF de un rango ya autorizado. Devuelve null si el rango está anulado. */
-  reobtenerCaf(tipoDte: number, rango: { desde: number; hasta: number }): Promise<string | null>;
+  listarReobtenibles(tipoDte: number): Promise<RangoReobtenible[]>;
+  /**
+   * Descarga el CAF de un rango ya autorizado.
+   *
+   * `rango` es un elemento tal cual sale de `listarReobtenibles`: lleva los
+   * campos ocultos del formulario del portal en `campos`, que el portal exige de
+   * vuelta. No se puede construir a mano con solo los folios.
+   *
+   * **No devuelve el XML ni null**, devuelve un objeto con `success`.
+   */
+  reobtenerCaf(tipoDte: number, rango: RangoReobtenible): Promise<ReobtenerRangoResult>;
 }
 
 // ============================================
