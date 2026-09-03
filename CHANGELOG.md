@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.21.0] - 2026-09-03
+
 ### Agregado (motivo real en el bloqueo de timbraje)
 
 `CafSolicitor.solicitar()` detectaba el bloqueo de timbraje (`TIMBRAJE_BLOQUEADO`) con
