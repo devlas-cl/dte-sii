@@ -8,6 +8,29 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Agregado (motivo real en el bloqueo de timbraje)
+
+`CafSolicitor.solicitar()` detectaba el bloqueo de timbraje (`TIMBRAJE_BLOQUEADO`) con
+`esBloqueoTimbraje()` pero siempre devolvia el mismo mensaje generico, descartando el
+texto real que el SII escribe en esa pagina.
+
+Verificado el 2026-09-03 contra un caso real de produccion: el SII no da un error
+generico, da un motivo especifico y accionable (algo como "usted tiene disponible una
+cantidad de folios suficiente... debe emitir y enviar documentos electronicos al SII o
+anular folios"). Ese texto es justo lo que un consumidor necesita para armar un aviso
+util, en vez de mandar a alguien a "revisa el portal" sin decirle que va a encontrar ahi.
+
+- **Nuevo:** `CafSolicitor.extraerMotivoBloqueoTimbraje(html)`, estatico, aisla ese
+  motivo del resto de la pagina. Devuelve `null` si no lo encuentra (nunca lanza).
+- `solicitar()` ahora usa el motivo real cuando se puede extraer; si no, cae al mensaje
+  generico anterior — ningun consumidor existente se rompe por esto, solo mejora el
+  texto en el caso feliz.
+- Evidencia: nivel 1 (test unitario con fixture sintetico, en
+  `test/cafsolicitor-motivo-bloqueo.test.js`, incluyendo el caso adversarial de la
+  pagina sin el cierre estandar). No es nivel 3 — no hay forma de forzar este bloqueo
+  puntual contra maullin a pedido; la extraccion en si es texto puro, sin tocar firma,
+  XML ni el resto del flujo del portal.
+
 ## [2.20.0] - 2026-09-01
 
 ### Agregado (validacion de largo para NmbItem)

@@ -242,6 +242,28 @@ class CafSolicitor {
   }
 
   /**
+   * Aísla el motivo real que el SII escribe en la página de bloqueo de timbraje, en vez
+   * de descartarlo — hasta ahora `solicitar()` detectaba el bloqueo con `esBloqueoTimbraje`
+   * y siempre devolvía el mismo mensaje genérico, tirando a la basura el texto real de la
+   * página (que sí queda en el HTML, ya se guardaba en debug).
+   *
+   * Caso real (verificado 2026-09-03, RUT anonimizado en los tests): el SII no dice un
+   * error genérico, dice algo concreto y accionable — "de acuerdo a nuestros registros,
+   * usted tiene disponible una cantidad de folios suficiente para emitir documentos
+   * electronicos... debe emitir y enviar documentos electronicos al SII o anular folios".
+   * Ese texto es justo lo que el consumidor necesita para armar un aviso útil, en vez de
+   * mandar a alguien a "revisa el portal" sin decirle qué va a encontrar ahí.
+   *
+   * @returns {string|null} el motivo aislado, o null si no se pudo — el llamador cae al
+   *   mensaje genérico en ese caso, nunca se vuelve fatal por esto.
+   */
+  static extraerMotivoBloqueoTimbraje(html) {
+    const t = CafSolicitor.textoVisible(html, 4000);
+    const m = t.match(/(NO\s+(?:SE\s+)?AUTORIZA\s+TIMBRAJE[\s\S]{0,600}?)(?:\s+Si necesita mas informacion|$)/i);
+    return m ? m[1].trim() : null;
+  }
+
+  /**
    * Detecta el rechazo genérico "no está autorizado para ingresar a esta opción" en
    * palena (producción). A diferencia de maullin/certificación, donde el bloqueo por
    * Verificación de Actividades sale explícito ("no registra Verificación de
@@ -596,7 +618,14 @@ class CafSolicitor {
       }
 
       if (response.body && CafSolicitor.esBloqueoTimbraje(response.body)) {
-        return { success: false, errorCode: 'TIMBRAJE_BLOQUEADO', error: 'SII: No se autoriza timbraje. Folios acumulados excesivos o situaciones tributarias pendientes. Revisa el portal SII → Factura Electrónica → Solicitud de Timbraje.' };
+        const motivoSii = CafSolicitor.extraerMotivoBloqueoTimbraje(response.body);
+        return {
+          success: false,
+          errorCode: 'TIMBRAJE_BLOQUEADO',
+          error: motivoSii
+            ? `SII: ${motivoSii}`
+            : 'SII: No se autoriza timbraje. Folios acumulados excesivos o situaciones tributarias pendientes. Revisa el portal SII → Factura Electrónica → Solicitud de Timbraje.',
+        };
       }
 
       if (response.body && CafSolicitor.esRequiereTramitePresencial(response.body)) {
