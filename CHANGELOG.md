@@ -8,6 +8,13 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.21.1] - 2026-09-03
+
+Sin cambios de código sobre 2.21.0 — esa versión quedó atascada como "staged" en el
+registro de npm por un publish interrumpido durante 2FA (nunca llegó a existir de
+verdad: `npm view @devlas/dte-sii@2.21.0` daba 404, pero npm igual rechazaba
+republicarla). Se bumpea a este número solo para esquivar el bloqueo.
+
 ## [2.21.0] - 2026-09-03
 
 ### Agregado (motivo real en el bloqueo de timbraje)
