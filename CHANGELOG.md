@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.23.0] - 2026-09-10
+
 ### Agregado (empresa no autorizada a operar en el ambiente)
 
 Cuando el portal responde "no esta autorizado para operar en esta modalidad", la pagina
