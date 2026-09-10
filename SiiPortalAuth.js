@@ -821,7 +821,37 @@ class SiiPortalAuth {
    * El HTML tiene filas <tr><td>Label</td><td>&nbsp;Valor</td></tr>
    * @private
    */
+  /**
+   * "el Contribuyente no está autorizado para operar en esta modalidad" — la empresa nunca
+   * quedó postulada (y/o enrolada) como emisor electrónico ante el SII, así que ad_empresa2
+   * ni siquiera devuelve la tabla de datos que `_parsearTablaEmpresa` espera: devuelve esta
+   * página de rechazo. Mismo patrón y mismo código de error que `CafSolicitor.esEmpresaNoAutorizada`
+   * (`EMPRESA_NO_AUTORIZADA`) — ahí ya existía para otro flujo, acá faltaba. Sin esto caía en
+   * el genérico "no se encontraron datos de resolución", que no dice qué falta. Caso real
+   * verificado el 2026-09-10 (RUT anonimizado en los tests).
+   */
+  static esEmpresaNoAutorizada(html) {
+    const texto = String(html || '').replace(/<[^>]+>/g, ' ');
+    // El SII usa dos sujetos distintos para el mismo rechazo, segun la pagina: "la empresa
+    // no esta autorizada" (ver CafSolicitor.esEmpresaNoAutorizada) y "el Contribuyente no
+    // esta autorizado" (ad_empresa2, caso real 2026-09-10) -- distinto genero tambien
+    // (autorizada/autorizado), por eso el [oa] al final en vez de repetir todo el patron.
+    return /(empresa|contribuyente)\s+no\s+est.{0,8}\s*autorizad[oa]\s+para\s+operar/i.test(texto);
+  }
+
   static _parsearTablaEmpresa(html) {
+    if (SiiPortalAuth.esEmpresaNoAutorizada(html)) {
+      const err = new Error(
+        'SiiPortalAuth: la empresa no está autorizada para operar en esta modalidad. ' +
+        'No es un problema de datos ni de sesión: el SII no reconoce a la empresa como ' +
+        'emisor electrónico en este ambiente. Las dos causas habituales son que todavía ' +
+        'no complete la certificación (en producción no queda autorizada hasta entonces) ' +
+        'o que nunca se haya corrido la Postulación/Enrolamiento.'
+      );
+      err.code = 'EMPRESA_NO_AUTORIZADA';
+      throw err;
+    }
+
     const datos = {};
     const decode = s => s
       .replace(/<[^>]+>/g, '')

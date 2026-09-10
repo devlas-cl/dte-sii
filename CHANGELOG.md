@@ -8,6 +8,25 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Agregado (empresa no autorizada a operar en el ambiente)
+
+Cuando el portal responde "no esta autorizado para operar en esta modalidad", la pagina
+de datos del contribuyente no trae la tabla que `_parsearTablaEmpresa` espera, asi que el
+error que salia era el generico "no se encontraron datos de resolucion en la respuesta del
+SII". Ese mensaje describe el sintoma y no la causa, y manda a buscar un problema de datos
+o de sesion que no existe.
+
+- Nuevo detector `SiiPortalAuth.esEmpresaNoAutorizada()` y codigo de error
+  `EMPRESA_NO_AUTORIZADA`, el mismo que ya usaba `CafSolicitor` para otro flujo. Cubre las
+  dos redacciones del SII para el mismo rechazo ("la empresa no esta autorizada" y "el
+  Contribuyente no esta autorizado"), que difieren en sujeto y en genero.
+- El mensaje nombra las dos causas habituales: que el contribuyente todavia no complete la
+  certificacion (en produccion no queda autorizado hasta entonces) o que nunca se haya
+  corrido la Postulacion/Enrolamiento.
+- Evidencia nivel 1: `test/parsear-tabla-empresa.test.js`, con fixture sintetica. Incluye
+  un caso adversarial que confirma que una pagina realmente vacia sigue cayendo en el error
+  generico y no en este.
+
 ## [2.22.0] - 2026-09-10
 
 ### Agregado (certificado no habilitado como metodo de login)
