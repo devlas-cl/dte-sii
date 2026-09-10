@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.22.0] - 2026-09-10
+
 ### Agregado (certificado no habilitado como metodo de login)
 
 `SiiPortalAuth._autenticarNuevo()` detectaba el limite de sesiones del SII, pero un
