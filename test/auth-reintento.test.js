@@ -112,6 +112,22 @@ async function main() {
     assert.strictEqual(a.llamadas, 2, 'no puede haber un segundo intento de login');
   }
 
+  // ── El certificado no habilitado como método de login tampoco se reintenta ─
+  // Caso real (2026-09-09): el SII devuelve 200 con un alert() de JS, no un error HTTP,
+  // pidiendo habilitar el certificado en "Cambiar clave". Antes caía en el genérico "no se
+  // recibieron cookies", que no dice qué hacer — ahora se distingue con su propio código.
+  {
+    const a = authConRequestFalso([LOGIN_OK, {
+      status: 200,
+      body: "alert('...debe ingresar a la opcion Cambiar clave y escoger la opcion que permite "
+        + "utilizar Certificado Digital...El codigo de este mensaje es 01.01.215.500.473.33');",
+    }]);
+    await assert.rejects(() => a.autenticar(),
+      (e) => e.code === 'CERTIFICADO_NO_HABILITADO' && /Cambiar clave/.test(e.message),
+      'el mensaje debe explicar el tramite en sii.cl, no el generico de cookies');
+    assert.strictEqual(a.llamadas, 2, 'no tiene sentido reintentar un certificado que nunca fue habilitado');
+  }
+
   // ── Sin cookies de sesión: falla clara y sin reintento ─────────────────────
   {
     const a = authConRequestFalso([LOGIN_OK, LOGIN_OK], false);
@@ -140,7 +156,7 @@ async function main() {
   }
 
   fs.rmSync(process.env.DATADIR, { recursive: true, force: true });
-  console.log('auth-reintento: 12 casos OK');
+  console.log('auth-reintento: 13 casos OK');
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

@@ -510,6 +510,21 @@ class SiiPortalAuth {
       throw errLimite;
     }
 
+    // El certificado nunca fue habilitado como método de login en el SII: trámite manual
+    // único del contribuyente (sii.cl, Clave Tributaria, Cambiar clave, habilitar
+    // autenticación con Certificado Digital), no un problema del certificado en sí ni de
+    // esta librería. Sin esta deteccion caía en el genérico "no se recibieron cookies", que
+    // no dice qué hacer -- caso real verificado el 2026-09-09 (RUT anonimizado en los tests).
+    if (r2.body.includes('Cambiar clave') || r2.body.includes('01.01.215.500.473')) {
+      const errNoHabilitado = new Error(
+        'SiiPortalAuth: el certificado no está habilitado como método de autenticación en el SII.\n' +
+        'El contribuyente debe entrar a sii.cl, Clave Tributaria, Cambiar clave, habilitar ' +
+        'autenticación con Certificado Digital, y asociar este certificado. No se resuelve reintentando.'
+      );
+      errNoHabilitado.code = 'CERTIFICADO_NO_HABILITADO';
+      throw errNoHabilitado;
+    }
+
     const autenticado = Object.keys(cookieJar).some(k => k.startsWith('NETSCAPE_LIVEWIRE'));
     if (!autenticado) {
       throw new Error('SiiPortalAuth: autenticación fallida — no se recibieron cookies de sesión NETSCAPE_LIVEWIRE.*');

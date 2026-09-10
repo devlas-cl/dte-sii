@@ -8,6 +8,26 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Agregado (certificado no habilitado como metodo de login)
+
+`SiiPortalAuth._autenticarNuevo()` detectaba el limite de sesiones del SII, pero un
+certificado nunca habilitado como metodo de autenticacion caia en el mismo error
+generico que cualquier otra falla de cookies ("no se recibieron cookies de sesion
+NETSCAPE_LIVEWIRE"), sin decir que hacer.
+
+Caso real, verificado el 2026-09-09: el SII responde con status 200 y un `alert()` de
+JavaScript (no un error HTTP) pidiendo entrar a Clave Tributaria, Cambiar clave, y
+habilitar autenticacion con Certificado Digital. Es un tramite manual del
+contribuyente, no un problema del certificado en si ni de esta libreria, y no se
+resuelve reintentando.
+
+- Nuevo codigo de error `CERTIFICADO_NO_HABILITADO`, distinto de `SII_LIMITE_SESIONES`
+  y del generico de cookies. El mensaje explica el tramite exacto en sii.cl.
+- No se reintenta, mismo criterio que el limite de sesiones.
+- Evidencia nivel 1: test unitario con fixture sintetico en
+  `test/auth-reintento.test.js`, mismo patron que los casos ya existentes de ese
+  archivo (doble de `_request`, sin red).
+
 ## [2.21.1] - 2026-09-03
 
 Sin cambios de código sobre 2.21.0 — esa versión quedó atascada como "staged" en el
