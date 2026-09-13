@@ -30,6 +30,13 @@ Versionado [SemVer](https://semver.org/lang/es/).
 
 ### Corregido
 
+- **El error `NO_AUTORIZADO_INGRESAR_OPCION` ya no culpa a la Verificación de Actividades.**
+  El SII responde "No está autorizado para ingresar a esta opción" sin dar la causa, y el
+  mensaje la atribuía a una Verificación de Actividades pendiente. En la práctica lo más
+  frecuente es que la empresa aún no termine la certificación: se midió con una empresa que
+  solo emite boletas, que recibió folios apenas completó la certificación y sin ninguna
+  verificación, que además aplica a documentos con crédito fiscal y no a la boleta. El mensaje
+  ahora nombra primero esa causa. El `errorCode` y la detección no cambian.
 - **`determinarIndTraslado` usa la tabla oficial del SII.** Consignación era 2 (es 3), entrega
   gratuita 3 (es 4) y devolución 6 (es 7); "OTROS TRASLADOS QUE NO SON VENTA" caía en Venta.
 - **La copia cedible de una guía solo se genera si la guía es venta** (tipos de traslado 1 y 9).

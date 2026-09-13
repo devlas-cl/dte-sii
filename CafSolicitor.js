@@ -272,8 +272,15 @@ class CafSolicitor {
    * 79555666-7, en ambos tipos, con el mismo request real repetido dos veces.
    *
    * Sin esta detección caía en el genérico `UNKNOWN: No se obtuvo CAF en la
-   * respuesta`, que no distingue este caso (probable Verificación de Actividades,
-   * no confirmado por el mensaje) de un fallo real desconocido.
+   * respuesta`, que no distingue este caso de un fallo real desconocido.
+   *
+   * La causa NO es necesariamente la Verificación de Actividades, como decía antes el
+   * mensaje. Medido en septiembre de 2026 con una empresa que solo emite boletas: el SII
+   * respondía esto mientras la certificación no estaba completa, y entregó folios apenas
+   * la terminó, sin ninguna verificación. La Verificación de Actividades aplica a
+   * documentos con crédito fiscal (facturas, guías, notas), no a la boleta. Por eso el
+   * mensaje nombra primero la autorización pendiente y deja la verificación como segunda
+   * revisión.
    */
   static esNoAutorizadoIngresarOpcion(html) {
     return /no\s+est.{0,8}\s*autorizado\s+para\s+ingresar\s+a\s+esta\s+opci.{0,8}n/i
@@ -648,7 +655,7 @@ class CafSolicitor {
         return {
           success: false,
           errorCode: 'NO_AUTORIZADO_INGRESAR_OPCION',
-          error: `SII (${this.ambiente}): "No está autorizado para ingresar a esta opción" — el SII no indica la causa exacta, pero el patrón coincide con la Verificación de Actividades pendiente para este RUT. Verifícala en https://www4.sii.cl/verificacionactividadesinternetui/?opcion=1#/ingreso`,
+          error: `SII (${this.ambiente}): "No está autorizado para ingresar a esta opción". El SII no indica la causa. Lo más frecuente es que la empresa aún no esté autorizada como emisor electrónico en este ambiente: el SII la autoriza recién al completar la certificación, y hasta entonces no entrega folios. Si ya está autorizada y el documento es una factura, guía o nota, revisa además la Verificación de Actividades del RUT.`,
         };
       }
 
