@@ -606,6 +606,60 @@ export class EnviadorSII {
   consultarEstadoDte(params: object): Promise<object>;
 }
 
+/** Estado de un DTE recibido según su último evento en el Registro de Aceptación/Reclamo. */
+export type EstadoReceptorDte = 'aceptada' | 'acuse_recibo' | 'reclamada' | 'sin_accion';
+
+/**
+ * Acción a registrar sobre un DTE recibido. ACD acepta el contenido, ERM otorga recibo de
+ * mercaderías o servicios, RCD reclama el contenido, RFP y RFT reclaman falta parcial o
+ * total de mercaderías.
+ */
+export type AccionReclamoDte = 'ACD' | 'ERM' | 'RCD' | 'RFP' | 'RFT';
+
+export interface EventoReclamoDte {
+  codEvento: string;
+  descEvento: string;
+  rutResponsable: string;
+  dvResponsable: string;
+  fechaEvento: string;
+}
+
+/** Respuesta del web service, con `codResp` numérico y `descResp` en texto, tal como los entrega el SII. */
+export interface RespuestaReclamoDte {
+  codResp: number;
+  descResp: string;
+}
+
+/**
+ * Cliente del web service de Registro de Aceptación/Reclamo de DTE (WSRECLAMO).
+ * Se exporta desde index.js.
+ */
+export class WsReclamo {
+  constructor(
+    certificado: Certificado,
+    ambiente: 'certificacion' | 'produccion',
+    options?: { useTokenCache?: boolean },
+  );
+  /** Historial de eventos de un DTE recibido. */
+  listarEventosHistDoc(
+    rutEmisor: number | string, dvEmisor: string, tipoDoc: number | string, folio: number | string,
+  ): Promise<RespuestaReclamoDte & { eventos: EventoReclamoDte[] }>;
+  /** Estado resumido según el último evento. 'sin_accion' cuando ningún evento lo determina. */
+  consultarEstadoReceptor(
+    rutEmisor: number | string, dvEmisor: string, tipoDoc: number | string, folio: number | string,
+  ): Promise<EstadoReceptorDte>;
+  /** Registra una acción sobre un DTE recibido. Lanza si `accionDoc` no es una acción válida. */
+  ingresarAceptacion(
+    rutEmisor: number | string, dvEmisor: string, tipoDoc: number | string, folio: number | string,
+    accionDoc: AccionReclamoDte,
+  ): Promise<RespuestaReclamoDte>;
+  /**
+   * Descarta el token SOAP en memoria de esta instancia. No limpia el caché compartido de
+   * tokens, que expira por TTL.
+   */
+  invalidarToken(): void;
+}
+
 // ============================================
 // FOLIO MANAGEMENT
 // ============================================
@@ -808,11 +862,32 @@ export interface CafSolicitarOptions {
   soloConsultarTope?: boolean;
 }
 
+/**
+ * Códigos que puede traer `CafSolicitarResult.errorCode`.
+ *
+ * Lista cerrada. test/contrato-estaticos-dts.test.js la compara contra los literales que
+ * emite `solicitar()` en las dos direcciones: si el código agrega o saca un valor sin
+ * actualizar esto, el test falla.
+ */
+export type CafSolicitarErrorCode =
+  | 'TIMBRAJE_BLOQUEADO'
+  | 'MAX_AUTOR_INSUFICIENTE'
+  | 'MAX_AUTOR_EXCEEDED'
+  | 'RANGO_YA_AUTORIZADO'
+  | 'EMPRESA_NO_AUTORIZADA'
+  | 'USUARIO_SIN_PERMISO'
+  | 'NO_AUTORIZADO_INGRESAR_OPCION'
+  | 'REQUIERE_TRAMITE_PRESENCIAL'
+  | 'VERIFICACION_ACTIVIDADES_PENDIENTE'
+  | 'SESSION_EXPIRED'
+  | 'WAAP_BLOCKED'
+  | 'UNKNOWN';
+
 export interface CafSolicitarResult {
   success: boolean;
   xml?: string;
   error?: string;
-  errorCode?: string;
+  errorCode?: CafSolicitarErrorCode;
   folioDesde?: number;
   folioHasta?: number;
 }
@@ -841,6 +916,38 @@ export class CafSolicitor {
    * **No devuelve el XML ni null**, devuelve un objeto con `success`.
    */
   reobtenerCaf(tipoDte: number, rango: RangoReobtenible): Promise<ReobtenerRangoResult>;
+  /** true si la página del portal es el aviso "NO SE AUTORIZA TIMBRAJE". */
+  static esBloqueoTimbraje(html: string): boolean;
+  /**
+   * Motivo que el SII escribe en la página de bloqueo de timbraje, aislado del resto para
+   * mostrarlo tal cual. null si no lo encuentra; nunca lanza.
+   */
+  static extraerMotivoBloqueoTimbraje(html: string): string | null;
+  /** true si el portal responde que no está autorizado para ingresar a esa opción. */
+  static esNoAutorizadoIngresarOpcion(html: string): boolean;
+  /** true si el SII exige presentarse en una oficina: trámite presencial. */
+  static esRequiereTramitePresencial(html: string): boolean;
+  /** true si la página dice que la empresa no está autorizada para operar. */
+  static esEmpresaNoAutorizada(html: string): boolean;
+  /**
+   * true si la página es uno de los rechazos que no se resuelven reintentando: bloqueo de
+   * timbraje, trámite presencial, empresa no autorizada, sin acceso a la opción, usuario
+   * sin permiso o verificación de actividades pendiente.
+   */
+  static esRechazoDuro(html: string): boolean;
+  /** true si el usuario del certificado no tiene permiso o autorización en la empresa. */
+  static esUsuarioSinPermiso(html: string): boolean;
+  /**
+   * Texto visible de un HTML del portal: sin etiquetas, scripts ni estilos, con las
+   * entidades de vocales acentuadas pasadas a vocal simple y recortado a `max` caracteres
+   * (400 por defecto). Lo usan los detectores de arriba.
+   */
+  static textoVisible(html: string, max?: number): string;
+  /**
+   * Cierra con logout todas las sesiones SII en caché. Conviene llamarlo al apagar el
+   * proceso, para no dejar sesiones que cuenten contra el límite de sesiones del SII.
+   */
+  static closeAllSessions(): Promise<void>;
 }
 
 // ============================================

@@ -8,6 +8,42 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.24.0] - 2026-09-12
+
+### Corregido (dependencias)
+
+- **`form-data` no estaba declarada, y `soap` y `xml-c14n` sobraban.** `EnviadorSII.js` hace
+  `require('form-data')`, que llegaba de prestado por `soap` -> `axios`. Funcionaba por
+  accidente: sacar `soap` rompía `require('@devlas/dte-sii')` en todo consumidor, porque
+  `index.js` carga `EnviadorSII.js`. `soap` y `xml-c14n` no las requería ningún archivo: la
+  librería arma los sobres SOAP a mano y hace su propia canonicalización. Ahora `form-data`
+  está declarada y las otras dos salen, 22 paquetes menos en cada instalación.
+
+### Agregado (tipos)
+
+- `dte-sii.d.ts` declara los 9 métodos estáticos públicos de `CafSolicitor`, entre ellos
+  `extraerMotivoBloqueoTimbraje`, `esBloqueoTimbraje` y `esEmpresaNoAutorizada`, que llegaron
+  entre 2.21.0 y 2.23.0 sin tipo.
+- `WsReclamo`, que se exporta desde `index.js` desde mayo, ahora está declarada, junto con
+  `EstadoReceptorDte`, `AccionReclamoDte`, `EventoReclamoDte` y `RespuestaReclamoDte`.
+- `CafSolicitarResult.errorCode` pasa de `string` a `CafSolicitarErrorCode`, la lista cerrada
+  de los 12 códigos que emite `solicitar()`. Quien compare contra un código que la librería no
+  emite va a ver un error de compilación, que es justo lo que conviene.
+
+### Agregado (tests)
+
+- `test/dependencias-declaradas.test.js`: todo lo que el código publicado requiere está
+  declarado, y todo lo declarado se usa. Probado con mutación: falla si se reintroduce `soap`
+  o si se saca `form-data`.
+- `test/contrato-estaticos-dts.test.js`: los estáticos de `CafSolicitor` y los métodos de
+  `WsReclamo` están en el `.d.ts`, y `CafSolicitarErrorCode` coincide con los literales de
+  `solicitar()` en las dos direcciones.
+
+### Documentación
+
+- README: `CERTIFICADO_NO_HABILITADO` y `EMPRESA_NO_AUTORIZADA`, qué significan y qué hacer.
+- `CLAUDE.md` decía que `WsReclamo` no se exportaba desde `index.js`, y sí se exporta.
+
 ## [2.23.0] - 2026-09-10
 
 ### Agregado (empresa no autorizada a operar en el ambiente)

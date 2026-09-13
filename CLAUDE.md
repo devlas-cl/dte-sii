@@ -171,8 +171,9 @@ const _require = createRequire(import.meta.url)
 const { Certificado, CAF, DTE } = _require('@devlas/dte-sii') as Record<string, new (...a: any[]) => any>
 ```
 
-> WsReclamo is not re-exported from the main `index.js` — import directly:
-> `_require('@devlas/dte-sii/WsReclamo')`
+> `WsReclamo` se exporta desde `index.js` como el resto (desde mayo de 2026; esta nota decía lo
+> contrario y quedó vieja). El que NO se exporta es `SiiPortalAuth`: se importa directo con
+> `_require('@devlas/dte-sii/SiiPortalAuth.js')`.
 
 ---
 

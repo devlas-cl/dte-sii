@@ -606,6 +606,16 @@ SiiPortalAuth.limpiarSesionCache()           // borra todas
 El **límite de sesiones nunca se reintenta** (cada intento empeora el bloqueo) y se distingue por
 `err.code === 'SII_LIMITE_SESIONES'`.
 
+Dos códigos más indican un trámite pendiente del contribuyente, no un problema de la
+librería ni de la conexión:
+
+| `err.code` | Qué significa | Qué hacer |
+|---|---|---|
+| `CERTIFICADO_NO_HABILITADO` | El certificado nunca se habilitó como método de autenticación. El SII responde 200 con un `alert()` de JavaScript, no con un error HTTP. No se reintenta. | En sii.cl: Clave Tributaria, Cambiar clave, y habilitar la autenticación con Certificado Digital. |
+| `EMPRESA_NO_AUTORIZADA` | La empresa no está autorizada a operar en ese ambiente. Aparece al leer los datos del contribuyente. | Terminar la certificación (en producción no queda autorizada antes) o correr la Postulación/Enrolamiento. |
+
+`CafSolicitor.solicitar()` devuelve `EMPRESA_NO_AUTORIZADA` en `errorCode` por el mismo motivo.
+
 ### SiiSession: sesiones HTTP autenticadas
 
 ```javascript
