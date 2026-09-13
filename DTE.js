@@ -90,13 +90,18 @@ class DTE {
     const esExenta = d.tipo === 41;
     const esBoleta = TIPOS_BOLETA.includes(d.tipo);
     const precioConIva = d.precioConIva === true;
-    // Boletas afectas: reportar precios al consumidor (bruto con IVA) en <Detalle>.
-    // El SII valida MntTotal = suma(MontoItem), por lo que MontoItem debe ser precio con IVA.
-    // Para facturas: convertir a neto (precio sin IVA) como de costumbre.
-    const convertirANeto = precioConIva && !esBoleta;
-    const { detalle, mntNeto, mntExento } = this._procesarItems(d.items, esExenta, convertirANeto);
-    const totales = this._calcularTotales(mntNeto, mntExento, esExenta, esBoleta, esBoleta && precioConIva);
-    
+    // Con precioConIva las líneas se declaran tal cual, con IVA incluido, en boletas y en
+    // facturas. Convertir cada línea a neto redondeando perdía pesos: 2 x $1.000 quedaban en
+    // 2 x $840 y el documento declaraba $1.999 por una venta de $2.000. La boleta ya expresa
+    // montos brutos por defecto; la factura, la guía y las notas lo avisan con MntBruto=1
+    // (formato DTE del SII, campo "Indicador Montos Brutos"), y el neto y el IVA se derivan
+    // del total bruto. Probado en maullin sin reparos, incluso cuando IVA = bruto - neto no
+    // coincide por $1 con neto x tasa.
+    const { detalle, mntNeto, mntExento } = this._procesarItems(d.items, esExenta);
+    const totales = this._calcularTotales(mntNeto, mntExento, esExenta, esBoleta, precioConIva);
+    // "Sólo para documentos sin impuestos adicionales": el formato simplificado no los declara.
+    const declaraMntBruto = precioConIva && !esBoleta && mntNeto > 0;
+
     const resultado = {
       Encabezado: {
         IdDoc: {
@@ -104,6 +109,7 @@ class DTE {
           Folio: d.folio,
           FchEmis: d.fechaEmision,
           IndServicio: d.indServicio,
+          ...(declaraMntBruto ? { MntBruto: 1 } : {}),
         },
         Emisor: d.emisor,
         Receptor: {
@@ -133,18 +139,15 @@ class DTE {
     return resultado;
   }
   
-  _procesarItems(items, esExenta, precioConIva = false) {
+  // PrcItem se declara tal como llega: neto, o con IVA si el documento usa precioConIva.
+  _procesarItems(items, esExenta) {
     let mntNeto = 0;
     let mntExento = 0;
-    
+
     const detalle = items.map((item, idx) => {
       const qty = item.QtyItem || 1;
       const esItemExento = esExenta || item.IndExe === 1;
-      // Si precioConIva=true y el ítem no es exento, el PrcItem viene con IVA incluido
-      // (precio al consumidor del POS) → convertir a neto dividiendo por 1+TASA_IVA.
-      const prc = (precioConIva && !esItemExento)
-        ? Math.round(item.PrcItem / (1 + TASA_IVA / 100))
-        : item.PrcItem;
+      const prc = item.PrcItem;
       const montoItem = Math.round(qty * prc);
       
       if (esItemExento) {
@@ -172,15 +175,17 @@ class DTE {
   // PrcItem = precio neto unitario (o precio con IVA si se usa precioConIva:true).
   // IVA = mntNeto * TasaIVA.
   _calcularTotales(mntNeto, mntExento, esExenta, esBoleta = false, esBruto = false) {
-    // Boleta afecta con precios al consumidor (brutos): mntNeto contiene el total bruto (con IVA).
-    // MntNeto y IVA se derivan del bruto; MntTotal = bruto + exento = suma(MontoItem).
-    if (esBoleta && esBruto && !esExenta && mntNeto > 0) {
+    // Líneas con IVA incluido: mntNeto contiene el total bruto de las líneas afectas.
+    // MntNeto y IVA se derivan del bruto; MntTotal = bruto + exento = suma(MontoItem), así el
+    // documento declara exactamente lo cobrado. Orden del XSD: MntNeto, MntExe, TasaIVA, IVA.
+    if (esBruto && !esExenta && mntNeto > 0) {
       const bruto = mntNeto;
       const neto  = Math.round(bruto / (1 + TASA_IVA / 100));
       const iva   = bruto - neto;
       const mntTotal = bruto + mntExento;
       const totales = { MntNeto: neto };
       if (mntExento > 0) totales.MntExe = mntExento;
+      if (!esBoleta) totales.TasaIVA = TASA_IVA;  // EnvioBOLETA_v11.xsd no admite TasaIVA
       totales.IVA      = iva;
       totales.MntTotal = mntTotal;
       return totales;

@@ -8,6 +8,26 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Cambiado
+
+- **Facturas, guías y notas con `precioConIva` se declaran con Montos Brutos.** Antes el
+  formato simplificado convertía cada línea a neto redondeando el precio unitario, y el documento
+  podía declarar un peso menos que lo cobrado: 2 x $1.000 quedaban en 2 x $840, total $1.999.
+  Ahora las líneas van tal como llegan (con IVA), `IdDoc/MntBruto = 1` lo avisa, y Totales deriva
+  `MntNeto = round(bruto / 1,19)` e `IVA = bruto - MntNeto`, igual que la boleta. `MntTotal` es la
+  suma de `MontoItem`. Sin `precioConIva` nada cambia. Un consumidor que dependía de recibir
+  líneas netas con `precioConIva: true` las recibe ahora con IVA incluido. Probado en el ambiente
+  de certificación del SII con facturas, notas de crédito y débito y guías, sin reparos, incluidos
+  los casos en que `IVA` difiere en $1 de `MntNeto x TasaIVA`.
+- En Totales con líneas brutas y exento, el orden es el del XSD: `MntNeto`, `MntExe`, `TasaIVA`,
+  `IVA`, `MntTotal`.
+
+### Agregado
+
+- `MuestrasImpresas.parseEnvioDTE` devuelve `mntBruto`, leído del XML, y el PDF y el HTML rotulan
+  "P.Unit. c/IVA" y "Valor c/IVA" cuando el documento declara Montos Brutos. Aplica también a
+  documentos recibidos de otros emisores.
+
 ### Corregido
 
 - **`determinarIndTraslado` usa la tabla oficial del SII.** Consignación era 2 (es 3), entrega

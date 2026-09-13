@@ -251,12 +251,16 @@ class MuestrasImpresas {
       const folio = (idDoc?.Folio?.toString?.() ?? '') || folioTed || '';
       const fechaEmision = (idDoc?.FchEmis?.toString?.() ?? '') || fechaTed || '';
       const indTraslado = idDoc?.IndTraslado ? Number(idDoc.IndTraslado) : null;
+      // MntBruto=1: PrcItem y MontoItem vienen con IVA incluido (los totales no cambian de
+      // significado). Se detecta del XML porque también llega en documentos de terceros.
+      const mntBruto = Number(idDoc?.MntBruto) === 1;
 
       return {
         tipoDte,
         folio,
         fechaEmision,
         indTraslado,
+        mntBruto,
         emisor,
         receptor,
         totales,
@@ -531,8 +535,8 @@ class MuestrasImpresas {
           <th width="40%">Descripción</th>
           <th width="10%">Cant.</th>
           <th width="8%">Unid.</th>
-          <th width="12%">P.Unit.</th>
-          <th width="15%">Valor</th>
+          <th width="12%">${doc.mntBruto ? 'P.Unit. c/IVA' : 'P.Unit.'}</th>
+          <th width="15%">${doc.mntBruto ? 'Valor c/IVA' : 'Valor'}</th>
         </tr>
       </thead>
       <tbody>
@@ -998,8 +1002,8 @@ class MuestrasImpresas {
       { key: 'desc',  w: colW.desc,  label: 'Descripción', align: 'left', wrap: true },
       { key: 'cant',  w: colW.cant,  label: 'Cant.',     align: 'right'  },
       { key: 'unid',  w: colW.unid,  label: 'Unid.',     align: 'center' },
-      { key: 'punit', w: colW.punit, label: 'P.Unit.',   align: 'right'  },
-      { key: 'valor', w: colW.valor, label: 'Valor',     align: 'right'  },
+      { key: 'punit', w: colW.punit, label: doc.mntBruto ? 'P.Unit. c/IVA' : 'P.Unit.', align: 'right' },
+      { key: 'valor', w: colW.valor, label: doc.mntBruto ? 'Valor c/IVA' : 'Valor',     align: 'right' },
     ];
 
     // Encabezado
