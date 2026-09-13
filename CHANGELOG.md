@@ -8,6 +8,13 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **`determinarIndTraslado` usa la tabla oficial del SII.** Consignación era 2 (es 3), entrega
+  gratuita 3 (es 4) y devolución 6 (es 7); "OTROS TRASLADOS QUE NO SON VENTA" caía en Venta.
+- **La copia cedible de una guía solo se genera si la guía es venta** (tipos de traslado 1 y 9).
+  Antes solo se excluían 5 y 6, así que una entrega gratuita o una devolución salían con cedible.
+
 ## [2.24.0] - 2026-09-12
 
 ### Corregido (dependencias)

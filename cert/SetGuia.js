@@ -6,8 +6,9 @@
  * Tipo DTE: 52
  * 
  * Campos específicos de Guía de Despacho:
- *   - IndTraslado: 1=Venta, 2=Consignación, 3=Entrega gratuita, 
- *                  4=Comprobante, 5=Traslado interno, 6=Devolución
+ *   - IndTraslado: 1=Venta, 2=Ventas por efectuar, 3=Consignación, 4=Entrega gratuita,
+ *                  5=Traslado interno, 6=Otros traslados no venta, 7=Devolución,
+ *                  8=Traslado exportación, 9=Venta exportación (Manual de Muestras Impresas SII)
  *   - TpoDespacho: 1=Por cuenta del cliente, 2=Por cuenta del emisor
  * 
  * @module dte-sii/cert/SetGuia

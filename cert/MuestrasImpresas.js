@@ -666,9 +666,26 @@ class MuestrasImpresas {
     });
   }
 
-  /** Retorna true si la guía de despacho es de traslado interno (sin cedible). */
-  _esGuiaInterna(doc) {
-    return doc.tipoDte === 52 && [5, 6].includes(doc.indTraslado);
+  /**
+   * Retorna true si la guía de despacho corresponde a una operación de venta y por lo
+   * tanto debe llevar copia cedible.
+   *
+   * Manual de Muestras Impresas del SII, sección 1.4: "una operación que no constituye
+   * venta o de traslado interno, no debe incluir el ejemplar cedible". Antes esto solo
+   * excluía traslado interno (5) y otros traslados no venta (6) — consignación (3),
+   * entrega gratuita (4), devolución (7) y traslado para exportación (8) salían con
+   * cedible sin corresponder. Los códigos de venta son 1 (Venta) y 9 (Venta para
+   * exportación); el resto de la tabla (§30 del mismo manual) no es venta. Mismo
+   * criterio que usa el consumidor de esta librería para decidir la copia impresa
+   * (`esTrasladoVenta()` en su capa de ticket).
+   */
+  _guiaEsVenta(doc) {
+    return [1, 9].includes(Number(doc.indTraslado ?? 1));
+  }
+
+  /** Retorna true si el documento (de cualquier tipo cedible) debe llevar cedible. */
+  _requiereCedible(doc) {
+    return doc.tipoDte === 52 ? this._guiaEsVenta(doc) : true;
   }
 
   /** Retorna true si el documento debe incluir acuse de recibo. */
@@ -676,7 +693,7 @@ class MuestrasImpresas {
     if (!cedible) return false;
     if (NO_CEDIBLE_TIPOS.has(doc.tipoDte)) return false;
     if (!CEDIBLE_TIPOS.has(doc.tipoDte))   return false;
-    if (this._esGuiaInterna(doc))          return false;
+    if (!this._requiereCedible(doc))       return false;
     return true;
   }
 
@@ -1279,7 +1296,7 @@ class MuestrasImpresas {
       y = await this._pdfRenderTed(pdfDoc, page, tedPng, fonts, y, H, W, M, rgb);
     }
 
-    if (cedible && CEDIBLE_TIPOS.has(doc.tipoDte) && !this._esGuiaInterna(doc)) {
+    if (cedible && CEDIBLE_TIPOS.has(doc.tipoDte) && this._requiereCedible(doc)) {
       this._pdfRenderCedible(page, doc, fonts, H, W, M, rgb);
     }
 
@@ -1336,7 +1353,7 @@ class MuestrasImpresas {
           console.error(`   ✗ ${base}.pdf  →  ${e.message}`);
         }
 
-        if (generarCedible && CEDIBLE_TIPOS.has(doc.tipoDte) && !this._esGuiaInterna(doc)) {
+        if (generarCedible && CEDIBLE_TIPOS.has(doc.tipoDte) && this._requiereCedible(doc)) {
           try {
             const buf = await this.generarPDFBuffer(doc, { cedible: true });
             const out = path.join(targetDir, `${base}_cedible.pdf`);

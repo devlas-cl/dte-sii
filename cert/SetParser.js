@@ -87,18 +87,34 @@ function determinarCodRef(razon) {
 }
 
 /**
- * Determina indicador de traslado para guías
+ * Determina indicador de traslado para guías.
+ *
+ * Códigos según la tabla oficial del formato DTE (Manual de Muestras Impresas del SII,
+ * seccion "Guía de Despacho Electrónica"): 1 Venta, 2 Ventas por efectuar, 3 Consignaciones,
+ * 4 Entrega gratuita, 5 Traslados internos, 6 Otros traslados no venta, 7 Devolución de
+ * mercaderías, 8 Traslado para exportación, 9 Venta para exportación.
+ *
+ * Antes esta función usaba otra numeración (consignación=2, entrega gratuita=3,
+ * devolución=6) que no es la del SII — coincidía por casualidad con la tabla vieja de un
+ * comentario en SetGuia.js, hoy también corregido. No se había detectado porque en los sets
+ * reales observados el SII solo manda los motivos "VENTA" y "TRASLADO ... ENTRE BODEGAS",
+ * que sí caían en el código correcto (1 y 5) en cualquiera de las dos numeraciones.
  */
 function determinarIndTraslado(motivo) {
   if (!motivo) return 1;
   const m = motivo.toUpperCase();
+  // Van antes que el chequeo genérico de "VENTA": textos como "otros traslados que NO SON
+  // VENTA" contienen la palabra VENTA como substring y caerían en el código equivocado (1).
   if (m.includes('TRASLADO') && (m.includes('INTERNO') || m.includes('BODEGA'))) return 5;
+  if (m.includes('OTRO') && m.includes('TRASLADO')) return 6;
+  if (m.includes('DEVOLUCION')) return 7;
+  if (m.includes('CONSIGNACION')) return 3;
+  if (m.includes('ENTREGA GRATUITA') || m.includes('GRATUITA')) return 4;
+  if (m.includes('VENTA') && m.includes('EXPORTACION')) return 9;
+  if (m.includes('VENTA') && m.includes('EFECTUAR')) return 2;
   if (m.includes('VENTA')) return 1;
-  if (m.includes('CONSIGNACION')) return 2;
-  if (m.includes('ENTREGA GRATUITA')) return 3;
-  if (m.includes('COMPROBANTE')) return 4;
+  if (m.includes('EXPORTACION')) return 8;
   if (m.includes('TRASLADO')) return 5;
-  if (m.includes('DEVOLUCION')) return 6;
   return 1;
 }
 
