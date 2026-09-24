@@ -37,6 +37,7 @@ const CertFolioHelper = require('./cert/CertFolioHelper');
 
 // WS Aceptación/Reclamo DTE (v2.9.0)
 const WsReclamo = require('./WsReclamo');
+const { MemorySessionLock, MemorySessionStore, SessionBroker } = require('./SiiSessionPorts');
 
 const utils = require('./utils');
 
@@ -249,6 +250,13 @@ module.exports = {
   // WS Aceptación/Reclamo DTE (v2.9.0)
   // ─────────────────────────────────────────
   WsReclamo,
+
+  // ─────────────────────────────────────────
+  // Sesión del portal SII: puertos y adaptadores (multi-réplica)
+  // ─────────────────────────────────────────
+  MemorySessionLock,
+  MemorySessionStore,
+  SessionBroker,
 
   // ─────────────────────────────────────────
   // UTILIDADES (todo el namespace)

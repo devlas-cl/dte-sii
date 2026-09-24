@@ -1283,3 +1283,36 @@ export const utils: {
   getDaysUntilExpiry: typeof getDaysUntilExpiry;
   createTlsOptions: typeof createTlsOptions;
 };
+
+// ─── Sesión del portal SII: puertos y adaptadores ────────────────────────────
+
+/** Dónde vive la sesión del portal SII. Ver SiiSessionPorts.js. */
+export interface SessionStore {
+  load(certHash: string): Promise<{ ts: number; cookies: Record<string, string> } | null>;
+  save(certHash: string, cookies: Record<string, string>): Promise<void>;
+  /** Sin argumento borra todas las sesiones. */
+  remove(certHash?: string): Promise<void>;
+}
+
+/** Exclusión mutua por clave: `fn` corre solo con el lock tomado y lo libera al terminar. */
+export interface SessionLock {
+  withLock<T>(key: string, fn: () => Promise<T>): Promise<T>;
+}
+
+export class MemorySessionLock implements SessionLock {
+  withLock<T>(key: string, fn: () => Promise<T>): Promise<T>;
+}
+
+export class MemorySessionStore implements SessionStore {
+  load(certHash: string): Promise<{ ts: number; cookies: Record<string, string> } | null>;
+  save(certHash: string, cookies: Record<string, string>): Promise<void>;
+  remove(certHash?: string): Promise<void>;
+}
+
+/** Punto único de acceso a la sesión: una por certificado, usada por un llamador a la vez. Reentrante. */
+export class SessionBroker {
+  constructor(puertos: { store: SessionStore; lock: SessionLock });
+  readonly store: SessionStore;
+  readonly lock: SessionLock;
+  withSession<T>(certHash: string, fn: () => Promise<T>): Promise<T>;
+}
