@@ -1470,8 +1470,15 @@ class SiiPortalAuth {
    * @throws Si no puede autenticar, si el RUT es inválido o si faltan datos de resolución.
    */
   static async obtenerEmisor({ pfxBuffer, pfxPassword = '', rutEmpresa = '', onAviso } = {}) {
-    const aviso = onAviso || ((msg) => console.warn(msg));
     const auth = new SiiPortalAuth({ pfxBuffer, pfxPassword });
+    // Bajo el lock del certificado: sin esto, N llamadas simultáneas (o de varias réplicas)
+    // abrían N sesiones de portal en vez de una.
+    return auth.conSesion(() => SiiPortalAuth._obtenerEmisorConSesion(auth, { rutEmpresa, onAviso }));
+  }
+
+  /** @private */
+  static async _obtenerEmisorConSesion(auth, { rutEmpresa, onAviso }) {
+    const aviso = onAviso || ((msg) => console.warn(msg));
 
     // Se resuelve antes de autenticar para poder reintentar con sesión fresca.
     let rutNum, dv;
