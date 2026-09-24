@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.26.0] - 2026-09-24
+
 ### Agregado (sesión del portal compartida entre réplicas)
 
 La sesión del portal SII es un recurso escaso por certificado: el SII limita las sesiones
