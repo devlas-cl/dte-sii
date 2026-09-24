@@ -25,6 +25,8 @@ réplica abría su propia sesión. Ahora la persistencia y la exclusión son int
 - `auth.conSesion(fn)`: toma el lock, autentica o reutiliza la sesión guardada, ejecuta `fn` y
   libera. Garantiza una sesión por certificado y un solo usuario a la vez entre procesos.
 - `auth.limpiarSesion()` descarta solo la sesión de ese certificado.
+- `SiiPortalAuth.persistirSesion(pfx, clave)`: el inverso. `CafSolicitor` guarda su login solo en
+  memoria; esto lo lleva al store configurado para que otra réplica no abra una sesión más.
 - `SiiPortalAuth.hidratarSesion(pfx, clave)`: trae la sesión del store configurado a la memoria
   del proceso, para que `CafSolicitor` (que usa `getCookieStringForPfx`, síncrono) la encuentre.
   Con un store inyectado, `getCookieStringForPfx` ya no lee el archivo local, que puede estar viejo.

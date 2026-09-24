@@ -702,6 +702,22 @@ class SiiPortalAuth {
     return true;
   }
 
+  /**
+   * Inverso de `hidratarSesion`: lleva al store configurado la sesión que un flujo abrió en la
+   * memoria del proceso. `CafSolicitor` guarda su login solo en `SiiSessionStore` (memoria), así
+   * que sin esto otra réplica no lo ve y abriría una sesión más para el mismo certificado.
+   *
+   * @returns {Promise<boolean>} true si había una sesión en memoria para persistir
+   */
+  static async persistirSesion(pfxBuffer, pfxPassword) {
+    const { certPem } = SiiPortalAuth._extractPems(pfxBuffer, pfxPassword);
+    const certHash = crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
+    const cadena = SiiSessionStore.get(certHash);
+    if (!cadena) return false;
+    await SiiPortalAuth._guardarSesion(certHash, _parseCookieStr(cadena));
+    return true;
+  }
+
   /** Lee sesión cacheada del disco para el cert dado. @private */
   static _cargarSesionCache(certHash) {
     const { sesiones, existia } = SiiPortalAuth._leerArchivoCache();

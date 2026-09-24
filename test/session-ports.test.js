@@ -261,5 +261,32 @@ function authConSesionValida(cookies = { 'NETSCAPE_LIVEWIRE.rutm': '1', TOKEN: '
     }
   }
 
+  {
+    // persistirSesion: lleva al store la sesión abierta en memoria (la de CafSolicitor)
+    const extractOriginal = SiiPortalAuth._extractPems;
+    SiiPortalAuth._extractPems = () => ({ certPem: 'CERT-PERSISTIR' });
+    const certHash = crypto.createHash('sha1').update('CERT-PERSISTIR').digest('hex').slice(0, 12);
+    try {
+      const store = new MemorySessionStore();
+      SiiPortalAuth.configurarSesion({ store });
+      SiiSessionStore.delete(certHash);
+      assert.strictEqual(await SiiPortalAuth.persistirSesion(Buffer.from('x'), 'p'), false, 'sin sesión en memoria devuelve false');
+      assert.strictEqual(await store.load(certHash), null);
+
+      SiiSessionStore.set(certHash, 'A=1; B=2');
+      assert.strictEqual(await SiiPortalAuth.persistirSesion(Buffer.from('x'), 'p'), true);
+      assert.deepStrictEqual((await store.load(certHash)).cookies, { A: '1', B: '2' });
+
+      // Ida y vuelta: otra réplica hidrata lo que esta persistió
+      SiiSessionStore.delete(certHash);
+      assert.strictEqual(await SiiPortalAuth.hidratarSesion(Buffer.from('x'), 'p'), true);
+      assert.strictEqual(SiiSessionStore.get(certHash), 'A=1; B=2');
+    } finally {
+      SiiPortalAuth._extractPems = extractOriginal;
+      SiiSessionStore.delete(certHash);
+      SiiPortalAuth.restablecerSesion();
+    }
+  }
+
   console.log('session-ports OK');
 })().catch((e) => { console.error(e); process.exit(1); });
