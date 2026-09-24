@@ -8,6 +8,39 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Agregado (sesión del portal compartida entre réplicas)
+
+La sesión del portal SII es un recurso escaso por certificado: el SII limita las sesiones
+autenticadas simultáneas por RUT, y las cookies Tivoli se rompen con requests concurrentes de la
+misma sesión. Con una sola réplica bastaba un archivo y un mutex en el proceso; con varias, cada
+réplica abría su propia sesión. Ahora la persistencia y la exclusión son intercambiables.
+
+- **Puertos** `SessionStore` (`load`, `save`, `remove`) y `SessionLock` (`withLock`), con
+  adaptadores en memoria (`MemorySessionStore`, `MemorySessionLock`) y `SessionBroker`, el único
+  punto de acceso, que agrega reentrancia. Exportados desde `index.js` y declarados en el `.d.ts`.
+- `SiiPortalAuth.configurarSesion({ store, lock })` los inyecta (por ejemplo con Redis).
+  **Sin llamarlo, todo sigue igual**: archivo y mutex en el proceso.
+- `auth.conSesion(fn)`: toma el lock, autentica o reutiliza la sesión guardada, ejecuta `fn` y
+  libera. Garantiza una sesión por certificado y un solo usuario a la vez entre procesos.
+- `auth.limpiarSesion()` descarta solo la sesión de ese certificado.
+- `SiiPortalAuth.persistirSesion(pfx, clave)`: el inverso. `CafSolicitor` guarda su login solo en
+  memoria; esto lo lleva al store configurado para que otra réplica no abra una sesión más.
+- `SiiPortalAuth.hidratarSesion(pfx, clave)`: trae la sesión del store configurado a la memoria
+  del proceso, para que `CafSolicitor` (que usa `getCookieStringForPfx`, síncrono) la encuentre.
+  Con un store inyectado, `getCookieStringForPfx` ya no lee el archivo local, que puede estar viejo.
+
+### Corregido
+
+- **Al reintentar con sesión inválida, `obtenerDatosEmpresa` borraba las sesiones de TODOS los
+  certificados** (`limpiarSesionCache()` sin argumento). Ahora solo la del certificado en uso,
+  y también descarta la copia en memoria para forzar un login real.
+
+### No cambia
+
+- Las estáticas de archivo (`_cargarSesionCache`, `_guardarSesionCache`, `limpiarSesionCache`),
+  el TTL de 90 min, la poda y la migración v1 a v2 siguen siendo la implementación por defecto.
+- `CafSolicitor`, `SiiSession` y `SiiCertificacion` conservan sus archivos `sessionPath`.
+
 ## [2.25.0] - 2026-09-13
 
 ### Cambiado

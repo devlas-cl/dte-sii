@@ -30,6 +30,7 @@ const { URL } = require('url');
 const forge  = require('node-forge');
 const crypto = require('crypto');
 const SiiSessionStore = require('./SiiSessionStore');
+const { MemorySessionLock, SessionBroker } = require('./SiiSessionPorts');
 const { resolveDataDir } = require('./utils/paths');
 const { registrarHttpDebug } = require('./utils/httpDebug');
 
@@ -210,6 +211,24 @@ const SESSION_CACHE_MAX = 200;
  * Mismo patrón que CafSolicitor._sessionRegistry.
  * @type {Map<string, SiiPortalAuth>}
  */
+/**
+ * Store por defecto: el archivo de siempre (`sii_session_cache.json`). Delega en las funciones
+ * estáticas de archivo, que siguen siendo la implementación (y siguen cubiertas por sus tests).
+ */
+const _almacenArchivo = {
+  async load(certHash) {
+    const { sesiones, existia } = SiiPortalAuth._leerArchivoCache();
+    return existia ? (sesiones[certHash] ?? null) : null;
+  },
+  async save(certHash, cookies) { SiiPortalAuth._guardarSesionCache(certHash, cookies); },
+  async remove(certHash) { SiiPortalAuth.limpiarSesionCache(certHash); },
+};
+
+/** Broker de sesión activo. Por defecto: archivo + mutex en proceso (una sola réplica). */
+let _broker = new SessionBroker({ store: _almacenArchivo, lock: new MemorySessionLock() });
+/** true si se inyectó un store distinto del archivo: entonces el archivo local ya no es fuente de verdad. */
+let _almacenPersonalizado = false;
+
 const _instanceRegistry = new Map();
 
 /**
@@ -435,7 +454,7 @@ class SiiPortalAuth {
       if (validaStore) {
         console.log('[SiiPortalAuth] Reutilizando sesión SII desde store compartido');
         this._cachedCookieJar = cookieObj;
-        SiiPortalAuth._guardarSesionCache(this._certHash, cookieObj);
+        await SiiPortalAuth._guardarSesion(this._certHash, cookieObj);
         return cookieObj;
       }
       SiiSessionStore.delete(this._certHash);
@@ -443,7 +462,7 @@ class SiiPortalAuth {
     }
 
     // ── 1b. Caché en disco ───────────────────────────────────────────────────
-    const cached = SiiPortalAuth._cargarSesionCache(this._certHash);
+    const cached = await SiiPortalAuth._cargarSesion(this._certHash);
     if (cached) {
       const valida = await this._validarSesion(cached);
       if (valida) {
@@ -530,7 +549,7 @@ class SiiPortalAuth {
       throw new Error('SiiPortalAuth: autenticación fallida — no se recibieron cookies de sesión NETSCAPE_LIVEWIRE.*');
     }
 
-    SiiPortalAuth._guardarSesionCache(this._certHash, cookieJar);
+    await SiiPortalAuth._guardarSesion(this._certHash, cookieJar);
     SiiSessionStore.set(this._certHash, _cookieObjToStr(cookieJar));
     this._cachedCookieJar = cookieJar;
     return cookieJar;
@@ -558,7 +577,7 @@ class SiiPortalAuth {
       const valida = res.status === 200 && (res.body.includes('RUT_EMP') || res.body.includes('ad_empresa'));
       console.log(`[SiiPortalAuth] Validación: status=${res.status} → sesión ${valida ? 'VÁLIDA ✓' : 'INVÁLIDA ✗'}`);
       // Refrescar timestamp del caché para extender TTL mientras la sesión se usa activamente
-      if (valida) SiiPortalAuth._guardarSesionCache(this._certHash, cookieJar);
+      if (valida) await SiiPortalAuth._guardarSesion(this._certHash, cookieJar);
       return valida;
     } catch (err) {
       console.warn('[SiiPortalAuth] Validación: error de red →', err.message);
@@ -592,6 +611,111 @@ class SiiPortalAuth {
       console.warn('[SiiPortalAuth] Cache: error leyendo caché →', err.message);
       return { v: 2, sesiones: {}, existia: false };
     }
+  }
+
+  // ─── Sesión compartida (puertos SessionStore / SessionLock) ──────────────────
+
+  /**
+   * Cambia dónde vive la sesión y cómo se exclusiona su uso. Pensado para consumidores con
+   * varias réplicas (ver SiiSessionPorts.js). Sin llamarlo, todo sigue como siempre: archivo y
+   * mutex en el proceso. Cada puerto es opcional; el que se omite conserva su valor actual.
+   *
+   * @param {{ store?: SessionStore, lock?: SessionLock }} puertos
+   */
+  static configurarSesion({ store, lock } = {}) {
+    _broker.reconfigurar({ store: store || _broker.store, lock: lock || _broker.lock });
+    _almacenPersonalizado = !!store || _almacenPersonalizado;
+  }
+
+  /** Vuelve al store de archivo y al mutex en proceso. Útil en tests. */
+  static restablecerSesion() {
+    _broker.reconfigurar({ store: _almacenArchivo, lock: new MemorySessionLock() });
+    _almacenPersonalizado = false;
+  }
+
+  /** Lee del store configurado y aplica el TTL en un solo lugar para todos los stores. @private */
+  static async _cargarSesion(certHash) {
+    try {
+      const entrada = await _broker.store.load(certHash);
+      if (!entrada) return null;
+      if (Date.now() - entrada.ts > SESSION_CACHE_TTL_MS) return null;
+      return entrada.cookies;
+    } catch (err) {
+      console.warn('[SiiPortalAuth] Sesión: error leyendo el store →', err.message);
+      return null;
+    }
+  }
+
+  /** @private */
+  static async _guardarSesion(certHash, cookieJar) {
+    try {
+      await _broker.store.save(certHash, cookieJar);
+    } catch (err) {
+      console.warn('[SiiPortalAuth] Sesión: error guardando en el store →', err.message);
+    }
+  }
+
+  /** Borra la sesión de UN certificado del store configurado. @private */
+  static async _borrarSesion(certHash) {
+    try {
+      await _broker.store.remove(certHash);
+    } catch (err) {
+      console.warn('[SiiPortalAuth] Sesión: error borrando del store →', err.message);
+    }
+  }
+
+  /**
+   * Ejecuta `fn(cookieJar)` con la sesión de este certificado: toma el lock, autentica (o reusa
+   * la sesión guardada) y libera al terminar. Es la forma de usar el portal que garantiza una
+   * sola sesión por certificado y un solo usuario a la vez, aunque haya varios procesos.
+   * Reentrante: un `conSesion` anidado para el mismo certificado corre directo.
+   *
+   * @template T
+   * @param {(cookieJar: Object) => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  conSesion(fn) {
+    return _broker.withSession(this._certHash, async () => fn(await this.autenticar()));
+  }
+
+  /** Descarta la sesión de este certificado (fuerza un login nuevo en el próximo uso). */
+  async limpiarSesion() {
+    this._cachedCookieJar = null;
+    SiiSessionStore.delete(this._certHash);
+    await SiiPortalAuth._borrarSesion(this._certHash);
+  }
+
+  /**
+   * Trae la sesión del store configurado al store en memoria del proceso, para que
+   * `getCookieStringForPfx` (síncrono, lo usa `CafSolicitor`) la encuentre. Llamarlo antes de
+   * crear un `CafSolicitor` cuando el store no es el archivo local.
+   *
+   * @returns {Promise<boolean>} true si había una sesión vigente
+   */
+  static async hidratarSesion(pfxBuffer, pfxPassword) {
+    const { certPem } = SiiPortalAuth._extractPems(pfxBuffer, pfxPassword);
+    const certHash = crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
+    if (SiiSessionStore.get(certHash)) return true;
+    const cookies = await SiiPortalAuth._cargarSesion(certHash);
+    if (!cookies) return false;
+    SiiSessionStore.set(certHash, _cookieObjToStr(cookies));
+    return true;
+  }
+
+  /**
+   * Inverso de `hidratarSesion`: lleva al store configurado la sesión que un flujo abrió en la
+   * memoria del proceso. `CafSolicitor` guarda su login solo en `SiiSessionStore` (memoria), así
+   * que sin esto otra réplica no lo ve y abriría una sesión más para el mismo certificado.
+   *
+   * @returns {Promise<boolean>} true si había una sesión en memoria para persistir
+   */
+  static async persistirSesion(pfxBuffer, pfxPassword) {
+    const { certPem } = SiiPortalAuth._extractPems(pfxBuffer, pfxPassword);
+    const certHash = crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
+    const cadena = SiiSessionStore.get(certHash);
+    if (!cadena) return false;
+    await SiiPortalAuth._guardarSesion(certHash, _parseCookieStr(cadena));
+    return true;
   }
 
   /** Lee sesión cacheada del disco para el cert dado. @private */
@@ -1290,7 +1414,9 @@ class SiiPortalAuth {
       }
 
       // 2. Caché en disco (sobrevive reinicios dentro del mismo deploy)
-      const fileCookies = SiiPortalAuth._cargarSesionCache(certHash);
+      // Con un store inyectado el archivo local ya no es fuente de verdad (puede estar viejo):
+      // la sesión llega a la memoria vía `hidratarSesion`, que el consumidor llama antes.
+      const fileCookies = _almacenPersonalizado ? null : SiiPortalAuth._cargarSesionCache(certHash);
       if (fileCookies) {
         const str = Object.entries(fileCookies).map(([k, v]) => `${k}=${v}`).join('; ');
         console.log('[SiiPortalAuth] 🔗 getCookieStringForPfx: cookies desde caché en disco (hash=' + certHash + ')');
@@ -1393,7 +1519,7 @@ class SiiPortalAuth {
       } catch (e) {
         if (intento === 1) {
           aviso(`[SiiPortalAuth] Sesión cacheada inválida (${e.message}). Re-autenticando...`);
-          SiiPortalAuth.limpiarSesionCache();
+          await auth.limpiarSesion();
           cookieJar = await auth.autenticar();
           if (!rutEmpresa) {
             const [r, d] = rutDesdeCookies(cookieJar);
