@@ -37,7 +37,7 @@ const CertFolioHelper = require('./cert/CertFolioHelper');
 
 // WS Aceptación/Reclamo DTE (v2.9.0)
 const WsReclamo = require('./WsReclamo');
-const { MemorySessionLock, MemorySessionStore, SessionBroker } = require('./SiiSessionPorts');
+const { MemorySessionLock, MemorySessionStore, SessionBroker, MemoryStateStore, FileStateStore } = require('./SiiSessionPorts');
 
 const utils = require('./utils');
 
@@ -256,6 +256,8 @@ module.exports = {
   // ─────────────────────────────────────────
   MemorySessionLock,
   MemorySessionStore,
+  MemoryStateStore,
+  FileStateStore,
   SessionBroker,
 
   // ─────────────────────────────────────────
