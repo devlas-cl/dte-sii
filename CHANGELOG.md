@@ -8,10 +8,40 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.27.0] - 2026-09-25
+
+### Agregado (estado compartido entre réplicas)
+
+- **Puerto `StateStore`** (`load`, `save`, `remove`) para el estado que debe sobrevivir entre corridas
+  y verse entre réplicas, con `MemoryStateStore` y `FileStateStore`. Exportados desde `index.js` y
+  declarados en el `.d.ts`. `SiiPortalAuth.configurarSesion({ store, lock, estado })` acepta el campo
+  nuevo `estado`, y `SiiPortalAuth.estadoConfigurado()` lo devuelve.
+- **`FolioService`** guarda los folios ya anulados por el `StateStore` (opción `estado` o el
+  configurado para el proceso).
+- **`CertRunner`** guarda el período de libros, los totales LTC y los folios usados por el
+  `StateStore` (opción `estado`).
+- **`SiiSession` usa el store compartido**: con un `SessionStore` configurado, `ensureSession` toma el
+  lock del certificado, reutiliza la sesión guardada en vez de autenticarse otra vez y la guarda al
+  terminar. Cubre a `FolioService`, `CafSolicitor`, `SiiCertificacion` y `SetsProvider` sin necesitar
+  `sessionPath`. Métodos nuevos: `cargarDeAlmacen()`, `guardarEnAlmacen()` y `borrarDeAlmacen()`.
+  `SiiSession` y `SiiPortalAuth` identifican el certificado con la misma huella.
+
+### Cambiado
+
+- Los helpers internos de `CertRunner` que leían y escribían estado pasan a ser asíncronos, y
+  `resetPeriodoLibros()` devuelve una promesa. `FolioService.reobtenerCaf` acepta un `yaEmitido` que
+  puede devolver una promesa. Sin configurar nada, los archivos y sus nombres son los de siempre y
+  lo ya guardado se sigue leyendo.
+
 ### Corregido
 
 - `SiiPortalAuth.obtenerEmisor` ahora corre bajo el lock del certificado (`conSesion`). Sin esto,
   N llamadas simultaneas (o de varias replicas) abrian N sesiones de portal en vez de una.
+
+### Sin cambios a propósito
+
+- `FolioRegistry` sigue en archivo: su API es síncrona y pública. Un servicio que lleve el control de
+  folios en su propia base no lo usa.
 
 ## [2.26.0] - 2026-09-24
 
