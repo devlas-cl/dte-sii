@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const SiiSession = require('./SiiSession');
 const FolioRegistry = require('./FolioRegistry');
+const { resolverEstado } = require('./SiiEstado');
 const CAF = require('./CAF');
 const CafSolicitor = require('./CafSolicitor');
 const { resolveDataDir } = require('./utils/paths');
@@ -74,6 +75,12 @@ class FolioService {
      * al SII: varios minutos de la corrida gastados en no hacer nada.
      */
     this.stateDir = options.stateDir || this.debugDir;
+    /**
+     * Dónde vive ese estado. Por defecto son archivos en `stateDir`; un consumidor con varias
+     * réplicas pasa `estado` (StateStore) o lo configura una vez con
+     * `SiiPortalAuth.configurarSesion({ estado })`.
+     */
+    this._estadoExplicito = options.estado || null;
     
     // Sesión SII — priorizar reutilización para evitar bans del SII
     // Orden: (1) sesión explícita, (2) registro de CafSolicitor, (3) nueva sesión
@@ -800,7 +807,7 @@ class FolioService {
    *   folios de un RUT antes de detenerla.
    */
   /**
-   * Ruta del registro de rangos ya anulados, por RUT y tipo de DTE.
+   * Clave del registro de rangos ya anulados, por RUT y tipo de DTE.
    *
    * El SII sigue listando un folio anulado como "sin utilizar" —anulado es, en
    * efecto, sin usar— así que `consultarFolios` lo devuelve para siempre y cada
@@ -808,16 +815,20 @@ class FolioService {
    * round-trips al SII que solo pueden fallar, y peor: van comiendo el cupo de
    * `maxRangos`, hasta dejar fuera a los sobrantes que sí hay que anular.
    */
-  _anuladosPath(tipoDte) {
+  _anuladosClave(tipoDte) {
     const rutLimpio = String(this.rutEmisor || '').replace(/[^0-9kK]/g, '');
-    return path.join(this.stateDir, `folios-anulados-${rutLimpio}-${tipoDte}.json`);
+    return `folios-anulados-${rutLimpio}-${tipoDte}`;
+  }
+
+  /** StateStore efectivo (explícito, configurado para el proceso, o archivos en stateDir). */
+  _estado() {
+    return resolverEstado(this.stateDir, this._estadoExplicito);
   }
 
   /** Set de claves "desde-hasta" que el SII ya reportó como anuladas. */
-  _cargarAnulados(tipoDte) {
+  async _cargarAnulados(tipoDte) {
     try {
-      const raw = fs.readFileSync(this._anuladosPath(tipoDte), 'utf8');
-      const arr = JSON.parse(raw);
+      const arr = await this._estado().load(this._anuladosClave(tipoDte));
       return new Set(Array.isArray(arr) ? arr : []);
     } catch (_) {
       // Sin registro previo (o ilegible): se parte de cero. Nunca es fatal —
@@ -826,10 +837,9 @@ class FolioService {
     }
   }
 
-  _guardarAnulados(tipoDte, set) {
+  async _guardarAnulados(tipoDte, set) {
     try {
-      fs.mkdirSync(this.stateDir, { recursive: true });
-      fs.writeFileSync(this._anuladosPath(tipoDte), JSON.stringify([...set]), 'utf8');
+      await this._estado().save(this._anuladosClave(tipoDte), [...set]);
     } catch (err) {
       console.warn(`[FolioService] No se pudo persistir registro de anulados: ${err.message}`);
     }
@@ -847,7 +857,7 @@ class FolioService {
     // Rangos que el SII ya reportó como anulados en corridas anteriores: se
     // saltan de entrada para no gastar el cupo de `maxRangos` en reintentos
     // que solo pueden volver a fallar. Ver `_anuladosPath`.
-    const yaAnulados = this._cargarAnulados(tipoDte);
+    const yaAnulados = await this._cargarAnulados(tipoDte);
     const yaAnuladosInicial = yaAnulados.size;
 
     const maxPasadas = 4;
@@ -1073,7 +1083,7 @@ class FolioService {
     }
 
     if (yaAnulados.size !== yaAnuladosInicial) {
-      this._guardarAnulados(tipoDte, yaAnulados);
+      await this._guardarAnulados(tipoDte, yaAnulados);
     }
 
     const totalAnulados   = anulados.reduce((s, r) => s + r.count, 0);
