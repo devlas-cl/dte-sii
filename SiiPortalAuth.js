@@ -717,6 +717,14 @@ class SiiPortalAuth {
     await SiiPortalAuth._borrarSesion(certHash);
   }
 
+  /**
+   * Ejecuta `fn` con el lock del certificado (el mismo de `conSesion`), para quien ya tiene la
+   * huella y no una instancia de SiiPortalAuth. Es reentrante por flujo asíncrono.
+   */
+  static conSesionDe(certHash, fn) {
+    return _broker.withSession(certHash, fn);
+  }
+
   /** Huella con la que se identifica un certificado en el store (SHA1 del PEM, 12 caracteres). */
   static huellaDeCertPem(certPem) {
     return crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);

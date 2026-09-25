@@ -64,6 +64,66 @@ class SiiSession {
     } else if (options.pfxPath && options.pfxPassword) {
       this._configureTlsFromFile(options.pfxPath, options.pfxPassword);
     }
+
+    /** Huella del certificado con la que la sesión se guarda en el store compartido. */
+    this._almacenClave = this._calcularClaveAlmacen(options);
+    /** Última cookie que se sincronizó con el store, para no reescribir lo que no cambió. */
+    this._cookieSincronizada = '';
+  }
+
+  /**
+   * Huella con la que SiiPortalAuth identifica este certificado (SHA1 del PEM, 12 caracteres),
+   * para que SiiSession y SiiPortalAuth compartan UNA sola sesión por certificado. `null` si no
+   * se puede calcular: en ese caso no se usa el store compartido.
+   * @private
+   */
+  _calcularClaveAlmacen(options) {
+    try {
+      const SiiPortalAuth = require('./SiiPortalAuth');
+      if (options.certificado) {
+        return SiiPortalAuth.huellaDeCertPem(options.certificado.getCertificatePEM());
+      }
+      const pfx = options.pfxBuffer || (options.pfxPath ? require('fs').readFileSync(options.pfxPath) : null);
+      if (pfx && options.pfxPassword) {
+        const { certPem } = SiiPortalAuth._extractPems(pfx, options.pfxPassword);
+        return SiiPortalAuth.huellaDeCertPem(certPem);
+      }
+    } catch (_) {
+      // sin huella: la sesión sigue funcionando en memoria y en archivo, solo no se comparte
+    }
+    return null;
+  }
+
+  /** true si hay un store compartido configurado (por ejemplo Redis) y una huella para usarlo. @private */
+  _almacenActivo() {
+    return !!this._almacenClave && require('./SiiPortalAuth').almacenPersonalizado();
+  }
+
+  /**
+   * Carga la sesión guardada en el store compartido, si hay una vigente.
+   * @returns {Promise<boolean>} true si había una sesión y quedó cargada
+   */
+  async cargarDeAlmacen() {
+    if (!this._almacenActivo()) return false;
+    const cadena = await require('./SiiPortalAuth').cargarCookieString(this._almacenClave);
+    if (!cadena) return false;
+    this.cookieJar = cadena;
+    this._cookieSincronizada = cadena;
+    return true;
+  }
+
+  /** Guarda la sesión actual en el store compartido, si cambió desde la última vez. */
+  async guardarEnAlmacen() {
+    if (!this._almacenActivo() || !this.cookieJar || this.cookieJar === this._cookieSincronizada) return;
+    await require('./SiiPortalAuth').guardarCookieString(this._almacenClave, this.cookieJar);
+    this._cookieSincronizada = this.cookieJar;
+  }
+
+  /** Borra la sesión del store compartido (por ejemplo tras cerrar sesión). */
+  async borrarDeAlmacen() {
+    if (!this._almacenActivo()) return;
+    await require('./SiiPortalAuth').olvidarSesion(this._almacenClave);
+    this._cookieSincronizada = '';
   }
 
   /**
@@ -362,6 +422,7 @@ class SiiSession {
       } catch (_) {}
     }
     this.cookieJar = '';
+    await this.borrarDeAlmacen();
   }
 
   /**
@@ -416,6 +477,19 @@ class SiiSession {
    * @returns {Promise<Object>}
    */
   async ensureSession(targetPath) {
+    // Con un store compartido configurado, un solo llamador a la vez por certificado (aunque
+    // sea de otra réplica) y la sesión se reutiliza en vez de abrir otra con el SII.
+    if (!this._almacenActivo()) return this._ensureSessionInterno(targetPath);
+    return require('./SiiPortalAuth').conSesionDe(this._almacenClave, async () => {
+      if (!this.cookieJar) await this.cargarDeAlmacen();
+      const respuesta = await this._ensureSessionInterno(targetPath);
+      await this.guardarEnAlmacen();
+      return respuesta;
+    });
+  }
+
+  /** @private */
+  async _ensureSessionInterno(targetPath) {
     const targetUrl = `https://${this.baseHost}${targetPath}`;
     let response = await this.request(targetUrl, { method: 'GET' });
     
