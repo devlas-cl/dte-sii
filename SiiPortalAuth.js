@@ -849,23 +849,39 @@ class SiiPortalAuth {
   }
 
   /**
+   * Host de ad_empresa según el ambiente: `maullin` (certificación) o `palena` (producción).
+   * @private
+   */
+  static _hostAdEmpresa(ambiente) {
+    if (ambiente === 'produccion') return 'palena.sii.cl';
+    if (ambiente === 'certificacion' || ambiente == null) return 'maullin.sii.cl';
+    throw new TypeError(`SiiPortalAuth: ambiente inválido "${ambiente}" (certificacion | produccion)`);
+  }
+
+  /**
    * Obtiene datos del contribuyente desde ad_empresa2.
    * Incluye fch_resol, nro_resol, razón social, etc.
    *
    * @param {string} rutEmpresa - RUT sin DV (ej: "12345678")
    * @param {string} dvEmpresa  - DV (ej: "K")
    * @param {Object} [cookieJar] - Sesión ya autenticada (opcional; si omite, autenticará)
+   * @param {'certificacion'|'produccion'} [ambiente='certificacion'] - De qué ambiente leer la
+   *   resolución. La fecha y el número de resolución son POR AMBIENTE: maullin (certificación) y
+   *   palena (producción) devuelven valores distintos para el mismo RUT (medido 25/09/2026:
+   *   2026-09-21 / 0 en maullin y 2014-08-22 / 80 en palena). Usar la de certificación en un
+   *   envío de producción hace que el SII rechace el sobre con "Error en Carátula".
    * @returns {Promise<Object>} { rut, razonSocial, fch_resol, nro_resol, fecha_autorizacion }
    */
-  async obtenerDatosEmpresa(rutEmpresa, dvEmpresa, cookieJar = null) {
+  async obtenerDatosEmpresa(rutEmpresa, dvEmpresa, cookieJar = null, ambiente = 'certificacion') {
     const jar = cookieJar || await this.autenticar();
+    const host = SiiPortalAuth._hostAdEmpresa(ambiente);
 
-    // ad_empresa1 → mostrar el form de ingreso de RUT (obtiene cookie de sesión maullin)
-    await this._request('https://maullin.sii.cl/cvc_cgi/dte/ad_empresa1', { cookieJar: jar });
+    // ad_empresa1 → mostrar el form de ingreso de RUT (obtiene cookie de sesión del host)
+    await this._request(`https://${host}/cvc_cgi/dte/ad_empresa1`, { cookieJar: jar });
 
     // ad_empresa2 → POST con RUT empresa → devuelve tabla con datos
     const res = await this._request(
-      'https://maullin.sii.cl/cvc_cgi/dte/ad_empresa2',
+      `https://${host}/cvc_cgi/dte/ad_empresa2`,
       {
         method: 'POST',
         body: `RUT_EMP=${encodeURIComponent(rutEmpresa)}&DV_EMP=${encodeURIComponent(dvEmpresa)}&ACEPTAR=Ingresar`,
@@ -885,10 +901,10 @@ class SiiPortalAuth {
    * @param {string} dvEmpresa  - DV (ej: "K")
    * @returns {Promise<Object>} Datos completos del emisor
    */
-  async fetchDatosEmpresa(rutEmpresa, dvEmpresa) {
+  async fetchDatosEmpresa(rutEmpresa, dvEmpresa, ambiente = 'certificacion') {
     const cookieJar = await this.autenticar();
     const [resolucion, contribuyente] = await Promise.all([
-      this.obtenerDatosEmpresa(rutEmpresa, dvEmpresa, cookieJar),
+      this.obtenerDatosEmpresa(rutEmpresa, dvEmpresa, cookieJar, ambiente),
       this.obtenerDatosContribuyente(rutEmpresa, dvEmpresa, cookieJar).catch(() => null),
     ]);
     return { ...contribuyente, ...resolucion };
@@ -1518,18 +1534,20 @@ class SiiPortalAuth {
    * @param {string} [opts.rutEmpresa] - RUT de la empresa (acepta puntos). Si no se
    *   pasa, se intenta deducir de las cookies del portal tras autenticar.
    * @param {Function} [opts.onAviso] - Callback para avisos no fatales (default: console.warn).
+   * @param {'certificacion'|'produccion'} [opts.ambiente='certificacion'] - Ambiente del que se lee
+   *   la resolución (ver `obtenerDatosEmpresa`).
    * @returns {Promise<{ emisor: Object, cookieJar: Object }>}
    * @throws Si no puede autenticar, si el RUT es inválido o si faltan datos de resolución.
    */
-  static async obtenerEmisor({ pfxBuffer, pfxPassword = '', rutEmpresa = '', onAviso } = {}) {
+  static async obtenerEmisor({ pfxBuffer, pfxPassword = '', rutEmpresa = '', onAviso, ambiente = 'certificacion' } = {}) {
     const auth = new SiiPortalAuth({ pfxBuffer, pfxPassword });
     // Bajo el lock del certificado: sin esto, N llamadas simultáneas (o de varias réplicas)
     // abrían N sesiones de portal en vez de una.
-    return auth.conSesion(() => SiiPortalAuth._obtenerEmisorConSesion(auth, { rutEmpresa, onAviso }));
+    return auth.conSesion(() => SiiPortalAuth._obtenerEmisorConSesion(auth, { rutEmpresa, onAviso, ambiente }));
   }
 
   /** @private */
-  static async _obtenerEmisorConSesion(auth, { rutEmpresa, onAviso }) {
+  static async _obtenerEmisorConSesion(auth, { rutEmpresa, onAviso, ambiente }) {
     const aviso = onAviso || ((msg) => console.warn(msg));
 
     // Se resuelve antes de autenticar para poder reintentar con sesión fresca.
@@ -1569,7 +1587,7 @@ class SiiPortalAuth {
     let datosResol, datosContrib;
     for (let intento = 1; intento <= 2; intento++) {
       try {
-        datosResol = await auth.obtenerDatosEmpresa(rutNum, dv, cookieJar);
+        datosResol = await auth.obtenerDatosEmpresa(rutNum, dv, cookieJar, ambiente);
         datosContrib = await auth.obtenerDatosContribuyente(rutNum, dv, cookieJar).catch((e) => {
           aviso(`[SiiPortalAuth] obtenerDatosContribuyente falló (no crítico): ${e.message}`);
           return null;

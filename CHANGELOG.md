@@ -8,6 +8,25 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.28.0] - 2026-09-26
+
+### Corregido
+
+- **La resolución de producción se leía de certificación.** `SiiPortalAuth.obtenerDatosEmpresa` consultaba
+  siempre `maullin.sii.cl`, pero la fecha y el número de resolución son POR AMBIENTE: para el mismo RUT
+  maullin devuelve `2026-09-21` / `0` y palena `2014-08-22` / `80` (medido el 25/09/2026). Un consumidor
+  que guardaba ese dato como "resolución de producción" enviaba facturas y notas de crédito con la
+  carátula de certificación y el SII las rechazaba con "Error en Carátula".
+
+### Agregado
+
+- `obtenerDatosEmpresa(rut, dv, cookieJar, ambiente)`, `fetchDatosEmpresa(rut, dv, ambiente)` y
+  `SiiPortalAuth.obtenerEmisor({ ..., ambiente })` aceptan `'certificacion'` (default, maullin) o
+  `'produccion'` (palena). Compatible: sin ambiente todo sigue leyendo maullin. Un ambiente desconocido
+  lanza `TypeError`.
+- Los datos del contribuyente (`obtenerDatosContribuyente`: giro, dirección, comuna, acteco) siguen
+  saliendo de maullin: palena no devuelve esa página y son los mismos datos en ambos ambientes.
+
 ## [2.27.0] - 2026-09-25
 
 ### Agregado (estado compartido entre réplicas)
