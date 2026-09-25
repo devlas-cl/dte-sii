@@ -180,7 +180,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Un CAF consumido no se reusa aunque exista otra copia del archivo
 // ─────────────────────────────────────────────────────────────────────────────
-{
+async function bloqueCafConsumido() {
   const fs   = require('fs');
   const os   = require('os');
   const path = require('path');
@@ -212,7 +212,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
   runner.folioHelper = { usedFolios: new Map() };
 
   // ENVIAR_SETS emite con la copia B.
-  runner._marcarCafsConsumidos({ 33: copiaB });
+  await runner._marcarCafsConsumidos({ 33: copiaB });
   assert.ok(fs.existsSync(`${copiaB}.usado`), 'la copia usada queda marcada en disco');
   assert.ok(!fs.existsSync(`${copiaA}.usado`), 'la otra copia NO tiene marcador propio');
 
@@ -223,7 +223,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
   const conFolioService = (fn) => Object.defineProperty(runner, 'folioService',
     { value: { findLatestCaf: fn, listarCafs: (t) => [fn(t)].filter(Boolean) }, configurable: true });
   conFolioService(() => copiaA);
-  assert.strictEqual(runner._cafReusable(33, 1), null,
+  assert.strictEqual(await runner._cafReusable(33, 1), null,
     'un CAF ya emitido no se reusa aunque la copia encontrada no tenga marcador: '
     + 'el folio se identifica por (RUT, tipo, rango), no por la ruta del archivo');
 
@@ -231,7 +231,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
   const otro = path.join(dirA, 'otro.xml');
   fs.writeFileSync(otro, xml.replace('<D>4523</D><H>4526</H>', '<D>9000</D><H>9003</H>'));
   conFolioService(() => otro);
-  assert.ok(runner._cafReusable(33, 1), 'un rango sin emitir sigue siendo reusable');
+  assert.ok(await runner._cafReusable(33, 1), 'un rango sin emitir sigue siendo reusable');
 
   fs.rmSync(raiz, { recursive: true, force: true });
   console.log('✓ CAF consumido: no se reusa ni desde otra copia del mismo archivo');
@@ -244,7 +244,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
 // nuevos: los 3 anteriores quedan timbrados sin usar y el SII los cuenta EN CONTRA del
 // cupo, o sea que el reintento empeora el bloqueo. Medido el 19/08/2026 en el RUT
 // 76543210-K (MAX_AUTOR=3 para 4 folios, FOLIOS_DISP=0).
-{
+async function bloqueCafParciales() {
   const fs   = require('fs');
   const os   = require('os');
   const path = require('path');
@@ -278,11 +278,11 @@ function emitirSets(helper, { limpiarEntreSets }) {
     configurable: true,
   });
 
-  const solo = runner._cafReusable(33, 3);
+  const solo = await runner._cafReusable(33, 3);
   assert.strictEqual(solo.paths.length, 1, 'para 3 folios alcanza con la tanda de 3');
   assert.strictEqual(solo.alcanza, true);
 
-  const juntos = runner._cafReusable(33, 4);
+  const juntos = await runner._cafReusable(33, 4);
   assert.strictEqual(juntos.alcanza, true, 'dos CAF parciales que suman 4 cubren un plan de 4');
   assert.strictEqual(juntos.paths.length, 2, 'se devuelven los dos CAF, no solo el último');
   assert.strictEqual(juntos.desde, 100, 'el rango arranca en el folio más bajo');
@@ -291,7 +291,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
   // Si no alcanzan, igual se devuelven: al SII se le pide solo la diferencia. Pedir el
   // total de nuevo desperdiciaría estos folios y subiría FOLIOS_DISP, que es lo que
   // aprieta el tope.
-  const corto = runner._cafReusable(33, 5);
+  const corto = await runner._cafReusable(33, 5);
   assert.strictEqual(corto.alcanza, false, 'se avisa que no cubren el plan completo');
   assert.strictEqual(corto.total, 4, 'pero se informa cuánto aportan');
 
@@ -304,7 +304,7 @@ function emitirSets(helper, { limpiarEntreSets }) {
     value: { listarCafs: () => [tanda1, copiaDeTanda1] },
     configurable: true,
   });
-  const duplicado = runner._cafReusable(33, 4);
+  const duplicado = await runner._cafReusable(33, 4);
   assert.strictEqual(duplicado.total, 3, 'dos copias del mismo rango son 3 folios, no 6');
   assert.strictEqual(duplicado.alcanza, false, 'y por lo tanto no cubren un plan de 4');
   assert.strictEqual(duplicado.paths.length, 1, 'se entrega una sola copia, no las dos');
@@ -365,6 +365,8 @@ function emitirSets(helper, { limpiarEntreSets }) {
 // y, tres líneas después, la reobtención trajo esos mismos folios del portal. Los 7
 // documentos del tipo 61 del envío fueron rechazados.
 (async () => {
+  await bloqueCafConsumido();
+  await bloqueCafParciales();
   const FolioService = require('../FolioService');
 
   const svc = Object.create(FolioService.prototype);

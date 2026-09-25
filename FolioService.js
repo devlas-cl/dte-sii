@@ -395,9 +395,12 @@ class FolioService {
     // Por eso el llamador puede pasar `yaEmitido`: es el mismo registro con el que descarta
     // los CAF de disco (`CertRunner._rangoYaConsumido`), aplicado también acá. Sin ese dato
     // la reobtención no puede saberlo, porque el SII no lo publica.
-    const emitidos = yaEmitido
-      ? rangos.filter(r => yaEmitido({ folioDesde: r.folioDesde, folioHasta: r.folioHasta }))
+    // `yaEmitido` puede ser síncrono o devolver una promesa (el registro puede vivir en un
+    // StateStore remoto).
+    const marcas = yaEmitido
+      ? await Promise.all(rangos.map(r => yaEmitido({ folioDesde: r.folioDesde, folioHasta: r.folioHasta })))
       : [];
+    const emitidos = rangos.filter((_, i) => marcas[i]);
     const emitidosSet = new Set(emitidos);
     const usables = rangos.filter(r => !r.anulado && !emitidosSet.has(r));
     const anulados = rangos.filter(r => r.anulado).length;
@@ -856,7 +859,7 @@ class FolioService {
     const vistos     = new Set(); // claves "folioDesde-folioHasta" ya procesadas en esta ejecución
     // Rangos que el SII ya reportó como anulados en corridas anteriores: se
     // saltan de entrada para no gastar el cupo de `maxRangos` en reintentos
-    // que solo pueden volver a fallar. Ver `_anuladosPath`.
+    // que solo pueden volver a fallar. Ver `_anuladosClave`.
     const yaAnulados = await this._cargarAnulados(tipoDte);
     const yaAnuladosInicial = yaAnulados.size;
 
