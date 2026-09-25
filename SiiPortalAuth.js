@@ -30,7 +30,7 @@ const { URL } = require('url');
 const forge  = require('node-forge');
 const crypto = require('crypto');
 const SiiSessionStore = require('./SiiSessionStore');
-const { MemorySessionLock, SessionBroker } = require('./SiiSessionPorts');
+const { MemorySessionLock, SessionBroker, validarStateStore } = require('./SiiSessionPorts');
 const { resolveDataDir } = require('./utils/paths');
 const { registrarHttpDebug } = require('./utils/httpDebug');
 
@@ -228,6 +228,8 @@ const _almacenArchivo = {
 let _broker = new SessionBroker({ store: _almacenArchivo, lock: new MemorySessionLock() });
 /** true si se inyectó un store distinto del archivo: entonces el archivo local ya no es fuente de verdad. */
 let _almacenPersonalizado = false;
+/** StateStore configurado por el consumidor, o null para usar el archivo de siempre. */
+let _estadoPersonalizado = null;
 
 const _instanceRegistry = new Map();
 
@@ -620,17 +622,33 @@ class SiiPortalAuth {
    * varias réplicas (ver SiiSessionPorts.js). Sin llamarlo, todo sigue como siempre: archivo y
    * mutex en el proceso. Cada puerto es opcional; el que se omite conserva su valor actual.
    *
-   * @param {{ store?: SessionStore, lock?: SessionLock }} puertos
+   * `estado` (StateStore) es el resto del estado que debe verse entre réplicas: folios anulados,
+   * período de libros y folios usados en certificación. Sin él se usan archivos en `stateDir`.
+   *
+   * @param {{ store?: SessionStore, lock?: SessionLock, estado?: StateStore }} puertos
    */
-  static configurarSesion({ store, lock } = {}) {
+  static configurarSesion({ store, lock, estado } = {}) {
+    if (estado !== undefined) validarStateStore(estado, 'SiiPortalAuth.configurarSesion');
     _broker.reconfigurar({ store: store || _broker.store, lock: lock || _broker.lock });
     _almacenPersonalizado = !!store || _almacenPersonalizado;
+    if (estado) _estadoPersonalizado = estado;
+  }
+
+  /** StateStore configurado con `configurarSesion({ estado })`, o null si no hay. */
+  static estadoConfigurado() {
+    return _estadoPersonalizado;
+  }
+
+  /** true si el consumidor configuró su propio SessionStore (por ejemplo Redis). */
+  static almacenPersonalizado() {
+    return _almacenPersonalizado;
   }
 
   /** Vuelve al store de archivo y al mutex en proceso. Útil en tests. */
   static restablecerSesion() {
     _broker.reconfigurar({ store: _almacenArchivo, lock: new MemorySessionLock() });
     _almacenPersonalizado = false;
+    _estadoPersonalizado = null;
   }
 
   /** Lee del store configurado y aplica el TTL en un solo lugar para todos los stores. @private */
@@ -676,6 +694,40 @@ class SiiPortalAuth {
    */
   conSesion(fn) {
     return _broker.withSession(this._certHash, async () => fn(await this.autenticar()));
+  }
+
+  /**
+   * Sesión guardada de un certificado como cadena `k=v; k2=v2`, que es el formato del cookieJar
+   * de SiiSession. La lee del store configurado y aplica el mismo vencimiento que el resto.
+   * @returns {Promise<string|null>}
+   */
+  static async cargarCookieString(certHash) {
+    const cookies = await SiiPortalAuth._cargarSesion(certHash);
+    return cookies ? _cookieObjToStr(cookies) : null;
+  }
+
+  /** Guarda en el store configurado la cookie de una SiiSession (cadena `k=v; k2=v2`). */
+  static async guardarCookieString(certHash, cadena) {
+    if (!cadena) return;
+    await SiiPortalAuth._guardarSesion(certHash, _parseCookieStr(cadena));
+  }
+
+  /** Borra del store configurado la sesión de un certificado. */
+  static async olvidarSesion(certHash) {
+    await SiiPortalAuth._borrarSesion(certHash);
+  }
+
+  /**
+   * Ejecuta `fn` con el lock del certificado (el mismo de `conSesion`), para quien ya tiene la
+   * huella y no una instancia de SiiPortalAuth. Es reentrante por flujo asíncrono.
+   */
+  static conSesionDe(certHash, fn) {
+    return _broker.withSession(certHash, fn);
+  }
+
+  /** Huella con la que se identifica un certificado en el store (SHA1 del PEM, 12 caracteres). */
+  static huellaDeCertPem(certPem) {
+    return crypto.createHash('sha1').update(certPem).digest('hex').slice(0, 12);
   }
 
   /** Descarta la sesión de este certificado (fuerza un login nuevo en el próximo uso). */

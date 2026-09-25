@@ -667,6 +667,13 @@ export class WsReclamo {
 export interface FolioServiceConfig {
   baseDir?: string;
   cafDir?: string;
+  /** Directorio del estado que sobrevive a la corrida (folios anulados). Default: `debugDir`. */
+  stateDir?: string;
+  /**
+   * Dónde vive ese estado. Default: el configurado con `SiiPortalAuth.configurarSesion({ estado })`
+   * o, si no hay, archivos en `stateDir`.
+   */
+  estado?: StateStore;
 }
 
 export interface FolioTope {
@@ -848,6 +855,15 @@ export function resolveCafPath(baseDir: string, tipoDte: number): string | null;
 export class SiiSession {
   constructor(config: object);
   getToken(tipo?: 'soap' | 'rest'): Promise<string>;
+  /**
+   * Carga la sesión guardada en el store compartido configurado con
+   * `SiiPortalAuth.configurarSesion({ store })`. Devuelve false si no hay store o no hay sesión vigente.
+   */
+  cargarDeAlmacen(): Promise<boolean>;
+  /** Guarda la sesión actual en el store compartido, si cambió desde la última vez. */
+  guardarEnAlmacen(): Promise<void>;
+  /** Borra la sesión de este certificado del store compartido. */
+  borrarDeAlmacen(): Promise<void>;
 }
 
 export interface CafSolicitarOptions {
@@ -1307,6 +1323,32 @@ export class MemorySessionStore implements SessionStore {
   load(certHash: string): Promise<{ ts: number; cookies: Record<string, string> } | null>;
   save(certHash: string, cookies: Record<string, string>): Promise<void>;
   remove(certHash?: string): Promise<void>;
+}
+
+/**
+ * Dónde vive el estado que debe sobrevivir entre corridas y verse entre réplicas (folios anulados,
+ * período de libros, folios usados en certificación). Un documento JSON por clave.
+ */
+export interface StateStore {
+  load(clave: string): Promise<unknown | null>;
+  save(clave: string, valor: unknown): Promise<void>;
+  remove(clave: string): Promise<void>;
+}
+
+/** StateStore en memoria del proceso. Copia al guardar y al leer. */
+export class MemoryStateStore implements StateStore {
+  load(clave: string): Promise<unknown | null>;
+  save(clave: string, valor: unknown): Promise<void>;
+  remove(clave: string): Promise<void>;
+}
+
+/** StateStore en archivos: un `<clave>.json` por documento dentro de `dir`. Es el adaptador por defecto. */
+export class FileStateStore implements StateStore {
+  constructor(dir: string);
+  readonly dir: string;
+  load(clave: string): Promise<unknown | null>;
+  save(clave: string, valor: unknown): Promise<void>;
+  remove(clave: string): Promise<void>;
 }
 
 /** Punto único de acceso a la sesión: una por certificado, usada por un llamador a la vez. Reentrante. */

@@ -16,6 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { resolverEstado } = require('../SiiEstado');
 const { resolveArtifactDir } = require('../utils/paths');
 const { registrarHttpDebug } = require('../utils/httpDebug');
 
@@ -55,6 +56,8 @@ const { STEPS, emitProgress } = require('../utils/progress');
  * @property {string} [ambiente='certificacion']
  * @property {string} [debugDir]
  * @property {string} [stateDir] - Estado que persiste entre corridas (periodo-libros, ltc-totales). Default: debugDir.
+ * @property {import('../SiiSessionPorts').StateStore} [estado] - Dónde vive ese estado. Default: el configurado con
+ *   `SiiPortalAuth.configurarSesion({ estado })` o, si no hay, archivos en `stateDir`.
  * @property {string} [sessionPath]
  */
 
@@ -400,34 +403,21 @@ class CertRunner {
    * simulación arma un plan fijo de documentos y muere si falta un folio.
    * @private
    */
-  /**
-   * Registro de rangos de folios ya emitidos, por RUT.
-   *
-   * ⚠️ Va por RANGO y no por ruta de archivo, y eso no es un detalle de implementación.
-   * El mismo CAF se guarda en DOS árboles distintos con el mismo contenido:
-   *
-   *   debug/auto-caf/{rut}/{ts}/{tipo}/archivo.xml
-   *   debug/caf/{ambiente}/{rut}/{tipo}/{ts}/caf-{tipo}-{desde}-{hasta}.xml
-   *
-   * `findLatestCaf` puede devolver cualquiera de las dos. Marcar la copia que se usó deja
-   * la otra intacta, y la etapa siguiente la encuentra "sin usar" y repite los folios.
-   * Pasó el 14/08/2026: ENVIAR_SETS marcó `caf-33-4523-4526.xml` a las 03:53:00 y
-   * SIMULACION reusó `auto-caf/.../33/archivo.xml` a las 03:53:5x — los mismos folios.
-   *
-   * Lo que identifica a un folio es (RUT, tipo, número), no dónde quedó el archivo.
-   * @private
-   */
-  _foliosUsadosPath() {
+  /** Clave del registro de folios consumidos de este emisor en el StateStore. */
+  _foliosUsadosClave() {
     const rutLimpio = String(this.config.emisor.rut || '').replace(/[^0-9kK]/g, '');
-    return path.join(this.stateDir, `folios-usados-${rutLimpio}.json`);
+    return `folios-usados-${rutLimpio}`;
   }
 
-  /** @returns {Record<string, Array<[number, number]>>} rangos consumidos por tipo de DTE */
-  _cargarFoliosUsados() {
+  /** StateStore efectivo: el configurado para el proceso o archivos en `stateDir`. */
+  _estado() {
+    return resolverEstado(this.stateDir, this.config.estado);
+  }
+
+  /** @returns {Promise<Record<string, Array<[number, number]>>>} rangos consumidos por tipo de DTE */
+  async _cargarFoliosUsados() {
     try {
-      const p = this._foliosUsadosPath();
-      if (!fs.existsSync(p)) return {};
-      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      const data = await this._estado().load(this._foliosUsadosClave());
       return (data && typeof data === 'object') ? data : {};
     } catch { return {}; }
   }
@@ -453,8 +443,8 @@ class CertRunner {
    * de más es barato; repetirlo cuesta la etapa entera.
    * @private
    */
-  _marcarCafsConsumidos(cafs) {
-    const registro = this._cargarFoliosUsados();
+  async _marcarCafsConsumidos(cafs) {
+    const registro = await this._cargarFoliosUsados();
     let cambio = false;
 
     for (const ruta of Object.values(cafs || {})) {
@@ -477,20 +467,19 @@ class CertRunner {
 
     if (!cambio) return;
     try {
-      fs.mkdirSync(path.dirname(this._foliosUsadosPath()), { recursive: true });
-      fs.writeFileSync(this._foliosUsadosPath(), JSON.stringify(registro, null, 2), 'utf8');
+      await this._estado().save(this._foliosUsadosClave(), registro);
     } catch (e) {
       console.warn(`[CertRunner] No se pudo guardar el registro de folios usados: ${e.message}`);
     }
   }
 
   /** ¿Algún folio de [desde, hasta] ya se emitió? */
-  _rangoYaConsumido(tipoDte, desde, hasta) {
-    const rangos = this._cargarFoliosUsados()[String(tipoDte)] || [];
+  async _rangoYaConsumido(tipoDte, desde, hasta) {
+    const rangos = (await this._cargarFoliosUsados())[String(tipoDte)] || [];
     return rangos.some(([d, h]) => desde <= h && hasta >= d);
   }
 
-  _cafReusable(tipoDte, cantidad) {
+  async _cafReusable(tipoDte, cantidad) {
     try {
       // ⚠️ Se recorren TODOS los CAF del tipo, no solo el último.
       //
@@ -526,7 +515,7 @@ class CertRunner {
         }
 
         const rango = this._rangoDelCaf(cafPath);
-        if (rango && this._rangoYaConsumido(tipoDte, rango.desde, rango.hasta)) {
+        if (rango && await this._rangoYaConsumido(tipoDte, rango.desde, rango.hasta)) {
           descartes.push(`folios ${rango.desde}-${rango.hasta} ya emitidos (otra copia del mismo CAF)`);
           continue;
         }
@@ -551,7 +540,7 @@ class CertRunner {
         const hasta = caf.getFolioHasta();
         if (!Number.isFinite(desde) || !Number.isFinite(hasta)) continue;
 
-        // El MISMO CAF vive en dos árboles con el mismo contenido (ver _foliosUsadosPath),
+        // El MISMO CAF vive en dos árboles con el mismo contenido (ver _foliosUsadosClave),
         // así que sin deduplicar por rango se contarían dos veces los mismos folios y el
         // set se quedaría sin numeración a mitad de camino.
         const clave = `${desde}-${hasta}`;
@@ -785,7 +774,7 @@ class CertRunner {
       //
       // Reusarlos es seguro: los sets se envían recién cuando TODOS los CAF están en mano,
       // así que si el intento anterior falló, esos folios nunca se emitieron.
-      const previo = this._cafReusable(Number(tipoDte), Number(cantidad));
+      const previo = await this._cafReusable(Number(tipoDte), Number(cantidad));
       if (previo?.alcanza) {
         cafs[tipoDte] = previo.paths.length > 1 ? previo.paths : previo.path;
         emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
@@ -836,7 +825,7 @@ class CertRunner {
           // registro, el mismo con el que se descartan los CAF de disco unas líneas arriba.
           // Sin pasarlo, la reobtención devuelve folios ya recibidos por el SII y todo el
           // envío se rechaza documento por documento.
-          yaEmitido: (r) => this._rangoYaConsumido(Number(tipoDte), r.folioDesde, r.folioHasta),
+          yaEmitido: (r) => this._rangoYaConsumido(Number(tipoDte), r.folioDesde, r.folioHasta), // puede ser asíncrono
         });
         if (reob.ok) {
           // Puede ser más de uno: el SII entrega los folios reobtenidos de a uno y cada
@@ -1030,7 +1019,7 @@ class CertRunner {
     try {
       resultado = await set.ejecutar(setData, cafs);
     } finally {
-      this._marcarCafsConsumidos(cafs);
+      await this._marcarCafsConsumidos(cafs);
     }
     this.resultados[resultadoKey] = resultado;
     return resultado;
@@ -1479,11 +1468,11 @@ class CertRunner {
     // Helper: salta períodos conocidos en QEstLibro (ocupados) al buscar uno libre.
     // Usa el set _ocupados ya construido. Siempre llama a _decrementarPeriodoLibros al menos una vez
     // antes de entrar, así que solo sirve para saltar DESPUÉS de haber decrementado.
-    const _saltarOcupados = (tag = '') => {
+    const _saltarOcupados = async (tag = '') => {
       let _saltos = 0;
-      while (_ocupados.has(this._getPeriodoLibros()) && _saltos < 400) {
-        console.log(` [skip${tag}] ${this._getPeriodoLibros()} está en QEstLibro — saltando...`);
-        this._decrementarPeriodoLibros();
+      while (_ocupados.has(await this._getPeriodoLibros()) && _saltos < 400) {
+        console.log(` [skip${tag}] ${await this._getPeriodoLibros()} está en QEstLibro — saltando...`);
+        await this._decrementarPeriodoLibros();
         _saltos++;
       }
       return _saltos;
@@ -1494,9 +1483,9 @@ class CertRunner {
     // entradas antiguas y saltar sobre ellas lleva a períodos LTC inesperados.
     // Con _ocupados completo (todos los años hasta 1990), el skip inicial es seguro:
     // salta directamente al primer período genuinamente libre.
-    this.resetPeriodoLibros(_periodoBase);
-    const _busquedaHuecos = _saltarOcupados();
-    const _periodoComunLibros = this._getPeriodoLibros();
+    await this.resetPeriodoLibros(_periodoBase);
+    const _busquedaHuecos = await _saltarOcupados();
+    const _periodoComunLibros = await this._getPeriodoLibros();
     console.log(` Período inicial: ${_periodoComunLibros}${_busquedaHuecos > 0 ? ` (saltados ${_busquedaHuecos} períodos ocupados desde ${_periodoBase})` : ''}`);
 
     // Verificar cuáles libros ya están REVISADO CONFORME en el portal (no re-enviar)
@@ -1922,8 +1911,8 @@ class CertRunner {
         const _intentadoAjuste = new Set();
 
         for (let _pRetry = 0; _pRetry < MAX_PERIOD_RETRIES && declaracion.allRejected; _pRetry++) {
-          const _periodoActual = this._getPeriodoLibros();
-          const _tenemoLtc = !!this._leerLtcTotales(_periodoActual, 'COMPRA') || !!this._leerLtcTotales(_periodoActual, 'VENTA');
+          const _periodoActual = await this._getPeriodoLibros();
+          const _tenemoLtc = !!(await this._leerLtcTotales(_periodoActual, 'COMPRA')) || !!(await this._leerLtcTotales(_periodoActual, 'VENTA'));
           const _yaIntentadoAjuste = _intentadoAjuste.has(_periodoActual);
 
           if (_tenemoLtc && !_yaIntentadoAjuste) {
@@ -1934,9 +1923,9 @@ class CertRunner {
           } else {
             // Marcar este período como ocupado dinámicamente y saltar al siguiente libre.
             _ocupados.add(_periodoActual);
-            this._decrementarPeriodoLibros();
-            _saltarOcupados('a'); // salta períodos conocidos (QEstLibro + descubiertos en tiempo real)
-            const _nuevoPeriodo = this._getPeriodoLibros();
+            await this._decrementarPeriodoLibros();
+            await _saltarOcupados('a'); // salta períodos conocidos (QEstLibro + descubiertos en tiempo real)
+            const _nuevoPeriodo = await this._getPeriodoLibros();
             const _razon = _yaIntentadoAjuste ? 'AJUSTE falló' : 'sin LTC local';
             console.log(`\n[!] ${_periodoActual} (${_razon}) — probando TOTAL con ${_nuevoPeriodo} (intento ${_pRetry + 1})...`);
             emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
@@ -2003,14 +1992,15 @@ class CertRunner {
             const _fallidosKeys = _fallidos.map(([k]) => _SII_NOMBRE_A_KEY[k]).filter(Boolean);
             if (_fallidosKeys.length === 0) break; // todos conformes → salir
 
-            const _periodoFase = this._getPeriodoLibros();
+            const _periodoFase = await this._getPeriodoLibros();
             // Solo AJUSTE para libros que tienen su propio LTC guardado.
             // LibroGuias y LibroComprasExentos nunca tienen LTC → van siempre a TOTAL en período nuevo.
             const _LTC_TIPO_POR_LIBRO_B = { libroCompras: 'COMPRA', libroVentas: 'VENTA' };
-            const _hayLtcB = _fallidosKeys.some(k => {
+            let _hayLtcB = false;
+            for (const k of _fallidosKeys) {
               const tipo = _LTC_TIPO_POR_LIBRO_B[k];
-              return tipo && !!this._leerLtcTotales(_periodoFase, tipo);
-            });
+              if (tipo && await this._leerLtcTotales(_periodoFase, tipo)) { _hayLtcB = true; break; }
+            }
             const _yaAjusteB = _intentadoAjusteB.has(_periodoFase);
             const _fallidosNombres = _fallidosKeys.map(k => _KEY_A_SII_NOMBRE[k]).filter(Boolean);
 
@@ -2023,9 +2013,9 @@ class CertRunner {
             } else {
               // Sin LTC o AJUSTE ya intentado → marcar como ocupado y buscar período libre
               _ocupados.add(_periodoFase);
-              this._decrementarPeriodoLibros();
-              _saltarOcupados('b');
-              const _nuevoPeriodo = this._getPeriodoLibros();
+              await this._decrementarPeriodoLibros();
+              await _saltarOcupados('b');
+              const _nuevoPeriodo = await this._getPeriodoLibros();
               const _razonB = _yaAjusteB ? 'AJUSTE falló' : 'sin LTC local';
               console.log(`\n[!] ${_fallidosNombres.join(', ')} (${_razonB}) — probando TOTAL en ${_nuevoPeriodo} (intento ${_pRetry + 1})...`);
               emitProgress(STEPS.BOOK_PERIOD_RETRY, { periodo: _nuevoPeriodo, intento: String(_pRetry + 1) });
@@ -2136,15 +2126,12 @@ class CertRunner {
    * Se guarda el período en un archivo de estado para persistir entre ejecuciones
    * @returns {string} Período en formato YYYY-MM
    */
-  _getPeriodoLibros() {
-    const stateFile = path.join(this.stateDir, 'periodo-libros.json');
-    
+  async _getPeriodoLibros() {
     // Cargar estado existente o crear nuevo
     let state = { periodo: null, lastRun: null };
     try {
-      if (fs.existsSync(stateFile)) {
-        state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-      }
+      const guardado = await this._estado().load('periodo-libros');
+      if (guardado && typeof guardado === 'object') state = guardado;
     } catch (e) {
       // Usar default
     }
@@ -2170,9 +2157,8 @@ class CertRunner {
    * Decrementa el período de libros (llamar cuando falla con LNC)
    * @returns {string} Nuevo período
    */
-  _decrementarPeriodoLibros() {
-    const stateFile = path.join(this.stateDir, 'periodo-libros.json');
-    const currentPeriodo = this._getPeriodoLibros();
+  async _decrementarPeriodoLibros() {
+    const currentPeriodo = await this._getPeriodoLibros();
     
     const [year, month] = currentPeriodo.split('-').map(Number);
     let newMonth = month - 1;
@@ -2192,7 +2178,7 @@ class CertRunner {
     };
     
     try {
-      fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+      await this._estado().save('periodo-libros', state);
       console.log(` Período decrementado: ${currentPeriodo} → ${newPeriodo}`);
     } catch (e) {
       console.warn(` [!] No se pudo guardar período: ${e.message}`);
@@ -2205,12 +2191,11 @@ class CertRunner {
    * Resetea el período de libros a un valor específico
    * @param {string} periodo - Período en formato YYYY-MM
    */
-  resetPeriodoLibros(periodo) {
-    const stateFile = path.join(this.stateDir, 'periodo-libros.json');
+  async resetPeriodoLibros(periodo) {
     const state = { periodo, lastRun: new Date().toISOString() };
     
     try {
-      fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+      await this._estado().save('periodo-libros', state);
       console.log(` Período reseteado a: ${periodo}`);
     } catch (e) {
       console.warn(` [!] No se pudo guardar período: ${e.message}`);
@@ -2224,16 +2209,15 @@ class CertRunner {
    * @param {Array} resumen - Array de totales por TpoDoc (igual estructura que setResumen)
    * @private
    */
-  _guardarLtcTotales(periodo, tipo, resumen) {
-    const ltcFile = path.join(this.stateDir, 'ltc-totales.json');
+  async _guardarLtcTotales(periodo, tipo, resumen) {
     let data = {};
     try {
-      if (fs.existsSync(ltcFile)) data = JSON.parse(fs.readFileSync(ltcFile, 'utf8'));
+      data = (await this._estado().load('ltc-totales')) || {};
     } catch (e) { /* usar vacío */ }
     if (!data[periodo]) data[periodo] = {};
     data[periodo][tipo] = resumen;
     try {
-      fs.writeFileSync(ltcFile, JSON.stringify(data, null, 2));
+      await this._estado().save('ltc-totales', data);
       console.log(` [LTC] Totales guardados: ${periodo}/${tipo} (${resumen.length} tipos doc)`);
     } catch (e) {
       console.warn(` [!] No se pudo guardar ltcTotales: ${e.message}`);
@@ -2247,13 +2231,10 @@ class CertRunner {
    * @returns {Array|null} Array de totales o null si no hay datos
    * @private
    */
-  _leerLtcTotales(periodo, tipo) {
-    const ltcFile = path.join(this.stateDir, 'ltc-totales.json');
+  async _leerLtcTotales(periodo, tipo) {
     try {
-      if (fs.existsSync(ltcFile)) {
-        const data = JSON.parse(fs.readFileSync(ltcFile, 'utf8'));
-        return data[periodo]?.[tipo] || null;
-      }
+      const data = await this._estado().load('ltc-totales');
+      return data?.[periodo]?.[tipo] || null;
     } catch (e) { /* ignorar */ }
     return null;
   }
@@ -2304,7 +2285,7 @@ class CertRunner {
     }
 
     // Usar período pasado por opción (fase4 lo decrementa una vez para todos) o decrementar individualmente
-    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
+    const periodo = options.periodo || (await this._decrementarPeriodoLibros(), await this._getPeriodoLibros());
     console.log(` Generando Libro de Ventas para período ${periodo}...`);
 
     const libroVentas = new LibroVentas({
@@ -2321,7 +2302,7 @@ class CertRunner {
     // Si es AJUSTE, inyectar LTC para que TotalesPeriodo sea acumulado correcto
     const _tipoEnvioVentas = options.tipoEnvio || 'TOTAL';
     if (_tipoEnvioVentas === 'AJUSTE') {
-      const _ltcVentas = this._leerLtcTotales(periodo, 'VENTA');
+      const _ltcVentas = await this._leerLtcTotales(periodo, 'VENTA');
       if (_ltcVentas) {
         libro.setLtcTotales(_ltcVentas);
         libro.generar(); // re-firma con TotalesPeriodo correcto
@@ -2351,7 +2332,7 @@ class CertRunner {
       console.log(` [OK] Libro de Ventas enviado - TrackId: ${result.trackId}`);
       // Persistir totales LTC para futuros AJUSTE de este período
       if (_tipoEnvioVentas === 'TOTAL') {
-        this._guardarLtcTotales(periodo, 'VENTA', resumen);
+        await this._guardarLtcTotales(periodo, 'VENTA', resumen);
       }
     } else {
       console.log(` [ERR] Error enviando Libro de Ventas: ${result.error}`);
@@ -2369,7 +2350,7 @@ class CertRunner {
   async ejecutarLibroCompras(options = {}) {
     const libroComprasData = options.libroComprasData || this._estructuras?.libroCompras;
 
-    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
+    const periodo = options.periodo || (await this._decrementarPeriodoLibros(), await this._getPeriodoLibros());
 
     const libroCompras = new LibroCompras({
       emisor: this.config.emisor,
@@ -2388,7 +2369,7 @@ class CertRunner {
     // Si es AJUSTE, inyectar LTC para que TotalesPeriodo sea acumulado correcto
     const _tipoEnvioCompras = options.tipoEnvio || 'TOTAL';
     if (_tipoEnvioCompras === 'AJUSTE') {
-      const _ltcCompras = this._leerLtcTotales(periodo, 'COMPRA');
+      const _ltcCompras = await this._leerLtcTotales(periodo, 'COMPRA');
       if (_ltcCompras) {
         libro.setLtcTotales(_ltcCompras);
         libro.generar(); // re-firma con TotalesPeriodo correcto
@@ -2418,7 +2399,7 @@ class CertRunner {
       console.log(` [OK] Libro de Compras enviado - TrackId: ${result.trackId}`);
       // Persistir totales LTC para futuros AJUSTE de este período
       if (_tipoEnvioCompras === 'TOTAL') {
-        this._guardarLtcTotales(periodo, 'COMPRA', resumen);
+        await this._guardarLtcTotales(periodo, 'COMPRA', resumen);
       }
     } else {
       console.log(` [ERR] Error enviando Libro de Compras: ${result.error}`);
@@ -2438,7 +2419,7 @@ class CertRunner {
       throw new Error('No hay datos del libro de compras para exentos. El SII no entregó el set LIBRO_COMPRAS_EXENTOS.');
     }
 
-    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
+    const periodo = options.periodo || (await this._decrementarPeriodoLibros(), await this._getPeriodoLibros());
 
     const libroCompras = new LibroCompras({
       emisor: this.config.emisor,
@@ -2489,7 +2470,7 @@ class CertRunner {
       throw new Error('No hay resultado del SetGuia. Ejecutar ejecutarSetGuia() primero.');
     }
 
-    const periodo = options.periodo || (this._decrementarPeriodoLibros(), this._getPeriodoLibros());
+    const periodo = options.periodo || (await this._decrementarPeriodoLibros(), await this._getPeriodoLibros());
     console.log(` Generando Libro de Guías para período ${periodo}...`);
 
     const libroGuias = new LibroGuias({
@@ -2761,7 +2742,7 @@ class CertRunner {
       resultado = await enviador.enviar(envioDte);
     } finally {
       // Mismo criterio que en los sets: los folios de la simulación quedan quemados.
-      this._marcarCafsConsumidos(cafs);
+      await this._marcarCafsConsumidos(cafs);
     }
 
     const result = {

@@ -594,6 +594,33 @@ SiiPortalAuth.limpiarSesionCache()           // borra todas
 > ⚠️ **En un servidor, apunta `DATADIR` a un volumen persistente.** Sin eso el caché vive en el
 > filesystem del contenedor y se pierde en cada redeploy, forzando un re-login de toda la base.
 
+#### Varias réplicas: sesión y estado compartidos
+
+Con un solo proceso basta el archivo y el mutex de siempre. Con varias réplicas hay que compartir
+dos cosas, y cada una tiene su puerto (ver `SiiSessionPorts.js`):
+
+| Puerto | Qué guarda | Adaptadores incluidos |
+|---|---|---|
+| `SessionStore` y `SessionLock` | La sesión del portal por certificado y quién la usa ahora | `MemorySessionStore`, `MemorySessionLock` y, por defecto, archivo y mutex en el proceso |
+| `StateStore` | Folios anulados, período de libros, totales LTC y folios usados en certificación | `MemoryStateStore`, `FileStateStore` (por defecto, en `stateDir`) |
+
+```javascript
+SiiPortalAuth.configurarSesion({ store, lock, estado })  // los tres son opcionales
+SiiPortalAuth.restablecerSesion()                        // vuelve a archivo y mutex en proceso
+```
+
+Con un `SessionStore` configurado, `SiiSession` (y con ella `FolioService`, `CafSolicitor` y
+`SiiCertificacion`) toma el lock del certificado, **reutiliza la sesión guardada en vez de
+autenticarse otra vez** y la guarda al terminar. `SiiSession` y `SiiPortalAuth` identifican el
+certificado con la misma huella, así que hay **una sola sesión por certificado**. No hace falta
+`sessionPath`.
+
+`StateStore` es un almacén de documentos JSON por clave (`load`, `save`, `remove`). Un consumidor
+que no configure nada sigue leyendo y escribiendo los mismos archivos de antes.
+
+> `FolioRegistry` (el control local de folios de `FolioService.getNextFolio`) sigue en archivo: su
+> API es síncrona. Un servicio que lleve ese control en su propia base no lo usa.
+
 #### Reintento ante fallas de red/TLS
 
 `autenticar()` reintenta 3 veces con espera progresiva (1s, 2s, 4s) ante errores de transporte.
