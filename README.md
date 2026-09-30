@@ -6,7 +6,7 @@ Genera, timbra, firma y envía facturas electrónicas, boletas electrónicas, li
 
 > Desarrollada por [Devlas SpA](https://devlas.cl) · Licencia MIT · Node.js >= 18 · CommonJS
 >
-> [Apoyar el proyecto en GitHub Sponsors](https://github.com/sponsors/devlas-cl) si tu empresa usa esta librería.
+> Hecha en Chile, para quienes facturan en Chile. Si te ha sido útil, puedes [apoyar su desarrollo](https://github.com/sponsors/devlas-cl).
 
 ---
 
