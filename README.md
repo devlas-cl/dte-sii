@@ -4,7 +4,7 @@
 
 Genera, timbra, firma y envía facturas electrónicas, boletas electrónicas, libros contables y automatiza el proceso de certificación ante el SII.
 
-> Desarrollada por [Devlas SpA](https://devlas.cl) · Licencia MIT · Node.js >= 18 · CommonJS
+> Desarrollada por [Estudio Devlas](https://devlas.cl), de forma independiente y abierta.
 >
 > Hecha en Chile, para quienes facturan en Chile. Si te ha sido útil, puedes [apoyar su desarrollo](https://github.com/sponsors/devlas-cl).
 
