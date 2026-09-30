@@ -1156,6 +1156,8 @@ hacerlo en [GitHub Sponsors](https://github.com/sponsors/devlas-cl).
 
 El apoyo es voluntario y no da prioridad sobre otros usuarios en el desarrollo.
 
+<!-- sponsors --><!-- sponsors -->
+
 ## Licencia
 
 MIT - Copyright (c) 2026 [Devlas SpA](https://devlas.cl)
