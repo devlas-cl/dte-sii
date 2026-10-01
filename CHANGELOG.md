@@ -8,6 +8,21 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.33.0] - 2026-10-01
+
+### Agregado
+
+- **`descargarRespaldoMipyme` ahora parte por tipo de documento cuando un solo día
+  supera el tope de 20 del SII.** Antes, cuando la bisección por fecha llegaba a un
+  único día con más de `RESPALDO_MAX_DOCS`, se tiraba `"No es divisible por fecha"`
+  y ese día se perdía entero. El request al portal ya mandaba `TPO_DOC` como filtro
+  (nunca usado para trocear), así que ahora, al toparse con un día indivisible, se
+  reintenta contando por cada tipo de documento conocido (33, 34, 46, 56, 61, 52,
+  110, 111, 112) y se baja cada uno por separado. Si algún `(día, tipo)` individual
+  todavía supera el tope (rarísimo), recién ahí se declara el error, y ahora
+  mencionando el tipo específico. Caso real: un comercio con 23 documentos en un
+  mismo día, bloqueado desde el 30/09.
+
 ## [2.32.1] - 2026-10-01
 
 ### Corregido

@@ -1707,10 +1707,11 @@ class SiiPortalAuth {
     };
 
     /** Consulta el listado y devuelve cuántos documentos hay en el rango. */
-    const contar = (d, h) => reintentar(async () => {
+    const contar = (d, h, tipoOverride) => reintentar(async () => {
       const body = new URLSearchParams({
         'recaptcha-response': '', ORIGEN: origen, FEC_DESDE: d, FEC_HASTA: h,
         NUM_PAG: '1', TPO_ARCHIVO: 'dte', ...comunes,
+        ...(tipoOverride !== undefined ? { TPO_DOC: String(tipoOverride) } : {}),
       }).toString();
       const res = await this._request(URL_LISTA, { method: 'POST', cookieJar: jar, body, headers: cabeceras });
       const html = res.body || '';
@@ -1721,29 +1722,56 @@ class SiiPortalAuth {
       if (m) return parseInt(m[1], 10);
 
       throw errorDeRespuestaPortal(html, 'no se pudo leer el total de documentos del listado');
-    }, `listado ${d}..${h}`);
+    }, `listado ${d}..${h}${tipoOverride !== undefined ? ` tipo=${tipoOverride}` : ''}`);
 
     /** Baja el XML de un rango que ya se sabe que cabe en el tope. */
-    const bajar = (d, h) => reintentar(async () => {
-      const qs = new URLSearchParams({ ...comunes, ORIGEN: origen, FEC_DESDE: d, FEC_HASTA: h, DOWNLOAD: 'XML' }).toString();
+    const bajar = (d, h, tipoOverride) => reintentar(async () => {
+      const qs = new URLSearchParams({
+        ...comunes, ORIGEN: origen, FEC_DESDE: d, FEC_HASTA: h, DOWNLOAD: 'XML',
+        ...(tipoOverride !== undefined ? { TPO_DOC: String(tipoOverride) } : {}),
+      }).toString();
       const res = await this._request(`${RESPALDO_BASE}/download.cgi?${qs}`, { cookieJar: jar, headers: { Referer: URL_LISTA } });
       const cuerpo = res.body || '';
       if (cuerpo.trimStart().startsWith('<?xml')) return cuerpo;
       throw errorDeRespuestaPortal(cuerpo, 'la descarga no devolvió XML');
-    }, `descarga ${d}..${h}`);
+    }, `descarga ${d}..${h}${tipoOverride !== undefined ? ` tipo=${tipoOverride}` : ''}`);
 
     // Parte el rango por la mitad hasta que cada tramo quepa en RESPALDO_MAX_DOCS.
     const aDia = (s) => new Date(`${s}T00:00:00Z`);
     const aIso = (x) => x.toISOString().slice(0, 10);
     const tramos = [];
+    // El portal ya acepta TPO_DOC como filtro (`comunes`), pero antes se mandaba
+    // siempre vacío. Cuando un solo día supera el tope y la fecha no da para más,
+    // partir por tipo de documento en vez de rendirse — es raro que un mismo tipo,
+    // en un mismo día, también supere los 20. Lista acotada a los tipos de
+    // compra/recibidos reales (no hace falta boleta 39/41 acá).
+    const TIPOS_DOC_RESPALDO = [33, 34, 46, 56, 61, 52, 110, 111, 112];
     const dividir = async (d, h) => {
       const n = await contar(d, h);
       if (n === 0) return;
       if (n <= RESPALDO_MAX_DOCS) { tramos.push({ desde: d, hasta: h, total: n }); return; }
       const medio = aIso(new Date((aDia(d).getTime() + aDia(h).getTime()) / 2));
       if (medio === h || medio === d) {
-        // Un solo día con más de 20 documentos: el SII no deja bajarlo y no hay cómo partirlo.
-        throw new Error(`El ${d} tiene ${n} documentos y el SII solo permite ${RESPALDO_MAX_DOCS} por descarga. No es divisible por fecha.`);
+        let cubiertos = 0;
+        for (const tipo of TIPOS_DOC_RESPALDO) {
+          const nTipo = await contar(d, h, tipo);
+          if (nTipo === 0) continue;
+          if (nTipo > RESPALDO_MAX_DOCS) {
+            throw new Error(
+              `El ${d} tiene ${nTipo} documentos tipo ${tipo} y el SII solo permite ${RESPALDO_MAX_DOCS} por descarga. No es divisible por fecha ni por tipo.`,
+            );
+          }
+          tramos.push({ desde: d, hasta: d, total: nTipo, tipoDoc: tipo });
+          cubiertos += nTipo;
+        }
+        if (cubiertos < n) {
+          // Documentos de un tipo fuera de la lista conocida: declarado explícito
+          // en vez de perderlos en silencio (el total del portal ya no cuadraría).
+          throw new Error(
+            `El ${d} tiene ${n} documentos pero solo se identificaron ${cubiertos} entre los tipos conocidos (${TIPOS_DOC_RESPALDO.join(',')}).`,
+          );
+        }
+        return;
       }
       const siguiente = aIso(new Date(aDia(medio).getTime() + 86400000));
       await dividir(d, medio);
@@ -1759,7 +1787,7 @@ class SiiPortalAuth {
 
     let total = 0;
     for (const t of tramos) {
-      const xml = await bajar(t.desde, t.hasta);
+      const xml = await bajar(t.desde, t.hasta, t.tipoDoc);
       total += t.total;
       if (onTramo) {
         // Modo streaming: el consumidor persiste y el XML se suelta enseguida. Sin esto, un
