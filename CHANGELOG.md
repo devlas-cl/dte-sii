@@ -8,6 +8,14 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.32.1] - 2026-10-01
+
+### Corregido
+
+- Republicacion de `2.32.0`: el primer intento de publish quedo "staged" en el
+  registro de npm sin completarse (conflicto E409 al reintentar), sin cambios
+  de codigo respecto a `2.32.0`.
+
 ## [2.32.0] - 2026-10-01
 
 ### Corregido
