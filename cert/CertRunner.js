@@ -4428,19 +4428,48 @@ class CertRunner {
         : (estadoActual.estado ?? '(desconocido)');
       return { success: false, pendingSok: true, error: `El SII aún no habilita la declaración: ${legible}. Espere el SOK del set de boleta enviado.` };
     }
-    // Representante legal vigente. Se vuelve a pedir (no se reusa el de
-    // consultarEstadoBoletaPortal) porque autorizarEmpresaBolProd necesita el dato
-    // fresco justo antes de escribir, sin depender de estado interno de otra llamada.
-    const reprResp = await gwtPost(
-      `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|recuperarRepresentantesVigentesUsuariosAutorizados|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|2|5|6|5|${rutNum}|7|`
-    );
-    const reprTableStr = reprResp.substring(reprResp.lastIndexOf(',[') + 1, reprResp.lastIndexOf('],0,7]') + 1);
-    let rutRepreNum = '';
-    try {
-      const reprTable = JSON.parse(reprTableStr);
-      rutRepreNum = reprTable.filter(s => /^\d{7,8}$/.test(s)).pop() || '';
-    } catch {}
-    if (!rutRepreNum) return { success: false, error: 'No se pudo obtener representante vigente (facade CBE)' };
+    // El representante que firma esta autorización es el DUEÑO DE LA SESIÓN
+    // AUTENTICADA (el RUT de la persona cuyo certificado .pfx se está usando),
+    // no "cualquiera de la lista de representantes vigentes" de la empresa.
+    // `recuperarRepresentantesVigentesUsuariosAutorizados` devuelve una tabla
+    // GWT con TODOS los usuarios/representantes autorizados de la empresa —
+    // cuando hay más de uno (más de un socio/administrador enrolado), filtrar
+    // por "cualquier string de 7-8 dígitos" y tomar el ÚLTIMO (`.pop()`) elige
+    // uno cualquiera de la lista, no necesariamente el de la sesión actual. El
+    // SII rechaza la escritura de `autorizarEmpresaBolProd` con un 500 ("The
+    // call failed on the server") cuando el representante indicado no coincide
+    // con el que realmente está autenticado, aunque ese otro RUT sí figure
+    // como representante vigente de la empresa.
+    //
+    // El resto del código YA resuelve esto bien en dos lugares: `_obtenerCookiesSII`
+    // fuerza el login con el MISMO cookieJar en todo el runner, y
+    // `obtenerSetBoletaPortal` (más arriba) cae al fallback de
+    // `cookieJar['NETSCAPE_LIVEWIRE.rut']` cuando su propio regex no matchea
+    // (ver el `(d{1,2})` sin backslash, roto por diseño involuntario, pero el
+    // fallback que dispara resulta ser el correcto). `run-inscripcion-sii.js`
+    // (devlas-cloud-api-node) hace exactamente lo mismo de forma explícita
+    // para el enrolamiento: `cookieJar['NETSCAPE_LIVEWIRE.rutm'] || cookieJar['NETSCAPE_LIVEWIRE.rut']`.
+    // Esta función era la única que no lo hacía.
+    //
+    // Caso real: RUT 77875451-7, dos usuarios autorizados (19244289-3, el del
+    // certificado en uso, y 10469726-7, un segundo socio) — el filtro+pop()
+    // elegía 10469726 consistentemente (4/4 intentos, dos trackId distintos),
+    // y el SII rechazaba la autorización cada vez con el mismo 500.
+    let rutRepreNum =
+      cookieJar['NETSCAPE_LIVEWIRE.rutm'] || cookieJar['NETSCAPE_LIVEWIRE.rut'] || '';
+    if (!rutRepreNum) {
+      // Fallback (sesión sin esas cookies, caso no visto en producción): se
+      // conserva el método viejo como última alternativa antes de fallar.
+      const reprResp = await gwtPost(
+        `7|0|7|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|recuperarRepresentantesVigentesUsuariosAutorizados|java.lang.Integer/3438268394|java.lang.String/2004016611|${dvUp}|1|2|3|4|2|5|6|5|${rutNum}|7|`
+      );
+      const reprTableStr = reprResp.substring(reprResp.lastIndexOf(',[') + 1, reprResp.lastIndexOf('],0,7]') + 1);
+      try {
+        const reprTable = JSON.parse(reprTableStr);
+        rutRepreNum = reprTable.filter(s => /^\d{7,8}$/.test(s)).pop() || '';
+      } catch {}
+    }
+    if (!rutRepreNum) return { success: false, error: 'No se pudo obtener representante vigente (cookies de sesión ni facade CBE)' };
 
     // 3. Obtener datos de postulacion: fchAutorizacion y longCharValue
     const postulResp = await gwtPost(

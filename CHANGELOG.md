@@ -8,6 +8,36 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.32.0] - 2026-10-01
+
+### Corregido
+
+- **`completarDeclaracionBoletaPortal` podia autorizar con el representante equivocado
+  cuando la empresa tiene mas de un usuario enrolado.** El paso final
+  (`autorizarEmpresaBolProd`) necesitaba el RUT del representante que firma la
+  autorizacion, y lo obtenia raspando la tabla de
+  `recuperarRepresentantesVigentesUsuariosAutorizados` con un filtro generico
+  (cualquier string de 7-8 digitos) y tomando el ultimo (`.pop()`). Para una empresa
+  con un solo usuario enrolado eso coincide por casualidad con el correcto; con dos o
+  mas, puede elegir cualquiera de la lista — no necesariamente el dueno de la sesion
+  autenticada (el certificado que se esta usando). El SII rechaza la escritura con un
+  500 generico ("The call failed on the server") cuando el representante indicado no
+  coincide con el autenticado, incluso si ese otro RUT si es un representante vigente
+  de la empresa.
+
+  El resto del codigo ya resolvia esto bien en dos lugares — `obtenerSetBoletaPortal`
+  cae (por un regex roto sin querer) al RUT de la cookie de sesion, y el script de
+  inscripcion de referencia usa esa misma cookie explicitamente — pero
+  `completarDeclaracionBoletaPortal` nunca lo hizo. Ahora usa
+  `cookieJar['NETSCAPE_LIVEWIRE.rutm'] || cookieJar['NETSCAPE_LIVEWIRE.rut']` (el RUT
+  de la sesion autenticada) como fuente primaria, con el scraping de la tabla de
+  representantes como fallback si por algun motivo esas cookies no estan.
+
+  Caso real: empresa con dos usuarios autorizados — el filtro+`pop()` elegia
+  consistentemente (4 de 4 intentos, dos `trackId` de set distintos) al segundo
+  usuario en vez del dueno del certificado en uso, y el SII rechazaba la
+  autorizacion con el mismo 500 cada vez.
+
 ## [2.31.1] - 2026-09-30
 
 ### Agregado
