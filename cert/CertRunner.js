@@ -4451,10 +4451,10 @@ class CertRunner {
     // para el enrolamiento: `cookieJar['NETSCAPE_LIVEWIRE.rutm'] || cookieJar['NETSCAPE_LIVEWIRE.rut']`.
     // Esta función era la única que no lo hacía.
     //
-    // Caso real: RUT 77875451-7, dos usuarios autorizados (19244289-3, el del
-    // certificado en uso, y 10469726-7, un segundo socio) — el filtro+pop()
-    // elegía 10469726 consistentemente (4/4 intentos, dos trackId distintos),
-    // y el SII rechazaba la autorización cada vez con el mismo 500.
+    // Caso real: una empresa con dos usuarios autorizados (el del certificado
+    // en uso y un segundo socio) — el filtro+pop() elegía consistentemente al
+    // segundo (4/4 intentos, dos trackId distintos), y el SII rechazaba la
+    // autorización cada vez con el mismo 500.
     let rutRepreNum =
       cookieJar['NETSCAPE_LIVEWIRE.rutm'] || cookieJar['NETSCAPE_LIVEWIRE.rut'] || '';
     if (!rutRepreNum) {
