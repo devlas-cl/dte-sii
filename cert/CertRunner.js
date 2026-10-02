@@ -599,185 +599,53 @@ class CertRunner {
   }
 
   /**
-   * Solicita CAFs frescos para los tipos especificados
+   * Timbra (o recupera) los CAF que pide el plan, tipo por tipo.
+   *
+   * Orden por tipo, de lo que menos le cuesta al cupo del SII a lo que más:
+   *
+   *   1. Reusar un CAF en disco de un intento anterior que no llegó a emitir.
+   *   2. Reobtener del portal folios ya autorizados. Solo con el timbraje bloqueado o con
+   *      el cupo corto y FOLIOS_DISP > 0 (ver el comentario de ese paso).
+   *   3. Pedir folios: de una si el cupo alcanza, en tandas si el SII raciona.
+   *   4. Anular folios sin usar, solo si lo anterior no alcanzó. Es el último recurso: el
+   *      SII cuenta los anulados de los últimos 6 meses en contra del cupo, y en un RUT de
+   *      certificación eso llevó a los tipos 56 y 61 a bloqueo duro (2026-07-22).
+   *
+   * El tope se consulta por tipo justo antes de decidir, y otra vez después de anular.
+   * Antes se anulaba primero, para todos los tipos, y después se decidía con el tope de
+   * ANTES de anular. Caso real (2026-10-02, tipo 61, 7 folios): la limpieza dejó
+   * FOLIOS_DISP en 0, la decisión siguió viendo FOLIOS_DISP=4, se pidieron los 7 de una y
+   * el SII respondió MAX_AUTOR=4 < 7. Con el tope fresco eso va en tandas, y el mismo caso
+   * medido en maullin pasa en 4 (4, 1, 1, 1).
+   *
    * @param {Object} cafRequired - { 33: 4, 56: 1, 61: 3 }
-   * @returns {Promise<Object>} { 33: cafPath, 56: cafPath, ... }
+   * @returns {Promise<Object>} { 33: cafPath | cafPath[], ... }
    */
   async solicitarCafs(cafRequired) {
     const cafs = {};
-    // Lo que el sondeo vio en ESTA llamada. Se reinicia para no arrastrar el estado del
-    // SII de una corrida anterior: el bloqueo de timbraje se destraba y se vuelve a
-    // trabar, así que un dato viejo mandaría a reobtener cuando ya no hace falta.
-    this._topeConsultado = {};
 
     // Limpiar contadores para nuevos CAFs
     this.folioHelper.counters.clear();
     this.folioHelper.usedFolios.clear();
-    
-    // Limpieza previa de folios timbrados y nunca utilizados.
-    //
-    // Cada corrida de simulación regenera su plan de documentos completo, así que
-    // los folios que quedaron de un intento fallido NO se reutilizan jamás: son
-    // basura garantizada. Pero el SII los cuenta como "disponibles sin utilizar"
-    // (FOLIOS_DISP) y baja el tope de timbraje (MAX_AUTOR) hasta bloquearlo del
-    // todo. Observado 2026-07-22 en un RUT de certificación: 7 intentos fallidos
-    // dejaron 21 folios muertos en los tipos 34 y 52, y llevaron a los tipos 56 y
-    // 61 a bloqueo duro irreversible (sin folios anulables restantes).
-    //
-    // Limpiar ANTES de pedir rompe ese espiral. Es seguro: solo se anulan folios
-    // que el SII reporta como no recepcionados, y los que ya fueron anulados o
-    // usados se rechazan sin efecto.
-    //
-    // Pero se limpia SOLO SI HACE FALTA (ver el sondeo dentro del loop). Hacerlo
-    // siempre era caro y casi nunca útil, y "se rechazan sin efecto" es engañoso: sin
-    // efecto en el SII, sí, pero cada rechazo cuesta requests y minutos de corrida.
-    for (const tipoDte of Object.keys(cafRequired)) {
-      try {
-        // ── ¿Hace falta limpiar? ────────────────────────────────────────────────
-        // Antes esto se ejecutaba SIEMPRE, y casi nunca servía. Medido el 11/08/2026
-        // en una corrida real: 87 intentos de anulación, 0 anulados, todos rechazados
-        // por "ya anulado" — mientras el SII autorizaba 73 folios de factura y solo
-        // hacían falta 4. Minutos de corrida y ~180 requests al SII para nada.
-        //
-        // El sondeo cuesta ~3 requests, no emite nada y responde la única pregunta
-        // que importa: ¿el SII está racionando este tipo?
-        const tope = await this.folioService.consultarTope({ tipoDte: Number(tipoDte) });
-        // Se guarda para el bucle de abajo: ahí se decide si conviene intentar la
-        // reobtención (solo tiene sentido con el timbraje bloqueado) y sondear de nuevo
-        // sería otro viaje al portal para saber algo que ya sabemos.
-        this._topeConsultado = { ...(this._topeConsultado ?? {}), [tipoDte]: tope };
-        const necesarios = cafRequired[tipoDte];
 
-        // `sinTope` = el SII ni siquiera publica MAX_AUTOR, o sea no está limitando
-        // este tipo. Limpiar ahí es puro costo.
-        //
-        // Con tope publicado alcanza con que el cupo CUBRA lo necesario. Antes se exigía
-        // un margen de 3x para "actuar antes de quedar contra la pared", pero medido el
-        // 13/08/2026 (RUT 79888999-0) ese margen disparaba la limpieza teniendo cupo de
-        // sobra —tipo 61 con MAX_AUTOR=6 para 3 folios, tipo 33 con 4 para 4— y en los
-        // tres tipos el resultado fue `0 anulados`: el SII rechazó cada anulación.
-        //
-        // O sea que la limpieza preventiva no compra nada. Y si algún día funcionara sería
-        // peor: el SII cuenta los folios anulados de los últimos 6 meses EN CONTRA del cupo
-        // (ver el comentario largo más abajo), así que anular de más acerca el bloqueo en
-        // vez de alejarlo. Se limpia solo cuando el cupo realmente no da.
-        // `bloqueado` gana sobre todo lo demás: el SII no autoriza nada para este tipo y
-        // no publica MAX_AUTOR, así que sin este chequeo `sinTope` daba true y se saltaba
-        // la limpieza — que es lo único que puede destrabarlo.
-        const holgado = !tope.bloqueado
-          && (tope.sinTope || (tope.maxAutor !== null && tope.maxAutor >= necesarios));
-        if (holgado) {
-          console.log(
-            ` Tipo ${tipoDte}: sin limpieza previa — ` +
-            (tope.sinTope
-              ? 'el SII no está racionando este tipo'
-              : `MAX_AUTOR=${tope.maxAutor} para ${necesarios} folio(s) necesarios`)
-          );
-          continue;
-        }
+    for (const [tipoKey, cantidadPedida] of Object.entries(cafRequired)) {
+      const tipoDte = Number(tipoKey);
+      const cantidad = Number(cantidadPedida);
+      emitProgress(STEPS.CAF_REQUESTING, { tipo: tipoDte });
 
-        // ── Cupo corto pero nada que limpiar ────────────────────────────────────
-        //
-        // FOLIOS_DISP es, textual en el formulario del SII, "considerando el timbraje
-        // histórico de documentos y de los documentos emitidos y/o anulados, la empresa
-        // posee folios disponibles o sin utilizar, por un total de N". O sea:
-        // timbrados - emitidos - anulados. Y anulable es exactamente ese conjunto: la
-        // página de anulación aclara que solo acepta "folios que no han sido
-        // recepcionados por el SII".
-        //
-        // Con N=0 la limpieza no puede anular nada, pero igual se intentaba, porque los
-        // candidatos NO salen de ahí: `consultarFolios` los saca del listado de
-        // TIMBRAJES (af_anular2), que lista los rangos autorizados sin decir si se usaron.
-        // Medido el 19/08/2026 (RUT 76543210-K): MAX_AUTOR=3 para 4 folios con
-        // FOLIOS_DISP=0, y la corrida gastó 43 de sus 70 requests intentando anular
-        // folios ya emitidos, uno por uno, para terminar con "0 anulados" y un error que
-        // además decía lo contrario de lo que pasaba ("el SII tiene bloqueado el
-        // timbraje", cuando el SII estaba autorizando 3).
-        //
-        // ⚠️ `=== 0` estricto, nunca `!foliosDisp`: con el timbraje BLOQUEADO el SII no
-        // publica el campo y queda `null` (ver FolioService.consultarTope), y ese caso
-        // sí necesita la limpieza, que es lo único que puede destrabarlo.
-        if (tope.foliosDisp === 0) {
-          console.log(
-            ` Tipo ${tipoDte}: sin limpieza previa — MAX_AUTOR=${tope.maxAutor} para ` +
-            `${necesarios} folio(s), pero FOLIOS_DISP=0: no hay folios sin utilizar que ` +
-            'anular ni recuperar. El tope lo fija el SII por historial, se pedirá en tandas.'
-          );
-          continue;
-        }
-        // Un solo mensaje según el motivo: con el timbraje bloqueado el SII no publica
-        // MAX_AUTOR ni FOLIOS_DISP, así que el texto de racionamiento saldría con `null`
-        // en los dos números y confundiría a quien lea el log.
-        console.warn(
-          tope.bloqueado
-            ? `[CertRunner] Tipo ${tipoDte}: el SII tiene el timbraje BLOQUEADO para este tipo ` +
-              `(no autoriza folios nuevos) — limpiando folios sin usar antes de pedir...`
-            : `[CertRunner] Tipo ${tipoDte}: MAX_AUTOR=${tope.maxAutor} ajustado para ${necesarios} ` +
-              `folio(s) (FOLIOS_DISP=${tope.foliosDisp}) — limpiando folios sin usar...`
-        );
-
-        // ACOTADA a propósito. Sin corte por antigüedad la limpieza barre el historial
-        // completo de la empresa: en un RUT con volumen real eso son cientos de
-        // anulaciones contra el SII y, peor, el SII cuenta los folios anulados de los
-        // últimos 6 meses EN CONTRA del cupo de timbraje — la limpieza terminaría
-        // provocando el bloqueo que intenta evitar. Verificado 2026-07-22: sin acotar
-        // anuló 296 folios de un RUT (rango 1851–2909) antes de detenerla a mano.
-        //
-        // Pero la ventana no puede ser la misma en los dos ambientes:
-        //
-        //   producción  — el historial son documentos reales del comercio. Anular ahí es
-        //                 destructivo y el riesgo de arriba es el que manda: 1 día.
-        //   maullin     — TODO el historial es de pruebas, propias o de corridas viejas.
-        //                 Con 1 día quedaba un callejón sin salida: los folios que
-        //                 bloquean el timbraje suelen ser de semanas atrás, el filtro los
-        //                 descartaba antes de intentarlos, y la corrida se quedaba
-        //                 reintentando para siempre contra algo que nunca iba a cambiar.
-        //                 Caso real (14/08/2026, RUT 76543210-K): tipo 56 bloqueado por
-        //                 folios del 22-07, seis intentos idénticos, cero anulados.
-        //
-        // Ojo: esto es el ÚLTIMO recurso. Antes de llegar acá se intenta reusar el CAF
-        // previo (ver _cafReusable), que resuelve el mismo bloqueo sin anular nada y sin
-        // gastar el cupo de timbraje. Anular es para cuando el folio quedó autorizado
-        // pero su CAF ya no está en disco.
-        const DIAS_LIMPIEZA = this.ambiente === 'produccion' ? 1 : 180;
-        const limpieza = await this.folioService.anularFolios({
-          tipoDte: Number(tipoDte),
-          soloUltimosDias: DIAS_LIMPIEZA,
-          maxRangos: 10,
-        });
-        if (limpieza.totalAnulados > 0) {
-          console.log(
-            ` Tipo ${tipoDte}: ${limpieza.totalAnulados} folio(s) sin usar de intentos previos anulados`
-          );
-        }
-      } catch (err) {
-        // No es fatal: si la limpieza falla, la solicitud de abajo igual puede
-        // funcionar, y si no, solicitarCafExacto reintenta anulando.
-        console.warn(`[CertRunner] Limpieza previa tipo ${tipoDte} falló: ${err.message}`);
-      }
-    }
-
-    for (const [tipoDte, cantidad] of Object.entries(cafRequired)) {
-      emitProgress(STEPS.CAF_REQUESTING, { tipo: Number(tipoDte) });
-
-      // ── ¿Ya tenemos folios de un intento anterior? ──────────────────────────
+      // ── 1. ¿Ya tenemos folios de un intento anterior? ───────────────────────
       //
-      // Cuando una etapa falla DESPUÉS de haber timbrado algunos tipos (típico: se cae en
-      // el último y se pierde todo), el reintento volvía a pedir todo de cero. Los folios
-      // del intento anterior quedaban timbrados y sin usar, y el SII cuenta exactamente eso
-      // para negar el timbraje: "usted tiene disponible una cantidad de folios suficiente".
-      //
-      // O sea que cada reintento empeoraba el bloqueo que intentaba superar. Medido el
-      // 14/08/2026 (RUT 76543210-K): 6 reintentos de ENVIAR_SETS quemaron 66 folios
-      // —tipos 33, 34, 46 y 52, seis rangos cada uno— sin emitir un solo documento,
-      // mientras el tipo 56 seguía bloqueado.
+      // Cuando una etapa falla DESPUÉS de haber timbrado algunos tipos, el reintento volvía
+      // a pedir todo de cero. Los folios del intento anterior quedaban timbrados y sin usar,
+      // y el SII cuenta exactamente eso para negar el timbraje. Medido el 14/08/2026 (RUT
+      // 76543210-K): 6 reintentos de ENVIAR_SETS quemaron 66 folios sin emitir un documento.
       //
       // Reusarlos es seguro: los sets se envían recién cuando TODOS los CAF están en mano,
       // así que si el intento anterior falló, esos folios nunca se emitieron.
-      const previo = await this._cafReusable(Number(tipoDte), Number(cantidad));
+      const previo = await this._cafReusable(tipoDte, cantidad);
       if (previo?.alcanza) {
-        cafs[tipoDte] = previo.paths.length > 1 ? previo.paths : previo.path;
-        emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
+        cafs[tipoKey] = previo.paths.length > 1 ? previo.paths : previo.path;
+        emitProgress(STEPS.CAF_OK, { tipo: tipoDte });
         console.log(
           ` ✓ CAF tipo ${tipoDte} reusado del intento anterior (folios ${previo.desde}-${previo.hasta}` +
           `${previo.paths.length > 1 ? `, ${previo.paths.length} CAF` : ''})`
@@ -786,53 +654,36 @@ class CertRunner {
       }
 
       console.log(` Tipo ${tipoDte}: ${cantidad} folios...`);
+      // Cuesta ~3 requests y no emite nada. Si falla se sigue sin tope: se pide de una y,
+      // si el SII dice que no alcanza, `_pedirFolios` cae a tandas con el tope que devuelva.
+      let tope = await this._consultarTopeCaf(tipoDte);
 
-      // ── Con el timbraje bloqueado, recuperar antes que pedir ────────────────
+      // ── 2. Con el timbraje bloqueado, recuperar antes que pedir ─────────────
       //
       // El SII bloquea el timbraje cuando el contribuyente ya tiene folios sin usar, y su
       // propio mensaje da la salida: "debe emitir y enviar documentos electrónicos al SII
-      // o anular folios". Emitir es lo que levanta el bloqueo; anular lo AGRAVA, porque
-      // los folios anulados pesan 6 meses en contra del cupo.
+      // o anular folios". Emitir es lo que levanta el bloqueo; anular lo AGRAVA. Para
+      // emitir hace falta el CAF de esos folios, y la reobtención lo devuelve sin gastar
+      // cupo.
       //
-      // Para emitir hace falta el CAF de esos folios, y la reobtención del portal lo
-      // devuelve sin gastar cupo. Por eso va acá: después de reusar lo que hay en disco y
-      // antes de `solicitarCafExacto`, que pide folios nuevos y, si falla, anula.
-      //
-      // ── Cuándo reobtener: solo si NO se pueden pedir folios nuevos ──────────
-      //
-      // La reobtención es el último recurso antes de anular, no un atajo para ahorrar
-      // cupo, porque tiene un riesgo que pedir folios nuevos no tiene: el listado del
-      // portal **no marca los folios ya emitidos**, y emitir de nuevo con uno hace que el
-      // SII rechace el documento con `(DTE-3-101) Folio ... ya fue recibido en el SII`.
-      //
-      // El filtro `yaEmitido` de abajo tapa lo que sabemos, pero no alcanza solo: el
-      // registro local puede estar incompleto (corridas viejas, disco efímero). Medido el
-      // 24/08/2026: de los folios reobtenidos del tipo 61, los rangos 1-3 y 10 sí estaban
-      // registrados, pero el 4-6 no, y el SII también lo tenía. Los 7 documentos del envío
-      // fueron rechazados.
-      //
-      // Por eso vuelve a exigirse que el cupo NO alcance: con timbraje bloqueado (el SII no
-      // publica MAX_AUTOR y queda `null`) o con un tope racionado por debajo de lo que hace
-      // falta. Con cupo holgado —el caso de esa corrida, MAX_AUTOR=19 para 7 folios— se
-      // piden folios nuevos, que es la vía sin riesgo.
-      const topeTipo = this._topeConsultado?.[tipoDte];
-      const cupoAlcanza = topeTipo?.sinTope === true
-        || (topeTipo?.maxAutor != null && topeTipo.maxAutor >= Number(cantidad));
-      if (topeTipo?.bloqueado || (!cupoAlcanza && (topeTipo?.foliosDisp ?? 0) > 0)) {
+      // Pero solo si el cupo NO alcanza: el listado del portal no marca los folios ya
+      // emitidos, y emitir de nuevo con uno hace que el SII rechace el documento con
+      // `(DTE-3-101) Folio ... ya fue recibido en el SII`. El filtro `yaEmitido` tapa lo que
+      // sabemos, pero el registro local puede estar incompleto (medido el 24/08/2026: los 7
+      // documentos de un envío rechazados así). Con cupo holgado se piden folios nuevos,
+      // que es la vía sin riesgo. Con FOLIOS_DISP=0 no hay nada que reobtener.
+      if (tope && (tope.bloqueado || (!this._cupoAlcanza(tope, cantidad) && (tope.foliosDisp ?? 0) > 0))) {
         const reob = await this.folioService.reobtenerCaf({
-          tipoDte: Number(tipoDte), cantidad: Number(cantidad),
+          tipoDte, cantidad,
           // El portal lista folios ya emitidos sin marcarlos: el único que lo sabe es este
-          // registro, el mismo con el que se descartan los CAF de disco unas líneas arriba.
-          // Sin pasarlo, la reobtención devuelve folios ya recibidos por el SII y todo el
-          // envío se rechaza documento por documento.
-          yaEmitido: (r) => this._rangoYaConsumido(Number(tipoDte), r.folioDesde, r.folioHasta), // puede ser asíncrono
+          // registro, el mismo con el que se descartan los CAF de disco en _cafReusable.
+          yaEmitido: (r) => this._rangoYaConsumido(tipoDte, r.folioDesde, r.folioHasta), // puede ser asíncrono
         });
         if (reob.ok) {
           // Puede ser más de uno: el SII entrega los folios reobtenidos de a uno y cada
-          // CAF firma con su propia llave, así que se pasan todos y el set toma de cada
-          // uno según el folio (ver SetBase._tomarFolio).
-          cafs[tipoDte] = reob.cafPaths.length > 1 ? reob.cafPaths : reob.cafPaths[0];
-          emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
+          // CAF firma con su propia llave (ver SetBase._tomarFolio).
+          cafs[tipoKey] = reob.cafPaths.length > 1 ? reob.cafPaths : reob.cafPaths[0];
+          emitProgress(STEPS.CAF_OK, { tipo: tipoDte });
           console.log(
             ` ✓ CAF tipo ${tipoDte} recuperado del SII: ${reob.cafPaths.length} CAF ` +
             `de folios ya autorizados, sin gastar cupo`
@@ -842,62 +693,50 @@ class CertRunner {
         console.warn(`[CertRunner] Tipo ${tipoDte}: reobtención no sirvió — ${reob.motivo}`);
       }
 
-      // ── Cómo pedir: de una o en tandas ──────────────────────────────────────
+      // ── 3. Pedir folios ──────────────────────────────────────────────────────
       //
-      // `solicitarCafExacto` exige que UN CAF cubra la cantidad y, si no, anula folios
-      // sin utilizar y reintenta. Eso es lo correcto cuando el cupo está corto POR esos
-      // folios (FOLIOS_DISP > 0) y cuando el timbraje está bloqueado.
-      //
-      // Con FOLIOS_DISP=0 no aplica: no hay nada que anular ni que reobtener, el tope lo
-      // fija el SII por historial y no se mueve esperando (medido: 24 h con el mismo
-      // MAX_AUTOR=3 para 4 folios, RUT 76543210-K). Ahí la única vía es juntar el rango
-      // en varios timbrajes, que los sets soportan de fábrica porque `_tomarFolio` acepta
-      // una lista de CAF y salta al siguiente cuando se agota un rango.
-      const racionadoPorHistorial =
-        topeTipo?.foliosDisp === 0 &&
-        topeTipo?.maxAutor != null &&
-        topeTipo.maxAutor < Number(cantidad);
-
-      // Folios que ya están en disco pero no alcanzaban solos. En el camino normal se
-      // ignoran (se pide un rango que cubra todo y estos quedan para después), pero acá
-      // son la mitad del asunto: si el intento anterior alcanzó a timbrar 3 de 4, pedir
-      // los 4 de nuevo desperdicia esos 3 y encima sube FOLIOS_DISP, que es lo que aprieta
-      // el tope. Se cuentan como cubiertos y al SII se le pide solo la diferencia.
-      const parciales = racionadoPorHistorial && previo && !previo.alcanza ? previo : null;
-      const faltante = Number(cantidad) - (parciales?.total ?? 0);
-      if (parciales) {
+      // Los folios que ya están en disco pero no alcanzaban solos cuentan como cubiertos y
+      // al SII se le pide solo la diferencia. Pedir el total de nuevo desperdicia esos
+      // folios y encima sube FOLIOS_DISP, que es lo que aprieta el tope. Van primero en la
+      // lista: el set numera de menor a mayor y gastar lo más viejo baja FOLIOS_DISP antes.
+      const enMano = previo && !previo.alcanza ? [...previo.paths] : [];
+      let cubiertos = previo && !previo.alcanza ? previo.total : 0;
+      if (cubiertos > 0) {
         console.log(
-          ` Tipo ${tipoDte}: ${parciales.total} folio(s) ya timbrados en disco ` +
-          `(${parciales.desde}-${parciales.hasta}) — se pedirán ${faltante} al SII`
+          ` Tipo ${tipoDte}: ${cubiertos} folio(s) ya timbrados en disco ` +
+          `(${previo.desde}-${previo.hasta}) — se pedirán ${cantidad - cubiertos} al SII`
         );
       }
 
-      const res = racionadoPorHistorial
-        ? await this.folioService.solicitarCafPorTandas({
-            tipoDte: Number(tipoDte),
-            cantidad: faltante,
-            topeInicial: topeTipo,
-          })
-        : await this.folioService.solicitarCafExacto({
-            tipoDte: Number(tipoDte),
-            cantidad: Number(cantidad),
-          });
+      let res = await this._pedirFolios(tipoDte, cantidad - cubiertos, tope);
+      enMano.push(...res.cafPaths);
+      cubiertos += res.otorgados;
 
-      if (!res.ok) {
+      // ── 4. Anular, solo como último recurso ─────────────────────────────────
+      if (cubiertos < cantidad && this._convieneAnular(res, cubiertos)) {
+        const anulados = await this._anularSinUsar(tipoDte, cantidad, res, enMano);
+        if (anulados > 0) {
+          // Anular cambia FOLIOS_DISP y MAX_AUTOR: decidir con el tope de antes es el bug
+          // que describe el comentario de esta función.
+          tope = await this._consultarTopeCaf(tipoDte);
+          res = await this._pedirFolios(tipoDte, cantidad - cubiertos, tope);
+          enMano.push(...res.cafPaths);
+          cubiertos += res.otorgados;
+        }
+      }
+
+      if (cubiertos < cantidad) {
         const detalle = [
           res.maxAutor != null ? `MAX_AUTOR=${res.maxAutor}` : null,
           res.foliosDisp != null ? `FOLIOS_DISP=${res.foliosDisp}` : null,
         ].filter(Boolean).join(', ');
-        // Dos causas con remedios opuestos. Antes las dos salían con el mismo texto, y en
-        // el caso de abajo el mensaje mandaba a anular folios que no existen: el 19/08/2026
-        // un comercio recibió "el SII tiene bloqueado el timbraje" mientras el SII le
-        // estaba autorizando 3 folios y no tenía ni uno sin utilizar.
+        // Dos causas con remedios opuestos. Con FOLIOS_DISP=0 no hay nada que anular ni
+        // recuperar; mandar a anular ahí es culpar a folios que no existen (19/08/2026).
         const remedio = res.foliosDisp === 0
           ? 'No hay folios sin utilizar que anular ni recuperar: el tope lo fija el SII ' +
             'según el historial de timbraje y emisión de este tipo de documento.'
           : 'El SII limita el timbraje cuando hay folios ya autorizados sin utilizar; ' +
             'emite o anula documentos electrónicos de este tipo y reintenta.';
-        const cubiertos = res.otorgados + (parciales?.total ?? 0);
         throw new Error(
           `Folios insuficientes para tipo ${tipoDte}: se requieren ${cantidad} y hay ` +
           `${cubiertos}${detalle ? ` (${detalle})` : ''}. ${remedio} ` +
@@ -905,22 +744,148 @@ class CertRunner {
         );
       }
 
-      // `solicitarCafPorTandas` devuelve varios; `solicitarCafExacto`, uno solo. Los
-      // parciales van primero: el set numera de menor a mayor y son los folios más viejos,
-      // así que gastarlos antes es también lo que baja FOLIOS_DISP más rápido.
-      const rutas = [
-        ...(parciales?.paths ?? []),
-        ...(res.cafPaths ?? (res.cafPath ? [res.cafPath] : [])),
-      ];
-      cafs[tipoDte] = rutas.length > 1 ? rutas : rutas[0];
-      emitProgress(STEPS.CAF_OK, { tipo: Number(tipoDte) });
+      cafs[tipoKey] = enMano.length > 1 ? enMano : enMano[0];
+      emitProgress(STEPS.CAF_OK, { tipo: tipoDte });
       console.log(
-        ` ✓ CAF tipo ${tipoDte} (${res.otorgados + (parciales?.total ?? 0)} folios` +
-        `${rutas.length > 1 ? ` en ${rutas.length} CAF` : ''})`
+        ` ✓ CAF tipo ${tipoDte} (${cubiertos} folios` +
+        `${enMano.length > 1 ? ` en ${enMano.length} CAF` : ''})`
       );
     }
-    
+
     return cafs;
+  }
+
+  /** Tope de timbraje del SII para un tipo, o `null` si el sondeo falló. @private */
+  async _consultarTopeCaf(tipoDte) {
+    try {
+      const tope = await this.folioService.consultarTope({ tipoDte });
+      console.log(
+        ` Tipo ${tipoDte}: ` +
+        (tope.bloqueado
+          ? 'timbraje BLOQUEADO por el SII'
+          : tope.sinTope
+            ? 'el SII no está racionando este tipo'
+            : `MAX_AUTOR=${tope.maxAutor}, FOLIOS_DISP=${tope.foliosDisp ?? 'sin dato'}`)
+      );
+      return tope;
+    } catch (err) {
+      console.warn(`[CertRunner] Tipo ${tipoDte}: no se pudo consultar el tope: ${err.message}`);
+      return null;
+    }
+  }
+
+  /** ¿El cupo publicado cubre `cantidad` folios de una sola vez? @private */
+  _cupoAlcanza(tope, cantidad) {
+    if (!tope || tope.bloqueado) return false;
+    return tope.sinTope === true || (tope.maxAutor != null && tope.maxAutor >= cantidad);
+  }
+
+  /**
+   * Pide `faltante` folios nuevos al SII, de una o en tandas según el tope.
+   * Nunca anula: eso lo decide `solicitarCafs` como último paso.
+   *
+   * @returns {Promise<{ok, cafPaths: string[], otorgados, maxAutor, foliosDisp, errorCode?, error?}>}
+   * @private
+   */
+  async _pedirFolios(tipoDte, faltante, tope) {
+    if (faltante <= 0) {
+      return { ok: true, cafPaths: [], otorgados: 0, maxAutor: tope?.maxAutor ?? null, foliosDisp: tope?.foliosDisp ?? null };
+    }
+    if (tope?.bloqueado) {
+      return {
+        ok: false, cafPaths: [], otorgados: 0, maxAutor: null, foliosDisp: null,
+        errorCode: 'TIMBRAJE_BLOQUEADO',
+        error: `El SII tiene bloqueado el timbraje del tipo ${tipoDte}.`,
+      };
+    }
+
+    // Con el tope por debajo de lo que falta, se junta el rango en varios timbrajes: los
+    // sets lo soportan porque `_tomarFolio` acepta una lista de CAF y salta al siguiente
+    // cuando se agota un rango.
+    //
+    // `maxTandas = faltante`: el piso del SII es MAX_AUTOR=1 y cada tanda pide al menos un
+    // folio, así que nunca hacen falta más; y si una tanda no entrega nada, se corta. Con
+    // el default de 4 el caso medido del tipo 61 (7 folios, 4+1+1+1) pasaba justo, y
+    // cualquier variación lo dejaba corto.
+    const tandas = (cantidad, topeInicial) => this.folioService.solicitarCafPorTandas({
+      tipoDte, cantidad, topeInicial, maxTandas: Math.max(1, cantidad),
+    });
+
+    if (tope && !tope.sinTope && tope.maxAutor != null && tope.maxAutor < faltante) {
+      return tandas(faltante, tope);
+    }
+
+    const r = await this.folioService.solicitarCafExacto({ tipoDte, cantidad: faltante, permitirAnular: false });
+    if (r.ok) return { ...r, cafPaths: [r.cafPath], otorgados: r.otorgados };
+
+    // El SII entregó menos que lo pedido, o el tope cambió entre el sondeo y el pedido (o
+    // el sondeo falló): lo que falte se completa en tandas, con el tope del momento.
+    const parcial = r.cafPath && r.otorgados > 0 ? [r.cafPath] : [];
+    const otorgados = parcial.length ? r.otorgados : 0;
+    if (['MAX_AUTOR_INSUFICIENTE', 'FOLIOS_INSUFICIENTES'].includes(r.errorCode) && (r.maxAutor == null || r.maxAutor > 0)) {
+      const resto = await tandas(faltante - otorgados, null);
+      return { ...resto, cafPaths: [...parcial, ...resto.cafPaths], otorgados: otorgados + resto.otorgados };
+    }
+    return { ...r, cafPaths: parcial, otorgados };
+  }
+
+  /**
+   * ¿Anular puede destrabar el timbraje? Solo si el SII cortó por tope o bloqueo y hay
+   * folios sin utilizar que no son los que ya tenemos en mano (FOLIOS_DISP también cuenta
+   * los recién timbrados en tandas). Con el timbraje bloqueado el SII no publica
+   * FOLIOS_DISP (`null`), y ese caso sí hay que intentarlo.
+   * @private
+   */
+  _convieneAnular(res, enManoFolios) {
+    const porTope = ['MAX_AUTOR_INSUFICIENTE', 'TIMBRAJE_BLOQUEADO', 'TOPE_SII_INSUFICIENTE'].includes(res.errorCode);
+    if (!porTope) return false;
+    return res.foliosDisp == null || res.foliosDisp > enManoFolios;
+  }
+
+  /**
+   * Anula folios sin usar de este tipo, excepto los de CAF que están en disco o en mano.
+   *
+   * ACOTADA a propósito. Sin corte por antigüedad barre el historial completo de la empresa
+   * (verificado 2026-07-22: 296 folios anulados de un RUT antes de detenerla a mano), y el
+   * SII cuenta los anulados en contra del cupo. La ventana depende del ambiente:
+   *
+   *   producción  el historial son documentos reales del comercio: 1 día.
+   *   maullin     todo es de pruebas, y los folios que bloquean suelen ser de semanas
+   *               atrás (14/08/2026, RUT 76543210-K: tipo 56 bloqueado por folios del
+   *               22-07, seis intentos idénticos con 1 día, cero anulados): 180 días.
+   *
+   * @returns {Promise<number>} folios anulados
+   * @private
+   */
+  async _anularSinUsar(tipoDte, cantidad, res, enMano) {
+    const rutas = new Set(enMano);
+    try {
+      for (const p of (this.folioService.listarCafs?.(tipoDte) ?? [])) rutas.add(p);
+    } catch { /* sin listado, se excluye solo lo que está en mano */ }
+    const excluir = [...rutas]
+      .map((p) => this._rangoDelCaf(p))
+      .filter(Boolean)
+      .map((r) => [r.desde, r.hasta]);
+
+    console.warn(
+      res.errorCode === 'TIMBRAJE_BLOQUEADO'
+        ? `[CertRunner] Tipo ${tipoDte}: el SII tiene el timbraje BLOQUEADO — anulando folios sin usar (último recurso)...`
+        : `[CertRunner] Tipo ${tipoDte}: el SII no autorizó los ${cantidad} folios (MAX_AUTOR=${res.maxAutor}, ` +
+          `FOLIOS_DISP=${res.foliosDisp}) — anulando folios sin usar (último recurso)...`
+    );
+    try {
+      const limpieza = await this.folioService.anularFolios({
+        tipoDte,
+        soloUltimosDias: this.ambiente === 'produccion' ? 1 : 180,
+        maxRangos: 10,
+        excluir,
+      });
+      console.log(` Tipo ${tipoDte}: ${limpieza.totalAnulados} folio(s) sin usar anulados`);
+      return limpieza.totalAnulados || 0;
+    } catch (err) {
+      console.warn(`[CertRunner] Tipo ${tipoDte}: la anulación falló: ${err.message}`);
+      return 0;
+    }
   }
 
   /**
