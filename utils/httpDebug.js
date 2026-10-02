@@ -34,6 +34,37 @@ const MAX_BYTES = 512 * 1024;
 const _contadores = new Map();
 
 /**
+ * Identificador de ESTE proceso (pid + momento de arranque). Va en cada línea del índice para poder
+ * distinguir de qué proceso viene una llamada cuando varios procesos o réplicas capturan en
+ * paralelo, o cuando un mismo directorio sobrevive a varios arranques.
+ */
+const ID_PROCESO = `${process.pid}-${Date.now().toString(36)}`;
+
+/**
+ * Prefijo opcional para el nombre de cada archivo (`SII_HTTP_DEBUG_PREFIJO`).
+ *
+ * El contador `NNN` es por proceso y se reinicia en cada arranque, así que dos arranques (o dos
+ * réplicas que escriben en un mismo almacén) generan los mismos nombres y se sobrescriben. Con un
+ * prefijo distinto por proceso o réplica los nombres no colisionan. Sin definirlo, los nombres son
+ * los de siempre. Solo admite letras, números, punto, guion y guion bajo.
+ */
+function prefijoArchivo() {
+  const p = process.env.SII_HTTP_DEBUG_PREFIJO;
+  if (!p) return '';
+  const limpio = String(p).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40);
+  return limpio ? `${limpio}-` : '';
+}
+
+/**
+ * ¿La llamada se considera fallida? Estado HTTP 400 o superior, o sin estado (error de red).
+ * El índice lo registra como `fallo` para que quien lo procese pueda separar lo que conviene
+ * conservar más tiempo sin abrir cada archivo.
+ */
+function esFallo(status) {
+  return !(Number(status) >= 100 && Number(status) < 400);
+}
+
+/**
  * Cabeceras que nunca se escriben en claro.
  * `set-cookie` y `cookie` llevan la sesión viva del SII (~90 min de validez): quedaría
  * una credencial usable en disco. `authorization` por el mismo motivo.
@@ -120,7 +151,7 @@ function registrarHttpDebug(info = {}) {
 
     const { url = '', method = 'GET', status = 0, headers, body, reqBody, ms, cliente } = info;
     const n = _siguienteNumero(dir);
-    const nombre = `${n}-${method.toUpperCase()}-${_slugDesdeUrl(url)}-${status}.html`;
+    const nombre = `${prefijoArchivo()}${n}-${method.toUpperCase()}-${_slugDesdeUrl(url)}-${status}.html`;
 
     let cuerpo = redactarCuerpo(body) ?? '';
     let truncado = false;
@@ -165,6 +196,8 @@ function registrarHttpDebug(info = {}) {
         method: method.toUpperCase(),
         url,
         status,
+        fallo: esFallo(status),
+        proceso: ID_PROCESO,
         ms: ms ?? null,
         cliente: cliente ?? null,
         bytes: Buffer.byteLength(String(body ?? ''), 'utf-8'),
@@ -232,6 +265,10 @@ module.exports = {
   redactarCuerpo,
   redactarHeaders,
   dirActivo,
+  esFallo,
+  ID_PROCESO,
+  /** Solo para tests: simula un arranque nuevo (el contador `NNN` vuelve a empezar). */
+  _reiniciarContadoresParaTest: () => _contadores.clear(),
   REDACTADO,
   MAX_BYTES,
 };

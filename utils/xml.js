@@ -268,6 +268,11 @@ function saveEnvioArtifacts({
   error,
   baseDir,
 }) {
+  // Un consumidor que ya guarda el XML enviado y la respuesta por su cuenta (por ejemplo en su base
+  // de datos) puede desactivar esta copia con `SII_ARCHIVAR_ENVIOS=0` (o `false`), para no tener
+  // el mismo dato guardado dos veces. Sin definirla se archiva como siempre.
+  if (/^(0|false|no|off)$/i.test(String(process.env.SII_ARCHIVAR_ENVIOS ?? ''))) return;
+
   try {
     const fs = require('fs');
     const path = require('path');

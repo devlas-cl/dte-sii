@@ -8,6 +8,58 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Agregado
+
+- **Artefactos de la certificación entre etapas: `hidratarArtefactos`, `volcarArtefactos` y el puerto
+  `ArtefactosStore`.** La certificación es una cadena de etapas que se pasan archivos por disco; si cada
+  etapa corre en un proceso o una réplica distinta, o el disco no persiste entre despliegues, se
+  pierden. Antes de cada etapa se hidrata un directorio temporal desde un almacén y, al terminar, se
+  vuelca lo nuevo o cambiado, sin tocar el runner. La librería no sabe dónde viven los datos (cada
+  consumidor aporta su almacén) ni qué archivos conservar (`aceptar` es obligatorio al volcar). Preserva
+  la fecha de modificación de archivos y carpetas (hay flujos que eligen la corrida más reciente por
+  mtime), nunca escribe fuera del directorio de trabajo aunque el almacén devuelva claves hostiles, y
+  solo guarda texto (`.xml` y `.json` por defecto, 4 MB por archivo). `transformar` y `restaurar`
+  permiten guardarlo cifrado. Incluye `MemoryArtefactosStore` como referencia. Aditivo: no cambia
+  ningún comportamiento existente.
+- **Captura HTTP: `SII_HTTP_DEBUG_PREFIJO`, y los campos `fallo` y `proceso` en el índice.** El
+  contador `NNN` del nombre de cada archivo es por proceso y se reinicia en cada arranque, así que
+  dos arranques o dos réplicas que escriben en un mismo almacén generaban los mismos nombres y se
+  sobrescribían. Con `SII_HTTP_DEBUG_PREFIJO` (valor distinto por proceso o réplica, saneado a letras,
+  números, punto, guion y guion bajo) los nombres no colisionan. Cada línea de `index.jsonl` suma
+  `fallo` (estado 400 o superior, o sin estado) y `proceso` (pid y momento de arranque), para poder
+  clasificar sin abrir los HTML. Sin la variable los nombres son los de siempre, y los campos nuevos
+  no afectan a quien lea el índice.
+- **`SII_ARCHIVAR_ENVIOS=0` evita el archivo de envíos.** `saveEnvioArtifacts` guarda, tras cada
+  envío, una copia del XML y de la respuesta en `historicos/` y otra de depuración en `debug/`. Un
+  consumidor que ya guarda ese dato por su cuenta puede desactivar la copia con la variable (también
+  `false`, `no` u `off`). Sin definirla el comportamiento no cambia.
+
+### Documentación
+
+- **`obtenerDetalleDtes()`: limitaciones documentadas, sin cambio de comportamiento.** Consulta el
+  sistema `consemitidosinternetui`, que nunca indexó boletas (39 y 41), así que devuelve 0
+  boletas aunque el SII las haya aceptado, y no es el RCV oficial (`consdcvinternetui`), que se
+  consulta con `obtenerResumenRegistro()` y sí incluye las boletas, agregadas por mes. Se agrega el
+  JSDoc con las limitaciones y una tabla "RCV del portal: qué función usar para cada caso" en el
+  README. No se marca como obsoleta: es la única vía de listado por documento que no requiere
+  captcha (los métodos de detalle de `consdcvinternetui` exigen reCAPTCHA v3).
+
+### Corregido
+
+- **`SiiPortalAuth.autenticar()` ahora toma el lock del certificado.** Los métodos del portal
+  (`obtenerDetalleDtes`, `obtenerResumenRegistro`, `obtenerDetalleDocumentoCompra`, ...) llaman a
+  `this.autenticar()` directamente, y esa función no tomaba el lock: solo lo tomaban `conSesion()`
+  y `SiiSession.ensureSession()`. Con la sesión vacía (arranque en frío o vencimiento del TTL), dos
+  llamadores concurrentes abrían dos sesiones contra el SII, y con varias réplicas uno de los
+  logins podía fallar. Medido contra el portal con un certificado de pruebas, 3 procesos
+  simultáneos y un store compartido: 3 logins y 1 falló sin el cambio, 1 login con él. Ahora el
+  "cargar o iniciar sesión" corre bajo `conSesionDe(certHash, ...)`, que ya es reentrante, así que
+  `conSesion()` y las llamadas anidadas no se bloquean a sí mismas. Con la configuración por
+  defecto (mutex en el proceso) también evita el login doble entre llamadas concurrentes de un
+  mismo proceso. No cambia ninguna firma. Efecto a tener en cuenta: las llamadas concurrentes al
+  portal con el mismo certificado ahora se turnan para validar la sesión (una consulta corta por
+  llamada) en vez de validarla todas a la vez.
+
 ## [2.33.0] - 2026-10-01
 
 ### Agregado

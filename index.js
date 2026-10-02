@@ -38,6 +38,7 @@ const CertFolioHelper = require('./cert/CertFolioHelper');
 // WS Aceptación/Reclamo DTE (v2.9.0)
 const WsReclamo = require('./WsReclamo');
 const { MemorySessionLock, MemorySessionStore, SessionBroker, MemoryStateStore, FileStateStore } = require('./SiiSessionPorts');
+const { hidratar: hidratarArtefactos, volcar: volcarArtefactos, MemoryArtefactosStore } = require('./utils/artefactos');
 
 const utils = require('./utils');
 
@@ -259,6 +260,13 @@ module.exports = {
   MemoryStateStore,
   FileStateStore,
   SessionBroker,
+
+  // ─────────────────────────────────────────
+  // Artefactos de certificación entre etapas: puerto de almacén + hidratar/volcar
+  // ─────────────────────────────────────────
+  hidratarArtefactos,
+  volcarArtefactos,
+  MemoryArtefactosStore,
 
   // ─────────────────────────────────────────
   // UTILIDADES (todo el namespace)

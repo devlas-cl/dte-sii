@@ -658,6 +658,33 @@ const resp = await session.request('GET', 'https://herculesr.sii.cl/...')
 
 ---
 
+## RCV del portal: qué función usar para cada caso
+
+El portal del SII expone el Registro de Compras y Ventas por servicios distintos, y cada uno
+entrega cosas diferentes. Ninguno reemplaza a los otros:
+
+| Necesito | Función | Servicio del portal |
+|---|---|---|
+| Listar cada documento del período (folio, fecha, montos), sin boletas | `obtenerDetalleDtes()` | `consemitidosinternetui` |
+| Totales oficiales por tipo de documento, incluidas las boletas (agregadas por mes), y estado contable | `obtenerResumenRegistro()` | `consdcvinternetui` |
+| Clasificación de un documento de compra y cambio de su tipo de compra | `obtenerDetalleDocumentoCompra()` y relacionadas | `complementoscvui` |
+| XML completo del documento (ítems, referencias, TED) | `descargarRespaldoMipyme()` | Respaldo MIPYME |
+
+Puntos a tener en cuenta:
+
+- `obtenerDetalleDtes()` **no ve boletas**: consulta un sistema del SII que nunca las indexó. Si la
+  usa para verificar boletas obtendrá 0 aunque el SII las haya aceptado. Use
+  `obtenerResumenRegistro()`.
+- `obtenerResumenRegistro()` entrega **totales por tipo de documento, no documentos individuales**.
+  Su detalle por documento (`getDetalleCompra`, `getDetalleVenta`) exige reCAPTCHA v3 y esta
+  librería no lo automatiza.
+- Por eso `obtenerDetalleDtes()` sigue siendo la única vía de listado por documento sin captcha.
+  No está obsoleta, tiene esa limitación.
+- Solo `obtenerDetalleDtes()` informa el evento del receptor (`dehOrdenEvento`: 2 acuse de recibo,
+  3 aceptación, 4 reclamo). No se verificó si `consdcvinternetui` entrega un equivalente.
+
+---
+
 ## Descargar el XML completo desde el portal (Respaldo MIPYME)
 
 `descargarRespaldoMipyme()` baja el **XML firmado completo** de los DTE emitidos o recibidos
@@ -1049,6 +1076,48 @@ const { CertFolioHelper } = require('@devlas/dte-sii')
 
 ---
 
+## Artefactos de la certificación entre etapas
+
+La certificación es una cadena de etapas que se pasan archivos por disco (estructuras, resultados,
+XML de los envíos). Si cada etapa corre en un proceso o una réplica distinta, o el disco no persiste
+entre despliegues, esos archivos se pierden. Para eso están `hidratarArtefactos` y `volcarArtefactos`:
+antes de cada etapa se **hidrata** un directorio temporal desde un almacén y, al terminar, se **vuelca**
+lo nuevo o cambiado. El runner de la etapa no cambia: sigue leyendo y escribiendo archivos.
+
+```js
+const { hidratarArtefactos, volcarArtefactos } = require('@devlas/dte-sii')
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cert-'))
+const previos = await hidratarArtefactos({ store: miAlmacen, dir })
+
+// ... corre la etapa con `dir` como directorio de trabajo ...
+
+await volcarArtefactos({
+  store: miAlmacen,
+  dir,
+  previos,
+  aceptar: (clave) => !clave.startsWith('http/'), // qué archivos vale la pena conservar
+})
+```
+
+La librería no sabe dónde viven los datos: define el puerto `ArtefactosStore` (`listar`, `leer`,
+`escribir` y opcionalmente `borrar`) y cada consumidor aporta el suyo (una tabla de base de datos,
+Redis, S3). `MemoryArtefactosStore` sirve de referencia y para tests.
+
+Puntos a tener en cuenta:
+
+- **Se preserva la fecha de modificación** de archivos y carpetas. Hay flujos que eligen "la corrida
+  más reciente" por mtime; si al hidratar todo quedara con la hora de hoy, se perdería el orden.
+- **Nunca se escribe fuera del directorio de trabajo**, aunque el almacén devuelva claves con `..`,
+  rutas absolutas o barras invertidas.
+- Solo se guarda texto: `.xml` y `.json` por defecto (`extensiones`), con un tope de 4 MB por archivo
+  (`maxBytes`). Los archivos que superan el tope o no cumplen se informan en `omitidos`.
+- `aceptar` es obligatorio al volcar: la librería no decide por ti qué archivos conservar.
+- `transformar` y `restaurar` permiten guardar el contenido cifrado (por ejemplo, un archivo con
+  cookies de sesión) y recuperarlo.
+
+---
+
 ## Depuración: captura de llamadas al SII
 
 Cuando el SII rechaza algo, el motivo viene en el HTML o el XML que devuelve, y sin ese
@@ -1085,6 +1154,29 @@ material sensible y púrgalo.
 
 Para dirigir la captura por etapa, redefine la variable antes de cada bloque: se lee en cada
 llamada, no una sola vez al cargar el módulo.
+
+### Varios procesos o réplicas, y el índice
+
+Cada línea de `index.jsonl` trae, además de la URL, el estado y la duración:
+
+- `fallo`: `true` si el estado HTTP es 400 o superior, o si no hubo estado (error de red). Permite
+  separar lo que conviene conservar más tiempo sin abrir cada archivo.
+- `proceso`: identificador del proceso que hizo la llamada (pid y momento de arranque).
+
+El contador `NNN` del nombre de archivo es por proceso y vuelve a empezar en cada arranque, así
+que dos arranques, o dos réplicas que escriben en un mismo almacén, generan los mismos nombres y se
+sobrescriben. Para evitarlo, define `SII_HTTP_DEBUG_PREFIJO` con un valor distinto por proceso o
+réplica (por ejemplo su nombre): los archivos pasan a llamarse `<prefijo>-001-POST-DTEUpload-200.html`.
+Solo se aceptan letras, números, punto, guion y guion bajo. Sin definirla, los nombres son los de
+siempre.
+
+### Archivo de envíos
+
+Cuando se envía un documento, la librería también guarda una copia del XML enviado y de la respuesta
+(`historicos/<rut>/dte-<tipo>/<fecha>/<trackId>/` y una copia de depuración en `debug/`). Si tu
+aplicación ya conserva el XML y la respuesta por su cuenta, por ejemplo en su base de datos, puedes
+evitar tener el mismo dato dos veces con `SII_ARCHIVAR_ENVIOS=0` (también `false`, `no` u `off`). Sin
+definirla se archiva como siempre. Con esa opción la captura HTTP sigue registrando el intercambio.
 
 ---
 

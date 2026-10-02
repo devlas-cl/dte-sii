@@ -444,10 +444,24 @@ class SiiPortalAuth {
    * Autenticar con certificado en el portal SII y obtener cookies de sesión.
    * Retorna el cookieJar con NETSCAPE_LIVEWIRE.* si tuvo éxito.
    *
+   * Toma el lock del certificado mientras carga o inicia la sesión, así que dos llamadores
+   * concurrentes (del mismo proceso o de otra réplica, según el `SessionLock` configurado) no
+   * abren dos sesiones: el segundo espera y reutiliza la que dejó el primero. Es reentrante, por
+   * lo que no se bloquea a sí mismo dentro de `conSesion`.
+   *
    * @returns {Promise<Object>} cookieJar con sesión SII activa
    * @throws {Error} Si la autenticación falla
    */
   async autenticar() {
+    return _broker.withSession(this._certHash, () => this._autenticarSinLock());
+  }
+
+  /**
+   * Cuerpo de `autenticar()`: reutiliza la sesión guardada si sigue vigente y, si no, inicia una
+   * nueva. Se llama siempre con el lock del certificado ya tomado.
+   * @private
+   */
+  async _autenticarSinLock() {
     // ── 1a. Store compartido (cubre sesiones de CafSolicitor/SiiSession) ────────
     const storedStr = SiiSessionStore.get(this._certHash);
     if (storedStr) {
@@ -1158,7 +1172,22 @@ class SiiPortalAuth {
   }
 
   /**
-   * Obtiene el detalle de DTEs emitidos o recibidos desde el portal RCV del SII.
+   * Lista, documento por documento, los DTE emitidos o recibidos de un período desde el portal
+   * "Consulta de DTE Emitidos" del SII (`consemitidosinternetui`).
+   *
+   * Limitaciones, para no esperar de esta función lo que no entrega:
+   *  - **No incluye boletas (39 y 41).** Ese sistema nunca las indexó, así que una consulta de
+   *    boletas devuelve 0 aunque el SII las haya aceptado. Para comprobar que el SII registró
+   *    boletas use `obtenerResumenRegistro()`, que las devuelve agregadas por mes.
+   *  - **No es el RCV oficial** que usa el SII para el IVA y el F29 (`consdcvinternetui`) y no
+   *    informa el estado contable (Registro, Pendiente, No incluir, Reclamado). Para eso use
+   *    `obtenerResumenRegistro()`.
+   *  - Solo trae fecha, sin hora, y no incluye el XML (ver `descargarRespaldoMipyme()`).
+   *  - En documentos recibidos, `rutReceptor` y `dvReceptor` son el RUT y el DV del EMISOR.
+   *
+   * Es la única vía de listado por documento que no requiere captcha: los métodos de detalle de
+   * `consdcvinternetui` (`getDetalleCompra` y `getDetalleVenta`) exigen reCAPTCHA v3 y esta
+   * librería no los automatiza. Ver la tabla "RCV del portal" del README.
    *
    * @param {string} rut       - RUT sin DV (ej: "12345678")
    * @param {string} dv        - DV (ej: "K")

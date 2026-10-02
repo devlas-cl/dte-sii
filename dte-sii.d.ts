@@ -1351,6 +1351,57 @@ export class FileStateStore implements StateStore {
   remove(clave: string): Promise<void>;
 }
 
+/** Metadatos de un artefacto guardado. */
+export interface ArtefactoMeta {
+  /** Ruta relativa con `/`, sin `..` ni rutas absolutas. */
+  clave: string;
+  mtimeMs: number;
+  huella: string;
+}
+
+/**
+ * Almacén de los archivos que una etapa de la certificación deja y la siguiente lee. Cada consumidor
+ * aporta el suyo (tabla de base de datos, Redis, S3, directorio compartido).
+ */
+export interface ArtefactosStore {
+  listar(): Promise<ArtefactoMeta[]>;
+  leer(clave: string): Promise<string | null>;
+  escribir(clave: string, contenido: string, meta: { mtimeMs: number; huella: string }): Promise<void>;
+  borrar?(claves: string[]): Promise<void>;
+}
+
+/** ArtefactosStore en memoria del proceso. Sirve para tests y como referencia. */
+export class MemoryArtefactosStore implements ArtefactosStore {
+  listar(): Promise<ArtefactoMeta[]>;
+  leer(clave: string): Promise<string | null>;
+  escribir(clave: string, contenido: string, meta?: { mtimeMs?: number; huella?: string }): Promise<void>;
+  borrar(claves: string[]): Promise<void>;
+}
+
+/**
+ * Escribe en `dir` los artefactos del almacén, conservando la fecha de modificación de archivos y
+ * carpetas. Nunca escribe fuera de `dir`. Devuelve clave → huella, para pasárselo a `volcarArtefactos`.
+ */
+export function hidratarArtefactos(p: {
+  store: ArtefactosStore;
+  dir: string;
+  aceptar?: (clave: string) => boolean;
+  restaurar?: (clave: string, contenido: string) => string;
+}): Promise<Map<string, string>>;
+
+/** Guarda en el almacén los archivos nuevos o cambiados de `dir` que `aceptar` deje pasar. */
+export function volcarArtefactos(p: {
+  store: ArtefactosStore;
+  dir: string;
+  aceptar: (clave: string) => boolean;
+  previos?: Map<string, string>;
+  /** Por defecto `['.xml', '.json']`. */
+  extensiones?: string[];
+  /** Tope por archivo. Por defecto 4 MB. */
+  maxBytes?: number;
+  transformar?: (clave: string, contenido: string) => string;
+}): Promise<{ guardados: number; sinCambios: number; omitidos: Array<{ clave: string; motivo: string }> }>;
+
 /** Punto único de acceso a la sesión: una por certificado, usada por un llamador a la vez. Reentrante. */
 export class SessionBroker {
   constructor(puertos: { store: SessionStore; lock: SessionLock });
