@@ -220,8 +220,15 @@ class FolioService {
     const canonicalDir = path.join(this.debugDir, 'caf', this.ambiente, this.rutEmisor, String(tipoDte));
     searchRecursive(canonicalDir);
 
+    // Y donde CafSolicitor guarda lo que timbra (`_saveCafOrganized`). Sin esto los CAF
+    // recién timbrados no se veían salvo que `debugDir` coincidiera con `baseDir/debug`, y
+    // el reintento de una corrida volvía a timbrar teniendo folios en disco.
+    const rutLimpio = String(this.rutEmisor || '').replace(/\./g, '').toUpperCase();
+    const solicitorDir = path.join(this.baseDir, 'debug', 'caf', this.ambiente, rutLimpio, String(tipoDte));
+    if (solicitorDir !== canonicalDir) searchRecursive(solicitorDir);
+
     matches.sort((a, b) => b.mtime - a.mtime);
-    return matches.map(m => m.filePath);
+    return [...new Set(matches.map(m => m.filePath))];
   }
 
   /**
@@ -866,7 +873,13 @@ class FolioService {
     }
   }
 
-  async anularFolios({ tipoDte, folioDesde = null, folioHasta = null, motivo = 'Folios no utilizados', maxRangos = 50, soloUltimosDias = null }) {
+  /**
+   * @param {Array<[number, number]>} [excluir] - Rangos [desde, hasta] que NO se tocan aunque
+   *   el SII los liste como anulables: típicamente los CAF que quien llama tiene en mano y va a
+   *   usar. Anular un folio cuyo CAF está en disco tira folios buenos y además suma al contador
+   *   de anulados de los últimos 6 meses, que juega en contra del cupo.
+   */
+  async anularFolios({ tipoDte, folioDesde = null, folioHasta = null, motivo = 'Folios no utilizados', maxRangos = 50, soloUltimosDias = null, excluir = [] }) {
     const debugStampA = new Date().toISOString().replace(/[:.]/g, '-');
     const debugDirA = path.join(this.debugDir, 'auto-caf', 'anulacion', debugStampA);
     fs.mkdirSync(debugDirA, { recursive: true });
@@ -904,6 +917,7 @@ class FolioService {
           const t = new Date(`${ano}-${mes}-${dia}T00:00:00`).getTime();
           if (!Number.isFinite(t) || t < limiteMs) return false;
         }
+        if ((excluir || []).some(([d, h]) => r.folioDesde <= h && r.folioHasta >= d)) return false;
         const clave = `${r.folioDesde}-${r.folioHasta}`;
         if (yaAnulados.has(clave)) return false;
         return !vistos.has(clave);

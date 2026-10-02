@@ -8,6 +8,26 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **`CertRunner.solicitarCafs` decidía con el tope de antes de anular y abortaba un caso que pasa en
+  tandas.** La limpieza previa anulaba folios para todos los tipos y después el pedido se decidía con
+  el MAX_AUTOR/FOLIOS_DISP de ANTES de anular. Caso real (tipo 61, 7 folios): la limpieza dejó
+  FOLIOS_DISP en 0, la decisión siguió viendo 4, se pidieron los 7 de una y el SII respondió
+  MAX_AUTOR=4 < 7. Ahora el orden por tipo es reusar en disco, reobtener, pedir (de una o en tandas) y
+  anular solo como último recurso, consultando el tope de nuevo después de anular.
+- **Las tandas se cortaban en 4.** `solicitarCafs` pasa `maxTandas` igual a los folios que faltan (el
+  piso del SII es MAX_AUTOR=1 y una tanda sin folios corta igual). El caso medido 4+1+1+1 pasaba justo.
+- **La anulación podía tirar folios que la corrida tenía en mano.** `anularFolios` acepta `excluir`
+  (rangos `[desde, hasta]`) y `solicitarCafs` excluye los CAF en disco y los recién timbrados. Tampoco
+  anula cuando FOLIOS_DISP solo cuenta esos folios propios.
+- **`listarCafs` no veía los CAF que timbra `CafSolicitor`.** Los guarda en
+  `baseDir/debug/caf/<ambiente>/<rut>/<tipo>/`, pero solo se buscaba en `cafDir` y `debugDir/caf/...`.
+  Con un `debugDir` distinto de `baseDir/debug` (directorio temporal por etapa) el reuso nunca los
+  encontraba y cada reintento volvía a timbrar, que es justo lo que aprieta el cupo.
+- `solicitarCafs` llama a `solicitarCafExacto` con `permitirAnular: false`: la anulación la decide solo
+  el runner, con ventana acotada por ambiente, y no la interna sin ventana de `FolioService`.
+
 ## [2.34.0] - 2026-10-02
 
 ### Agregado
