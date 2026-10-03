@@ -8,6 +8,22 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.36.0] - 2026-10-02
+
+### Agregado
+
+- **`EnviadorSII.folioRecibido(rutEmisor, tipoDte, folio)`**: consulta QueryEstDte con datos ficticios
+  para saber si el SII ya recibió un documento con ese folio (`FAU` = libre, `DTE Recibido` = usado,
+  sin respuesta = `null`). Reintenta un 503.
+
+### Corregido
+
+- **La reobtención reusaba folios ya emitidos.** El portal de reobtención lista rangos aunque el SII ya
+  haya recibido documentos con ellos: ni el listado ni el detalle lo marcan (verificado en maullin,
+  2026-10-02, folios 1 y 2 de tipo 56 timbrados en marzo). `reobtenerCaf` acepta `folioLibre(folio)` y
+  consulta solo los folios de los rangos que va a usar, descartando los ya recibidos o no verificables.
+  `CertRunner` lo usa con `folioRecibido`.
+
 ## [2.35.0] - 2026-10-02
 
 ### Corregido

@@ -786,6 +786,66 @@ class EnviadorSII {
   }
 
   /**
+   * ¿El SII ya recibió un documento con este folio? Consulta QueryEstDte con datos
+   * ficticios (receptor genérico, fecha de hoy, monto 1): lo único que interesa es si el
+   * SII tiene ALGÚN documento con ese tipo y folio.
+   *
+   *   FAU ("DTE No Recibido")            → false: el folio está libre.
+   *   DOK/DNK/TMC/... ("DTE Recibido")   → true: el folio ya se usó. Con datos ficticios lo
+   *                                        normal es DNK (recibido, datos no coinciden).
+   *   sin respuesta interpretable         → null: no se pudo saber.
+   *
+   * Sirve para no reusar folios reobtenidos: el portal de reobtención los lista aunque ya
+   * se hayan emitido (verificado en maullin, 2026-10-02: folios 1 y 2 de tipo 56 timbrados
+   * en marzo aparecían reobtenibles, se usaron de nuevo y el SII rechazó los documentos).
+   *
+   * @returns {Promise<{recibido: boolean|null, estado: string|null, glosa: string|null}>}
+   */
+  async folioRecibido(rutEmisor, tipoDte, folio, { reintentos = 2 } = {}) {
+    if (!this.tokenSoap) await this.getTokenSoap();
+    const servidor = this.ambiente === 'produccion' ? 'palena' : 'maullin';
+    const [rutNum, dv] = String(rutEmisor).replace(/\./g, '').split('-');
+    const hoy = new Date();
+    const fecha = `${String(hoy.getDate()).padStart(2, '0')}${String(hoy.getMonth() + 1).padStart(2, '0')}${hoy.getFullYear()}`;
+    const body = `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+  <soapenv:Body>
+    <getEstDte>
+      <RutConsultante>${rutNum}</RutConsultante><DvConsultante>${dv}</DvConsultante>
+      <RutCompania>${rutNum}</RutCompania><DvCompania>${dv}</DvCompania>
+      <RutReceptor>66666666</RutReceptor><DvReceptor>6</DvReceptor>
+      <TipoDte>${Number(tipoDte)}</TipoDte><FolioDte>${Number(folio)}</FolioDte>
+      <FechaEmisionDte>${fecha}</FechaEmisionDte><MontoDte>1</MontoDte>
+      <Token>${this.tokenSoap}</Token>
+    </getEstDte>
+  </soapenv:Body>
+</soapenv:Envelope>`;
+
+    for (let intento = 0; intento <= reintentos; intento++) {
+      try {
+        const res = await this._siiPost(`https://${servidor}.sii.cl/DTEWS/QueryEstDte.jws`, {
+          headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: '' },
+          body,
+          timeoutMs: 30000,
+        });
+        if (res.ok) {
+          const xml = String(res.text || '').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+          const leer = (t) => (xml.match(new RegExp(`<${t}>([^<]*)</${t}>`)) || [])[1] ?? null;
+          const estado = leer('ESTADO');
+          const glosa = leer('GLOSA_ESTADO');
+          if (estado === 'FAU' || /no recibido/i.test(glosa || '')) {
+            return { recibido: false, estado, glosa };
+          }
+          if (/recibido/i.test(glosa || '')) return { recibido: true, estado, glosa };
+          if (estado) return { recibido: null, estado, glosa };
+        }
+      } catch (_) { /* se reintenta */ }
+      if (intento < reintentos) await new Promise((r) => setTimeout(r, 2000 * (intento + 1)));
+    }
+    return { recibido: null, estado: null, glosa: null };
+  }
+
+  /**
    * Consultar estado de envío via SOAP (QueryEstUp.jws)
    */
   async consultarEstadoSoap(trackId, rutEmisor) {

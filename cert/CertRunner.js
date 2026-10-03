@@ -678,6 +678,8 @@ class CertRunner {
           // El portal lista folios ya emitidos sin marcarlos: el único que lo sabe es este
           // registro, el mismo con el que se descartan los CAF de disco en _cafReusable.
           yaEmitido: (r) => this._rangoYaConsumido(tipoDte, r.folioDesde, r.folioHasta), // puede ser asíncrono
+          // Y el SII: el registro local no sabe de corridas viejas ni de otro software.
+          folioLibre: (folio) => this._folioLibreEnSii(tipoDte, folio),
         });
         if (reob.ok) {
           // Puede ser más de uno: el SII entrega los folios reobtenidos de a uno y cada
@@ -753,6 +755,29 @@ class CertRunner {
     }
 
     return cafs;
+  }
+
+  /**
+   * `true` solo si el SII confirma que nunca recibió un documento con este folio. Ante la
+   * duda (SII sin respuesta) devuelve `false`: reusar un folio ya recibido hace que el SII
+   * rechace el documento y, con él, el set completo.
+   * @private
+   */
+  async _folioLibreEnSii(tipoDte, folio) {
+    try {
+      this._enviadorConsulta = this._enviadorConsulta || new EnviadorSII(this.certificado, this.ambiente);
+      const r = await this._enviadorConsulta.folioRecibido(this.config.emisor.rut, tipoDte, folio);
+      if (r.recibido !== false) {
+        console.warn(
+          `[CertRunner] Tipo ${tipoDte} folio ${folio}: ` +
+          (r.recibido ? `el SII ya lo recibió (${r.estado})` : 'no se pudo verificar en el SII')
+        );
+      }
+      return r.recibido === false;
+    } catch (err) {
+      console.warn(`[CertRunner] Tipo ${tipoDte} folio ${folio}: no se pudo verificar en el SII — ${err.message}`);
+      return false;
+    }
   }
 
   /** Tope de timbraje del SII para un tipo, o `null` si el sondeo falló. @private */

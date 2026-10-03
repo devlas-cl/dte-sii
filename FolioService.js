@@ -376,7 +376,7 @@ class FolioService {
    *
    * @returns {Promise<{ ok: boolean, cafPath?: string, motivo?: string, disponibles?: number }>}
    */
-  async reobtenerCaf({ tipoDte, cantidad, yaEmitido = null }) {
+  async reobtenerCaf({ tipoDte, cantidad, yaEmitido = null, folioLibre = null }) {
     if (!this.cafSolicitor) {
       return { ok: false, motivo: 'CafSolicitor no inicializado' };
     }
@@ -429,12 +429,40 @@ class FolioService {
 
     // En orden de folio ascendente: los documentos del set quedan numerados de menor a
     // mayor, como si vinieran de un rango contiguo.
+    //
+    // `folioLibre(folio)` confirma contra el SII que el folio no se haya recibido antes. El
+    // listado del portal no lo dice (ver arriba) y `yaEmitido` solo conoce nuestro registro.
+    // Se consulta SOLO lo que se va a usar, rango por rango, hasta cubrir la cantidad: un
+    // rango con un folio ya recibido, o que no se pudo verificar, se descarta entero.
     const elegidos = [];
     let acumulado = 0;
+    let descartadosSii = 0;
     for (const r of usables.sort((a, b) => a.folioDesde - b.folioDesde)) {
       if (acumulado >= cantidad) break;
+      if (folioLibre) {
+        let libre = true;
+        for (let f = r.folioDesde; f <= r.folioHasta && libre; f++) {
+          libre = (await folioLibre(f)) === true;
+        }
+        if (!libre) {
+          descartadosSii++;
+          console.warn(
+            `[FolioService] Tipo ${tipoDte}: rango ${r.folioDesde}-${r.folioHasta} descartado — ` +
+            'el SII ya recibió un documento con ese folio (o no se pudo verificar)'
+          );
+          continue;
+        }
+      }
       elegidos.push(r);
       acumulado += r.cantidad;
+    }
+    if (acumulado < cantidad) {
+      return {
+        ok: false,
+        disponibles: acumulado,
+        motivo: `los rangos usables no alcanzan (se necesitan ${cantidad}, hay ${acumulado}` +
+          `${descartadosSii ? `; ${descartadosSii} descartado(s) por ya recibidos en el SII` : ''})`,
+      };
     }
 
     // Se descargan TODOS los que hagan falta: el SII entrega los folios reobtenidos de a
