@@ -5,10 +5,10 @@ Versionado [SemVer](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
-## [2.37.0] - 2026-10-05
-
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
+
+## [2.37.0] - 2026-10-05
 
 ### Corregido
 
