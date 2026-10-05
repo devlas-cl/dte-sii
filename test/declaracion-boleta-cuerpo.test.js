@@ -17,22 +17,22 @@ const CertRunner = mod.CertRunner || mod;
 
 const base = { url: 'https://www4.sii.cl/certBolElectDteInternet/', policy: 'POLICY', servicio: 'SVC' };
 const datos = {
-  rutEmpresa: '76111111-1',
+  rutEmpresa: '77111222-3',
   razonSocial: 'EMPRESA DE PRUEBA SPA',
   rutUsuario: '11111111',
   dvUsuario: '1',
   fecha: '05-10-2026',
   fchAutorizacion: '',
   longCharValue: '0',
-  proveedor: { rut: '76222222-2', nombre: 'PROVEEDOR SPA', correo: 'soporte@proveedor.cl', link: 'www.sii.cl' },
+  proveedor: { rut: '79555666-7', nombre: 'PROVEEDOR SPA', correo: 'soporte@proveedor.cl', link: 'www.sii.cl' },
 };
 
 const c = CertRunner.cuerpoAutorizarBoleta(base, datos);
 
 // RUT empresa, RUT proveedor y RUT usuario en ese orden (campos r, s, t).
-assert.ok(c.includes('|8|76111111|8|76222222|8|11111111|'), 'r/s/t: empresa, proveedor, usuario');
+assert.ok(c.includes('|8|77111222|8|79555666|8|11111111|'), 'r/s/t: empresa, proveedor, usuario');
 // DV proveedor y DV usuario reales (campos e, f), luego SII, fecha, correo y nombre del proveedor.
-assert.ok(c.includes('|2|1|SII|05-10-2026|soporte@proveedor.cl|PROVEEDOR SPA|19|S|www.sii.cl|'), 'e/f/n/o/u');
+assert.ok(c.includes('|7|1|SII|05-10-2026|soporte@proveedor.cl|PROVEEDOR SPA|19|S|www.sii.cl|'), 'e/f/n/o/u');
 // La tabla tiene 24 strings.
 assert.ok(c.startsWith('7|0|24|'), 'tabla de 24 strings');
 // El separador "|" dentro de un texto va escapado.

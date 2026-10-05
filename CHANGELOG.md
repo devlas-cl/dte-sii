@@ -15,7 +15,7 @@ Versionado [SemVer](https://semver.org/lang/es/).
   del usuario en `"8"`. El SII rechazó así la declaración de una empresa con `The call failed on
   the server` en cada intento; con el proveedor real y el DV de la sesión, igual que el portal, la
   aceptó (prueba A/B sobre la misma postulación en P90, 05/10/2026). `rutProveedor` va con DV
-  (`"76222222-2"`). Sin él se mantiene el comportamiento anterior. Si la llamada falla, el
+  (`"79555666-7"`). Sin él se mantiene el comportamiento anterior. Si la llamada falla, el
   resultado trae `request` y `response` (sin credenciales) para diagnosticar.
 
 ### Agregado
