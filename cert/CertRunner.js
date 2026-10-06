@@ -473,6 +473,84 @@ class CertRunner {
     }
   }
 
+  /**
+   * Lee el tipo y el rango de los CAF con que se timbraron los documentos de un EnvioDTE.
+   * Un mismo CAF aparece una vez por documento; se devuelve una sola vez.
+   *
+   * @param {string} xml - XML del EnvioDTE (o de un DTE suelto)
+   * @returns {Array<{ tipo: number, desde: number, hasta: number }>}
+   */
+  static rangosCafDelEnvio(xml) {
+    const vistos = new Set();
+    const out = [];
+    const re = /<TD>\s*(\d+)\s*<\/TD>\s*<RNG>\s*<D>\s*(\d+)\s*<\/D>\s*<H>\s*(\d+)\s*<\/H>/g;
+    for (const m of String(xml || '').matchAll(re)) {
+      const clave = `${m[1]}:${m[2]}:${m[3]}`;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      out.push({ tipo: Number(m[1]), desde: Number(m[2]), hasta: Number(m[3]) });
+    }
+    return out;
+  }
+
+  /**
+   * Devuelve al uso los folios de envíos que el SII rechazó ENTEROS.
+   *
+   * `_marcarCafsConsumidos` marca como consumido todo CAF que se intentó enviar, sin mirar
+   * el resultado: un folio que el SII recibió no se puede volver a usar (DTE-3-101). Pero
+   * cuando el SII rechaza el SOBRE completo, por carátula (RCT), firma (RFR) o esquema
+   * (RSC), no registra ninguno de sus documentos y esos folios siguen libres: reenviarlos
+   * con el mismo número es aceptado. Sin liberarlos, el reenvío los descarta, pide folios
+   * nuevos y choca con el cupo de timbraje ("NO SE AUTORIZA TIMBRAJE ... tiene disponible
+   * una cantidad de folios suficiente").
+   *
+   * Un rechazo de DOCUMENTOS dentro de un sobre recibido (EPR con rechazos) sí consume el
+   * folio: ese caso no se toca.
+   *
+   * @param {Array<{ trackId: string, xml?: string, xmlPath?: string }>} envios - Envíos
+   *   anteriores a revisar, con el XML que se mandó (texto o ruta).
+   * @returns {Promise<{ liberados: string[], rechazados: Array<{ trackId: string, estado: string }> }>}
+   *   `liberados` como `"tipo:desde-hasta"`.
+   */
+  async liberarFoliosDeSobresRechazados(envios = []) {
+    const quitar = [];
+    const rechazados = [];
+    for (const envio of envios || []) {
+      if (!envio || !envio.trackId) continue;
+      const r = await this.consultarEstadoEnvio(envio.trackId);
+      const estado = String((r && r.estado) || '').toUpperCase();
+      if (!CertRunner.RECHAZOS_DE_SOBRE.has(estado)) continue;
+      let xml = envio.xml;
+      if (!xml && envio.xmlPath) {
+        try { xml = fs.readFileSync(envio.xmlPath, 'utf8'); }
+        catch (e) {
+          console.warn(`[CertRunner] Envío ${envio.trackId} rechazado (${estado}) sin XML legible: ${e.message}`);
+          continue;
+        }
+      }
+      if (!xml) continue;
+      rechazados.push({ trackId: envio.trackId, estado });
+      quitar.push(...CertRunner.rangosCafDelEnvio(xml));
+    }
+
+    const liberados = [];
+    if (!quitar.length) return { liberados, rechazados };
+    const registro = await this._cargarFoliosUsados();
+    for (const { tipo, desde, hasta } of quitar) {
+      const lista = registro[String(tipo)] || [];
+      const queda = lista.filter(([d, h]) => !(d === desde && h === hasta));
+      if (queda.length !== lista.length) {
+        registro[String(tipo)] = queda;
+        liberados.push(`${tipo}:${desde}-${hasta}`);
+      }
+    }
+    if (liberados.length) {
+      await this._estado().save(this._foliosUsadosClave(), registro);
+      console.log(`[CertRunner] Folios liberados de sobres rechazados enteros: ${liberados.join(', ')}`);
+    }
+    return { liberados, rechazados };
+  }
+
   /** ¿Algún folio de [desde, hasta] ya se emitió? */
   async _rangoYaConsumido(tipoDte, desde, hasta) {
     const rangos = (await this._cargarFoliosUsados())[String(tipoDte)] || [];
@@ -4770,5 +4848,12 @@ class CertRunner {
     return `${String(now.getDate()).padStart(2, '0')}-${String(now.getMonth() + 1).padStart(2, '0')}-${now.getFullYear()}`;
   }
 }
+
+
+/**
+ * Estados de un envío (QueryEstUp) en que el SII rechazó el SOBRE completo sin registrar
+ * sus documentos: carátula, firma y esquema. Ver `liberarFoliosDeSobresRechazados`.
+ */
+CertRunner.RECHAZOS_DE_SOBRE = new Set(['RCT', 'RFR', 'RSC']);
 
 module.exports = CertRunner;
