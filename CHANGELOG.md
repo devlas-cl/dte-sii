@@ -8,6 +8,19 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Agregado
+
+- **`CertRunner#liberarFoliosDeSobresRechazados(envios)`**: devuelve al uso los folios de envíos
+  que el SII rechazó enteros (carátula `RCT`, firma `RFR`, esquema `RSC`). `_marcarCafsConsumidos`
+  marca como consumido todo CAF que se intentó enviar; en esos rechazos el SII no registra ningún
+  documento y los folios se pueden reenviar con el mismo número. Sin liberarlos, un reenvío de los
+  sets los descartaba, pedía folios nuevos y el SII los negaba por cupo ("NO SE AUTORIZA TIMBRAJE
+  ... tiene disponible una cantidad de folios suficiente"). Consulta el estado de cada envío
+  (`consultarEstadoEnvio`) y solo libera los rechazos de sobre: un sobre recibido con documentos
+  rechazados (`EPR`) sí consume sus folios.
+- **`CertRunner.rangosCafDelEnvio(xml)`**: tipo y rango de los CAF de un EnvioDTE.
+- **`CertRunner.RECHAZOS_DE_SOBRE`**: los estados que cuentan como rechazo del sobre completo.
+
 ## [2.37.1] - 2026-10-06
 
 ### Corregido
