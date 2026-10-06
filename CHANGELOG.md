@@ -8,6 +8,12 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **`getSemilla()` (REST, boletas) reintenta ante 5xx, 429 y errores de red.** Antes hacia un solo
+  intento, a diferencia de la variante SOAP. Son 4 intentos con espera creciente; un 5xx final
+  mantiene el mensaje `Error obteniendo semilla: <status>`. Un 4xx no se reintenta.
+
 ## [2.36.0] - 2026-10-02
 
 ### Agregado

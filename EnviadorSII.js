@@ -141,19 +141,45 @@ class EnviadorSII {
   // AUTENTICACIÓN REST (Boletas)
   // ============================================
 
+  /** Punto de entrada HTTP del flujo REST; existe para poder sustituirlo en tests sin red. */
+  _fetchRest(url, opciones) {
+    return fetchRegistradoSII(url, opciones);
+  }
+
   /**
    * Obtener semilla de autenticación del SII (API REST)
    */
   async getSemilla() {
     const url = this.urls[this.ambiente].semilla;
-    
-    const { response, text: xml } = await fetchRegistradoSII(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/xml',
-      },
-    });
-    
+    // Pocos intentos y cortos: un corte de segundos se absorbe aqui, y una caida larga del SII
+    // (medida el 05/10/2026: 500 durante horas) la maneja quien llama, difiriendo el envio.
+    const maxIntentos = 4;
+    const esperaMs = this.esperaReintentoMs ?? 1000;
+
+    let response, xml;
+    for (let intento = 1; ; intento++) {
+      try {
+        ({ response, text: xml } = await this._fetchRest(url, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/xml',
+          },
+        }));
+      } catch (error) {
+        if (isRetryableError(error) && intento < maxIntentos) {
+          await new Promise((resolve) => setTimeout(resolve, intento * esperaMs));
+          continue;
+        }
+        throw error;
+      }
+      if (!response.ok && isRetryableStatus(response.status) && intento < maxIntentos) {
+        log.log(` [!] Error semilla REST (${response.status}), reintentando ${intento}/${maxIntentos - 1}...`);
+        await new Promise((resolve) => setTimeout(resolve, intento * esperaMs));
+        continue;
+      }
+      break;
+    }
+
     if (!response.ok) {
       throw new Error(`Error obteniendo semilla: ${response.status}`);
     }
