@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.38.0] - 2026-10-06
+
 ### Agregado
 
 - **`CertRunner#liberarFoliosDeSobresRechazados(envios)`**: devuelve al uso los folios de envíos
