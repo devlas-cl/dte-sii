@@ -8,11 +8,31 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.37.1] - 2026-10-06
+
 ### Corregido
 
 - **`getSemilla()` (REST, boletas) reintenta ante 5xx, 429 y errores de red.** Antes hacia un solo
   intento, a diferencia de la variante SOAP. Son 4 intentos con espera creciente; un 5xx final
   mantiene el mensaje `Error obteniendo semilla: <status>`. Un 4xx no se reintenta.
+
+## [2.37.0] - 2026-10-05
+
+### Corregido
+
+- **`completarDeclaracionBoletaPortal()` usa el proveedor de software que se le pasa.** Antes
+  ignoraba `rutProveedor` y declaraba a la propia empresa como proveedor (RUT, DV), y fijaba el DV
+  del usuario en `"8"`. El SII rechazó así la declaración de una empresa con `The call failed on
+  the server` en cada intento; con el proveedor real y el DV de la sesión, igual que el portal, la
+  aceptó (prueba A/B sobre la misma postulación en P90, 05/10/2026). `rutProveedor` va con DV
+  (`"79555666-7"`). Sin él se mantiene el comportamiento anterior. Si la llamada falla, el
+  resultado trae `request` y `response` (sin credenciales) para diagnosticar.
+
+### Agregado
+
+- **`CertRunner.cuerpoAutorizarBoleta(base, datos)`**: arma el cuerpo GWT de
+  `autorizarEmpresaBolProd`, con el orden de campos de `TdtEmpresaAutorizadaTo` tomado del
+  cliente del portal.
 
 ## [2.36.0] - 2026-10-02
 

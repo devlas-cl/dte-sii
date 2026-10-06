@@ -4476,27 +4476,94 @@ class CertRunner {
 
     // 4. Autorizar empresa boleta produccion
     const fechaHoy = this._getFechaHoy();
-    const authBody =
-      `7|0|23|${CBE_BASE}|${CBE_POLICY}|${CBE_SVC}|autorizarEmpresaBolProd|` +
-      `cl.sii.sdi.diii.certBolElectDte.to.PostulSegHistInsUpdTo/138688689|P91|BVE|` +
-      `java.lang.Integer/3438268394|${dvUp}|` +
-      `cl.sii.sdi.diii.certBolElectDte.to.TdtEmpresaAutorizadaTo/2240026086|8|SII|` +
-      `${fechaHoy}|${correoProveedor}|${nombreProveedor}|19|S|${linkConsulta}|` +
-      `java.util.ArrayList/4159755760|cl.sii.sdi.diii.certBolElectDte.to.DocumentoAutorizadoTo/493967287|` +
-      `${fchAutorizacion}|java.lang.Long/4227064769|${razonSocial}|` +
-      `1|2|3|4|1|5|5|6|0|7|8|90|0|0|0|0|9|0|10|0|7|9|9|11|12|13|13|13|14|15|16|17|8|` +
-      `${rutNum}|8|${rutNum}|8|${rutRepreNum}|18|13|13|0|19|2|20|0|0|9|11|21|0|0|0|0|0|0|8|` +
-      `${rutNum}|8|${rutRepreNum}|22|${longCharValue}|-11|8|39|0|20|0|0|9|11|21|0|0|0|0|0|0|8|` +
-      `${rutNum}|8|${rutRepreNum}|-11|-11|8|41|0|0|23|-11|0|8|${rutNum}|0|0|`;
+    // DV del usuario de la sesión (antes iba fijo en "8") y datos del proveedor de software
+    // tal como los manda el portal del SII al grabar la declaración. Sin RUT de proveedor se
+    // declara a la propia empresa, como antes; el SII rechazó esa variante para algunas
+    // empresas con un 500 sin detalle, así que conviene pasar siempre el proveedor real.
+    const dvUsuario = String(
+      cookieJar['NETSCAPE_LIVEWIRE.dvm'] || cookieJar['NETSCAPE_LIVEWIRE.dv'] || '8'
+    ).toUpperCase();
+    const authBody = CertRunner.cuerpoAutorizarBoleta(
+      { url: CBE_BASE, policy: CBE_POLICY, servicio: CBE_SVC },
+      {
+        rutEmpresa:      this.config.emisor.rut,
+        razonSocial,
+        rutUsuario:      String(rutRepreNum),
+        dvUsuario,
+        fecha:           this._getFechaHoy(),
+        fchAutorizacion,
+        longCharValue,
+        proveedor: {
+          rut:    rutProveedor || this.config.emisor.rut,
+          nombre: nombreProveedor,
+          correo: correoProveedor,
+          link:   linkConsulta,
+        },
+      }
+    );
 
-    console.log(` -> autorizarEmpresaBolProd rutNum=${rutNum} rutRepreNum=${rutRepreNum} fchAutorizacion=${fchAutorizacion} longCharValue=${longCharValue}`);
+    console.log(` -> autorizarEmpresaBolProd rutNum=${rutNum} rutRepreNum=${rutRepreNum} fchAutorizacion=${fchAutorizacion} longCharValue=${longCharValue} proveedor=${rutProveedor || '(la propia empresa)'}`);
     const authResp = await gwtPost(authBody);
     console.log(` OK autorizarEmpresaBolProd respuesta: ${authResp.substring(0, 200)}`);
 
-    if (!authResp.startsWith('//OK') || !authResp.includes('DECLARACION EFECTUADA')) {
-      return { success: false, error: `autorizarEmpresaBolProd respuesta inesperada: ${authResp.substring(0, 300)}` };
+    if (!authResp.startsWith('//OK')) {
+      // La llamada y la respuesta completas (sin credenciales) para diagnosticar: el SII
+      // responde "The call failed on the server" sin motivo.
+      return {
+        success: false,
+        error: `autorizarEmpresaBolProd respuesta inesperada: ${authResp.substring(0, 300)}`,
+        request: authBody,
+        response: authResp.substring(0, 4000),
+      };
     }
     return { success: true, mensaje: 'DECLARACION EFECTUADA' };
+  }
+
+  /**
+   * Cuerpo GWT-RPC de `autorizarEmpresaBolProd` (declaración de cumplimiento de boleta).
+   *
+   * El orden de campos de TdtEmpresaAutorizadaTo sale del serializador del cliente GWT del
+   * portal: b c d e f g i j k n o p q r s t u, con c="BVE", d=DV empresa, e=DV proveedor,
+   * f=DV usuario, g="SII", i/j/k=fecha, n=correo proveedor, o=nombre proveedor, p="19",
+   * q="S", r=RUT empresa, s=RUT proveedor, t=RUT usuario, u=link de consulta.
+   *
+   * @param {{url: string, policy: string, servicio: string}} base
+   * @param {{rutEmpresa: string, razonSocial: string, rutUsuario: string, dvUsuario: string,
+   *   fecha: string, fchAutorizacion: string, longCharValue: string,
+   *   proveedor: {rut: string, nombre: string, correo: string, link: string}}} d
+   * @returns {string}
+   */
+  static cuerpoAutorizarBoleta(base, d) {
+    const CLS = 'cl.sii.sdi.diii.certBolElectDte.to.';
+    const separar = (rut) => {
+      const [num, dv] = String(rut || '').replace(/\./g, '').trim().split('-');
+      return [num, (dv || '').toUpperCase()];
+    };
+    // El separador de GWT-RPC es "|": dentro de un string va escapado.
+    const gwt = (x) => String(x ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\!');
+    const [rutNum, dvEmp] = separar(d.rutEmpresa);
+    const [rutProv, dvProv] = separar(d.proveedor.rut);
+    const tabla = [
+      base.url, base.policy, base.servicio, 'autorizarEmpresaBolProd',
+      `${CLS}PostulSegHistInsUpdTo/138688689`,   // 5
+      'P91', 'BVE', 'java.lang.Integer/3438268394', // 6 7 8
+      dvEmp,                                      // 9
+      `${CLS}TdtEmpresaAutorizadaTo/2240026086`, // 10
+      dvProv, d.dvUsuario, 'SII', d.fecha,        // 11 12 13 14
+      d.proveedor.correo, d.proveedor.nombre,     // 15 16
+      '19', 'S', d.proveedor.link,                // 17 18 19
+      'java.util.ArrayList/4159755760',           // 20
+      `${CLS}DocumentoAutorizadoTo/493967287`,   // 21
+      d.fchAutorizacion, 'java.lang.Long/4227064769', d.razonSocial, // 22 23 24
+    ].map(gwt);
+    const u = d.rutUsuario;
+    const datos =
+      `1|2|3|4|1|5|5|6|0|7|8|90|0|0|0|0|9|0|10|0|7|9|11|12|13|14|14|14|15|16|17|18|` +
+      `8|${rutNum}|8|${rutProv}|8|${u}|19|14|14|0|20|2|` +
+      `21|0|0|9|12|22|0|0|0|0|0|0|8|${rutNum}|8|${u}|23|${d.longCharValue}|-11|8|39|0|` +
+      `21|0|0|9|12|22|0|0|0|0|0|0|8|${rutNum}|8|${u}|-11|-11|8|41|0|0|` +
+      `24|-11|0|8|${rutNum}|0|0|`;
+    return `7|0|${tabla.length}|${tabla.join('|')}|${datos}`;
   }
 
   /**
