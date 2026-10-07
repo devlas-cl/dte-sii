@@ -743,6 +743,11 @@ export type ReobtenerCafResult =
       cafPaths: string[];
       /** Atajo al primero de `cafPaths`. */
       cafPath: string;
+      /**
+       * Por CAF: su rango y los folios verificados libres. Un rango reobtenido puede
+       * traer folios que el SII ya recibió; solo `libres` se puede emitir.
+       */
+      reobtenidos: Array<{ cafPath: string; folioDesde: number; folioHasta: number; libres: number[] }>;
     }
   | {
       ok: false;
@@ -995,6 +1000,8 @@ export class LibroGuia {
 export class CertFolioHelper {
   constructor(config: object);
   prepararFolios(tipoDte: number, cantidad: number): Promise<CAF>;
+  /** Limita un CAF a esos folios: `reserveNextFolio` no entrega otros de ese rango. */
+  restringirFolios(params: { tipoDte: number; folioDesde: number; folioHasta: number; folios: number[] }): void;
 }
 
 // ============================================

@@ -625,7 +625,7 @@ class CertRunner {
         if (rangosVistos.has(clave)) continue;
         rangosVistos.add(clave);
 
-        candidatos.push({ path: cafPath, desde, hasta });
+        candidatos.push({ path: cafPath, desde, hasta, libres: this._foliosLibresDeCaf(cafPath) });
       }
 
       if (!candidatos.length) {
@@ -640,7 +640,8 @@ class CertRunner {
       // tipo, no vuelven a estar disponibles. Va sobre el total y no por CAF porque el
       // contador es por tipo, no por rango.
       const yaUsados = this.folioHelper.usedFolios.get(tipoDte)?.size ?? 0;
-      const disponibles = candidatos.reduce((n, c) => n + (c.hasta - c.desde + 1), 0) - yaUsados;
+      const tamano = (c) => (c.libres ? c.libres.length : c.hasta - c.desde + 1);
+      const disponibles = candidatos.reduce((n, c) => n + tamano(c), 0) - yaUsados;
       if (disponibles <= 0) return null;
 
       // Se juntan desde el folio más bajo, y solo los que hagan falta.
@@ -656,7 +657,12 @@ class CertRunner {
       for (const c of candidatos) {
         if (acumulado >= cantidad) break;
         elegidos.push(c);
-        acumulado += (c.hasta - c.desde + 1);
+        acumulado += tamano(c);
+      }
+      for (const e of elegidos) {
+        if (e.libres) {
+          this.folioHelper.restringirFolios({ tipoDte, folioDesde: e.desde, folioHasta: e.hasta, folios: e.libres });
+        }
       }
 
       return {
@@ -760,6 +766,9 @@ class CertRunner {
           folioLibre: (folio) => this._folioLibreEnSii(tipoDte, folio),
         });
         if (reob.ok) {
+          // Un CAF reobtenido puede traer folios ya recibidos por el SII: el set solo usa
+          // los verificados libres, ahora y en un reintento que lo reuse del disco.
+          for (const r of reob.reobtenidos || []) this._restringirCaf(tipoDte, r);
           // Puede ser más de uno: el SII entrega los folios reobtenidos de a uno y cada
           // CAF firma con su propia llave (ver SetBase._tomarFolio).
           cafs[tipoKey] = reob.cafPaths.length > 1 ? reob.cafPaths : reob.cafPaths[0];
@@ -841,6 +850,33 @@ class CertRunner {
    * rechace el documento y, con él, el set completo.
    * @private
    */
+  /**
+   * Limita un CAF reobtenido a sus folios libres y lo deja anotado junto al archivo
+   * (`<caf>.libres.json`), para que `_cafReusable` respete la misma restricción si un
+   * reintento reusa ese CAF del disco. @private
+   */
+  _restringirCaf(tipoDte, { cafPath, folioDesde, folioHasta, libres }) {
+    if (!Array.isArray(libres) || libres.length === folioHasta - folioDesde + 1) return;
+    this.folioHelper.restringirFolios({ tipoDte, folioDesde, folioHasta, folios: libres });
+    try {
+      fs.writeFileSync(`${cafPath}.libres.json`, JSON.stringify(libres));
+    } catch (err) {
+      console.warn(`[CertRunner] No se pudo anotar los folios libres de ${cafPath}: ${err.message}`);
+    }
+  }
+
+  /** Folios libres anotados para un CAF reobtenido, o `null` si se usa entero. @private */
+  _foliosLibresDeCaf(cafPath) {
+    try {
+      const ruta = `${cafPath}.libres.json`;
+      if (!fs.existsSync(ruta)) return null;
+      const libres = JSON.parse(fs.readFileSync(ruta, 'utf8'));
+      return Array.isArray(libres) ? libres.map(Number) : null;
+    } catch {
+      return null;
+    }
+  }
+
   async _folioLibreEnSii(tipoDte, folio) {
     try {
       this._enviadorConsulta = this._enviadorConsulta || new EnviadorSII(this.certificado, this.ambiente);
