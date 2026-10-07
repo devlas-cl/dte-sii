@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.39.0] - 2026-10-07
+
 ### Corregido
 
 - **La reobtención usa los folios libres de un rango con folios ya recibidos.** `FolioService.reobtenerCaf`
