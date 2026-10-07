@@ -8,6 +8,18 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **La reobtención usa los folios libres de un rango con folios ya recibidos.** `FolioService.reobtenerCaf`
+  descartaba el rango entero si el SII ya había recibido uno de sus folios. Un contribuyente que viene
+  de otro software tiene un rango viejo grande con los primeros folios emitidos: se descartaba, la
+  corrida pedía folios de a uno (el SII raciona porque ve ese rango disponible) y terminaba con el
+  timbraje bloqueado. Ahora se saltan los folios recibidos (tope de 30 consultas por rango) y el
+  resultado trae `reobtenidos` con los folios libres de cada CAF.
+- **`CertFolioHelper.restringirFolios()`**: limita un CAF a ciertos folios. `CertRunner` la aplica al
+  reobtener y la anota junto al CAF (`<caf>.libres.json`), así un reintento que lo reuse del disco
+  tampoco emite un folio ya recibido.
+
 ## [2.38.0] - 2026-10-06
 
 ### Agregado
