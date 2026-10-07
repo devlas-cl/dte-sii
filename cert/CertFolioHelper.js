@@ -25,6 +25,30 @@ class CertFolioHelper {
     this.counters = new Map(); // Contadores de folios por CAF
     this.usedFolios = new Map(); // Folios usados por tipo DTE
     this.sentFolios = new Map(); // Folios marcados como enviados
+    this.permitidos = new Map(); // Folios usables por CAF, cuando no son todo el rango
+  }
+
+  /**
+   * Limita un CAF a ciertos folios.
+   *
+   * Un CAF reobtenido del portal cubre su rango completo, pero parte de esos folios
+   * pudo haberse emitido antes (otro intento, otro software). Emitir de nuevo con uno
+   * de ellos hace que el SII rechace el documento con `(DTE-3-101) Folio ya fue
+   * recibido`. Con esta restricción, `reserveNextFolio` solo entrega los folios que se
+   * verificaron libres.
+   *
+   * @param {Object} params
+   * @param {number} params.tipoDte
+   * @param {number} params.folioDesde - Folio inicial del CAF
+   * @param {number} params.folioHasta - Folio final del CAF
+   * @param {number[]} params.folios - Folios usables, dentro del rango
+   */
+  restringirFolios({ tipoDte, folioDesde, folioHasta, folios }) {
+    const key = this._buildKey({ tipoDte, folioDesde: Number(folioDesde), folioHasta: Number(folioHasta) });
+    const lista = [...new Set((folios || []).map(Number))]
+      .filter((f) => f >= Number(folioDesde) && f <= Number(folioHasta))
+      .sort((a, b) => a - b);
+    this.permitidos.set(key, lista);
   }
 
   /**
@@ -64,7 +88,14 @@ class CertFolioHelper {
     }
 
     const key = this._buildKey({ tipoDte, folioDesde: desde, folioHasta: hasta });
-    const next = this.counters.has(key) ? this.counters.get(key) : desde;
+    let next = this.counters.has(key) ? this.counters.get(key) : desde;
+
+    // CAF restringido: el siguiente folio permitido desde el contador.
+    const permitidos = this.permitidos.get(key);
+    if (permitidos) {
+      const siguiente = permitidos.find((f) => f >= next);
+      next = siguiente ?? hasta + 1;
+    }
 
     if (next > hasta) {
       throw new Error(`No hay más folios disponibles (${desde}-${hasta})`);

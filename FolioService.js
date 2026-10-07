@@ -21,6 +21,13 @@ const { resolveDataDir } = require('./utils/paths');
 /**
  * Clase para gestión integral de folios
  */
+
+/**
+ * Tope de consultas al SII por rango reobtenible. Cada folio cuesta una consulta; un
+ * rango viejo de cientos de folios no se recorre entero para conseguir unos pocos.
+ */
+const MAX_CONSULTAS_POR_RANGO = 30;
+
 class FolioService {
   /**
    * @param {Object} options - Opciones de configuración
@@ -432,36 +439,41 @@ class FolioService {
     //
     // `folioLibre(folio)` confirma contra el SII que el folio no se haya recibido antes. El
     // listado del portal no lo dice (ver arriba) y `yaEmitido` solo conoce nuestro registro.
-    // Se consulta SOLO lo que se va a usar, rango por rango, hasta cubrir la cantidad: un
-    // rango con un folio ya recibido, o que no se pudo verificar, se descarta entero.
+    //
+    // Un rango con folios ya recibidos NO se descarta entero: se usan sus folios libres y
+    // se saltan los recibidos. Descartarlo entero dejaba sin salida al contribuyente que
+    // viene de otro software: un rango de 100 folios autorizado hace años, con 1 a 4
+    // emitidos, se botaba completo por el folio 4, la corrida caía a pedir folios en
+    // tandas de a uno (el SII raciona justamente porque hay 96 libres) y terminaba con el
+    // timbraje bloqueado sin haber emitido nada. Se consulta solo hasta cubrir la cantidad,
+    // con un tope de consultas por rango para no recorrer cientos de folios.
     const elegidos = [];
     let acumulado = 0;
     let descartadosSii = 0;
     for (const r of usables.sort((a, b) => a.folioDesde - b.folioDesde)) {
       if (acumulado >= cantidad) break;
-      if (folioLibre) {
-        let libre = true;
-        for (let f = r.folioDesde; f <= r.folioHasta && libre; f++) {
-          libre = (await folioLibre(f)) === true;
-        }
-        if (!libre) {
-          descartadosSii++;
-          console.warn(
-            `[FolioService] Tipo ${tipoDte}: rango ${r.folioDesde}-${r.folioHasta} descartado — ` +
-            'el SII ya recibió un documento con ese folio (o no se pudo verificar)'
-          );
+      const libres = [];
+      let consultas = 0;
+      for (let f = r.folioDesde; f <= r.folioHasta && acumulado + libres.length < cantidad; f++) {
+        if (!folioLibre) {
+          libres.push(f);
           continue;
         }
+        if (consultas >= MAX_CONSULTAS_POR_RANGO) break;
+        consultas++;
+        if ((await folioLibre(f)) === true) libres.push(f);
+        else descartadosSii++;
       }
-      elegidos.push(r);
-      acumulado += r.cantidad;
+      if (!libres.length) continue;
+      elegidos.push({ ...r, libres });
+      acumulado += libres.length;
     }
     if (acumulado < cantidad) {
       return {
         ok: false,
         disponibles: acumulado,
         motivo: `los rangos usables no alcanzan (se necesitan ${cantidad}, hay ${acumulado}` +
-          `${descartadosSii ? `; ${descartadosSii} descartado(s) por ya recibidos en el SII` : ''})`,
+          `${descartadosSii ? `; ${descartadosSii} folio(s) descartado(s) por ya recibidos en el SII o sin verificar` : ''})`,
       };
     }
 
@@ -469,6 +481,7 @@ class FolioService {
     // uno, así que cubrir 4 folios puede requerir 4 CAF distintos. Los sets los aceptan
     // como lista (ver SetBase._tomarFolio) porque cada uno firma con su propia llave.
     const cafPaths = [];
+    const reobtenidos = [];
     for (const rango of elegidos) {
       const res = await this.cafSolicitor.reobtenerCaf(Number(tipoDte), rango);
       if (!res.success) {
@@ -477,17 +490,25 @@ class FolioService {
         continue;
       }
       cafPaths.push(res.cafPath);
-      console.log(`[FolioService] Tipo ${tipoDte}: CAF REOBTENIDO (folios ${res.folioDesde}-${res.folioHasta}) — sin gastar cupo`);
+      reobtenidos.push({
+        cafPath: res.cafPath,
+        folioDesde: rango.folioDesde,
+        folioHasta: rango.folioHasta,
+        libres: rango.libres,
+      });
+      const parcial = rango.libres.length < rango.folioHasta - rango.folioDesde + 1;
+      console.log(
+        `[FolioService] Tipo ${tipoDte}: CAF REOBTENIDO (folios ${res.folioDesde}-${res.folioHasta}` +
+        `${parcial ? `; se usarán ${rango.libres.join(', ')}` : ''}) — sin gastar cupo`
+      );
     }
 
-    const cubiertos = elegidos
-      .filter((_, i) => i < cafPaths.length)
-      .reduce((n, r) => n + r.cantidad, 0);
+    const cubiertos = reobtenidos.reduce((n, r) => n + r.libres.length, 0);
     if (cubiertos < cantidad) {
       return { ok: false, disponibles: cubiertos,
         motivo: `se reobtuvieron ${cubiertos} folio(s) de los ${cantidad} necesarios` };
     }
-    return { ok: true, cafPaths, cafPath: cafPaths[0] };
+    return { ok: true, cafPaths, cafPath: cafPaths[0], reobtenidos };
   }
 
   /**
