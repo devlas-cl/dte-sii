@@ -447,14 +447,25 @@ class FolioService {
     // tandas de a uno (el SII raciona justamente porque hay 96 libres) y terminaba con el
     // timbraje bloqueado sin haber emitido nada. Se consulta solo hasta cubrir la cantidad,
     // con un tope de consultas por rango para no recorrer cientos de folios.
-    const elegidos = [];
-    let acumulado = 0;
+    //
+    // Se descargan los que hagan falta: el SII entrega los folios reobtenidos de a uno, así
+    // que cubrir 4 folios puede requerir 4 CAF distintos. Los sets los aceptan como lista
+    // (ver SetBase._tomarFolio) porque cada uno firma con su propia llave.
+    //
+    // Elegir y descargar van en el mismo recorrido: el listado no trae la fecha de
+    // autorización, y recién con el CAF en mano se sabe si venció (más de 6 meses: el SII
+    // rechaza cada DTE timbrado con él, CAF-3-517). Un rango vencido no cuenta y se sigue
+    // con el siguiente, en vez de dar la reobtención por perdida.
+    const cafPaths = [];
+    const reobtenidos = [];
+    const vencidos = [];
+    let cubiertos = 0;
     let descartadosSii = 0;
     for (const r of usables.sort((a, b) => a.folioDesde - b.folioDesde)) {
-      if (acumulado >= cantidad) break;
+      if (cubiertos >= cantidad) break;
       const libres = [];
       let consultas = 0;
-      for (let f = r.folioDesde; f <= r.folioHasta && acumulado + libres.length < cantidad; f++) {
+      for (let f = r.folioDesde; f <= r.folioHasta && cubiertos + libres.length < cantidad; f++) {
         if (!folioLibre) {
           libres.push(f);
           continue;
@@ -465,50 +476,49 @@ class FolioService {
         else descartadosSii++;
       }
       if (!libres.length) continue;
-      elegidos.push({ ...r, libres });
-      acumulado += libres.length;
-    }
-    if (acumulado < cantidad) {
-      return {
-        ok: false,
-        disponibles: acumulado,
-        motivo: `los rangos usables no alcanzan (se necesitan ${cantidad}, hay ${acumulado}` +
-          `${descartadosSii ? `; ${descartadosSii} folio(s) descartado(s) por ya recibidos en el SII o sin verificar` : ''})`,
-      };
-    }
 
-    // Se descargan TODOS los que hagan falta: el SII entrega los folios reobtenidos de a
-    // uno, así que cubrir 4 folios puede requerir 4 CAF distintos. Los sets los aceptan
-    // como lista (ver SetBase._tomarFolio) porque cada uno firma con su propia llave.
-    const cafPaths = [];
-    const reobtenidos = [];
-    for (const rango of elegidos) {
-      const res = await this.cafSolicitor.reobtenerCaf(Number(tipoDte), rango);
+      const res = await this.cafSolicitor.reobtenerCaf(Number(tipoDte), { ...r, libres });
       if (!res.success) {
         // Si uno falla a mitad, lo ya descargado igual sirve mientras alcance.
-        console.warn(`[FolioService] Tipo ${tipoDte}: falló reobtener ${rango.folioDesde}-${rango.folioHasta} — ${res.error}`);
+        console.warn(`[FolioService] Tipo ${tipoDte}: falló reobtener ${r.folioDesde}-${r.folioHasta} — ${res.error}`);
+        continue;
+      }
+      const vencido = this._cafVencidoEnDisco(res.cafPath);
+      if (vencido) {
+        vencidos.push({ folioDesde: r.folioDesde, folioHasta: r.folioHasta, autorizado: vencido });
+        console.warn(
+          `[FolioService] Tipo ${tipoDte}: CAF reobtenido ${r.folioDesde}-${r.folioHasta} ` +
+          `VENCIDO (autorizado el ${vencido}) — no se usa; hay que anularlo en el SII`
+        );
         continue;
       }
       cafPaths.push(res.cafPath);
-      reobtenidos.push({
-        cafPath: res.cafPath,
-        folioDesde: rango.folioDesde,
-        folioHasta: rango.folioHasta,
-        libres: rango.libres,
-      });
-      const parcial = rango.libres.length < rango.folioHasta - rango.folioDesde + 1;
+      reobtenidos.push({ cafPath: res.cafPath, folioDesde: r.folioDesde, folioHasta: r.folioHasta, libres });
+      cubiertos += libres.length;
+      const parcial = libres.length < r.folioHasta - r.folioDesde + 1;
       console.log(
         `[FolioService] Tipo ${tipoDte}: CAF REOBTENIDO (folios ${res.folioDesde}-${res.folioHasta}` +
-        `${parcial ? `; se usarán ${rango.libres.join(', ')}` : ''}) — sin gastar cupo`
+        `${parcial ? `; se usarán ${libres.join(', ')}` : ''}) — sin gastar cupo`
       );
     }
 
-    const cubiertos = reobtenidos.reduce((n, r) => n + r.libres.length, 0);
     if (cubiertos < cantidad) {
-      return { ok: false, disponibles: cubiertos,
-        motivo: `se reobtuvieron ${cubiertos} folio(s) de los ${cantidad} necesarios` };
+      return { ok: false, disponibles: cubiertos, vencidos,
+        motivo: `los rangos usables no alcanzan (se necesitan ${cantidad}, hay ${cubiertos}` +
+          `${descartadosSii ? `; ${descartadosSii} folio(s) descartado(s) por ya recibidos en el SII o sin verificar` : ''}` +
+          `${vencidos.length ? `; ${vencidos.length} rango(s) vencido(s) descartado(s)` : ''})` };
     }
-    return { ok: true, cafPaths, cafPath: cafPaths[0], reobtenidos };
+    return { ok: true, cafPaths, cafPath: cafPaths[0], reobtenidos, vencidos };
+  }
+
+  /** Fecha de autorización si el CAF de `cafPath` venció; null si sirve o no se puede leer. */
+  _cafVencidoEnDisco(cafPath) {
+    try {
+      const CAF = require('./CAF');
+      return CAF.vencidoDesdeXml(fs.readFileSync(cafPath, 'utf8'));
+    } catch (_) {
+      return null;
+    }
   }
 
   /**

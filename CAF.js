@@ -19,6 +19,20 @@ const {
 
 const log = createScopedLogger('CAF');
 
+/** Tipos cuyo CAF vence (Res. Ex. SII 58 de 2017): facturas y notas. */
+const TIPOS_CAF_CON_VENCIMIENTO = [33, 46, 56, 61];
+const MESES_VIGENCIA_CAF = 6;
+/** Entre timbrar y que el SII reciba el envío puede pasar un rato. */
+const MARGEN_VENCIMIENTO_MS = 24 * 60 * 60 * 1000;
+
+/** Fecha de autorización más 6 meses, para los tipos que vencen; null si no aplica. */
+function vencimientoCaf(tipo, fa) {
+  if (!TIPOS_CAF_CON_VENCIMIENTO.includes(tipo) || !fa) return null;
+  const [a, m, d] = fa.split('-').map(Number);
+  // Medianoche de Chile continental: UTC-4, el más tardío.
+  return new Date(Date.UTC(a, m - 1 + MESES_VIGENCIA_CAF, d, 4));
+}
+
 class CAF {
   /**
    * @param {string} xmlContent - Contenido XML del archivo CAF
@@ -105,6 +119,49 @@ class CAF {
   getFolioHasta() { return parseInt(this.da.RNG.H, 10); }
   getIDK() { return parseInt(this.da.IDK, 10); }
   esCertificacion() { return this.getIDK() === IDK_CERTIFICACION; }
+
+  /** Fecha de autorización del SII (`<FA>`, AAAA-MM-DD), o null si no viene. */
+  getFechaAutorizacion() {
+    const fa = String(this.da.FA ?? '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(fa) ? fa : null;
+  }
+
+  /**
+   * Vencimiento del CAF: fecha de autorización más 6 meses, solo para los tipos que
+   * vencen (33, 46, 56, 61). null para el resto o sin fecha.
+   *
+   * El SII rechaza cada DTE timbrado con un CAF vencido al recibirlo:
+   * `(CAF-3-517) RECHAZO- CAF Vencido : (Firma_DTE - CAF) > 6 meses`.
+   * @returns {Date|null}
+   */
+  getVencimiento() {
+    return vencimientoCaf(this.getTipoDTE(), this.getFechaAutorizacion());
+  }
+
+  /**
+   * true si el CAF ya venció o vence dentro de `margenMs` (por defecto 1 día: entre
+   * timbrar y que el SII reciba el envío puede pasar un rato).
+   * @param {Date} [ahora]
+   * @param {number} [margenMs]
+   */
+  estaVencido(ahora = new Date(), margenMs = MARGEN_VENCIMIENTO_MS) {
+    const vence = this.getVencimiento();
+    return !!vence && vence.getTime() - ahora.getTime() < margenMs;
+  }
+
+  /**
+   * Lo mismo que `estaVencido`, leyendo solo `<TD>` y `<FA>` del XML, sin parsear la llave.
+   * Devuelve la fecha de autorización si venció; null si sirve o no se puede leer.
+   * @param {string} xml
+   * @param {Date} [ahora]
+   * @returns {string|null}
+   */
+  static vencidoDesdeXml(xml, ahora = new Date()) {
+    const tipo = Number(/<TD>\s*(\d+)\s*<\/TD>/.exec(String(xml))?.[1]);
+    const fa = /<FA>\s*(\d{4}-\d{2}-\d{2})\s*<\/FA>/.exec(String(xml))?.[1] ?? null;
+    const vence = vencimientoCaf(tipo, fa);
+    return vence && vence.getTime() - ahora.getTime() < MARGEN_VENCIMIENTO_MS ? fa : null;
+  }
   
   /**
    * Obtener nombre del tipo de DTE

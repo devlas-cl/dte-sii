@@ -614,6 +614,13 @@ class CertRunner {
           continue;
         }
 
+        // Un CAF vencido (más de 6 meses desde su autorización) hace que el SII rechace
+        // cada DTE timbrado con él (CAF-3-517). Suele llegar por reobtener un rango viejo.
+        if (caf.estaVencido()) {
+          descartes.push(`CAF vencido (autorizado el ${caf.getFechaAutorizacion()})`);
+          continue;
+        }
+
         const desde = caf.getFolioDesde();
         const hasta = caf.getFolioHasta();
         if (!Number.isFinite(desde) || !Number.isFinite(hasta)) continue;

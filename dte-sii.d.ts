@@ -496,6 +496,14 @@ export class CAF {
   getFolioHasta(): number;
   getIDK(): number;
   esCertificacion(): boolean;
+  /** Fecha de autorización del SII (AAAA-MM-DD), o null. */
+  getFechaAutorizacion(): string | null;
+  /** Fecha de autorización más 6 meses (tipos 33, 46, 56, 61); null para el resto. */
+  getVencimiento(): Date | null;
+  /** true si venció o vence dentro de `margenMs` (por defecto 1 día). */
+  estaVencido(ahora?: Date, margenMs?: number): boolean;
+  /** Fecha de autorización si el CAF del XML venció; null si sirve o no se puede leer. */
+  static vencidoDesdeXml(xml: string, ahora?: Date): string | null;
   getNombreTipoDTE(corto?: boolean): string;
   getCafXml(): string;
   sign(data: string): string;

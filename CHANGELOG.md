@@ -8,6 +8,24 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.40.0] - 2026-10-11
+
+### Corregido
+
+- **La certificación no usa CAF vencidos.** Un CAF de tipo 33, 46, 56 o 61 vence a los 6 meses de
+  autorizado, y el SII rechaza cada DTE timbrado con uno (`CAF-3-517 RECHAZO- CAF Vencido`). Al
+  faltar folios, la reobtención podía traer un rango autorizado hace años y la corrida lo usaba: todos
+  los DTE de ese tipo salían rechazados, y las notas de débito que los referencian también
+  (`REF-3-750`). Ahora `FolioService.reobtenerCaf` revisa cada CAF descargado, descarta el vencido y
+  sigue con el próximo rango; el resultado trae `vencidos` (rangos a anular en el SII).
+  `CertRunner` tampoco reusa del disco un CAF vencido.
+
+### Agregado
+
+- **`CAF#getFechaAutorizacion()`, `CAF#getVencimiento()`, `CAF#estaVencido(ahora?, margenMs?)`** y
+  **`CAF.vencidoDesdeXml(xml, ahora?)`** (solo lee `<TD>` y `<FA>`, sin parsear la llave). Margen por
+  defecto: 1 día.
+
 ## [2.39.0] - 2026-10-07
 
 ### Corregido
