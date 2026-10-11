@@ -348,7 +348,7 @@ await enviador.enviarLibroSoap(libro)
 
 ### ConsumoFolio (RCOF)
 
-El RCOF es obligatorio para boletas y debe enviarse **antes de las 08:00 del día siguiente**.
+El RCOF **solo se usa en la certificación de boletas** (el set de pruebas del SII lo exige). En producción no se envía: basta con enviar las boletas, que llegan solas al RCV del SII (verificado con boletas reales, ver `docs/DISENO_REPLICAS_SIN_CORTE.md` del núcleo, sección del RCOF). Antes se documentaba como obligatorio antes de las 08:00 del día siguiente; esa regla ya no aplica.
 
 ```javascript
 const { ConsumoFolio, CAF, Certificado } = require('@devlas/dte-sii')
