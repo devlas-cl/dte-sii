@@ -4135,13 +4135,27 @@ class CertRunner {
 
     if (estadoPost === 'RECHAZADO') {
       console.error(` [ERR] El SII RECHAZÓ la revisión ${revId} de muestras impresas.`);
+      // La cabecera no dice por qué. El detalle por archivo sale de `muestraMail`.
+      let detalle = [];
+      try {
+        const mailResp = await gwtPost(
+          `7|0|5|${GWT_BASE}|${policyHash}|${GWT_SVC}|muestraMail|java.lang.Long/4227064769|` +
+          `1|2|3|4|1|5|5|${revIdEncoded}|`
+        );
+        if (debugDir) fs.writeFileSync(path.join(debugDir, 'pdfte-detalle-revision.txt'), mailResp.body, 'utf8');
+        detalle = CertRunner.parsearDetalleMuestras(mailResp.body);
+      } catch (e) {
+        console.warn(` [!] No se pudo leer el detalle de la revisión ${revId}: ${e.message}`);
+      }
       return {
         success: false,
         rechazado: true,
         revId,
         estado: estadoPost,
-        error: `El SII rechazó las muestras impresas (revisión ${revId}). Revisa el detalle en el portal ` +
-               `de Muestras Impresas y corrige el formato de los documentos antes de volver a subirlos.`,
+        detalle,
+        error: `El SII rechazó las muestras impresas (revisión ${revId}). ` +
+               (CertRunner.resumirDetalleMuestras(detalle) ||
+                'Revisa el detalle en el portal de Muestras Impresas.'),
       };
     }
 
@@ -4149,6 +4163,60 @@ class CertRunner {
       (estadoPost ? ` — estado: ${estadoPost}` : ''));
     process.stdout.write('\nMUESTRAS SUBIDAS EXITOSAMENTE\n');
     return { success: true, revId, estado: estadoPost };
+  }
+
+  /**
+   * Archivos de una revisión de muestras impresas, desde la respuesta GWT de `muestraMail`
+   * (servicio `ServicePdfDte` de pdfdteInternet). Cada fila: archivo, tipo de PDF (PRUEBA
+   * o SIMULACION), tipo de documento, folio, copia y caso de prueba.
+   *
+   * El SII asocia cada PDF a un caso del set de pruebas por tipo y folio. Si los documentos
+   * de un set no son del envío que el SII registró para ese set, los clasifica como
+   * SIMULACION y rechaza la revisión entera, aunque cada archivo figure "aprobado".
+   * @param {string} body
+   * @returns {Array<{archivo, tipoPdf, tipoDocumento, folio, copia, caso}>}
+   */
+  static parsearDetalleMuestras(body) {
+    const m = /"(\\x3Chtml[\s\S]*?)"\]/i.exec(String(body || '')) ||
+      /"(<html[\s\S]*?)"\]/i.exec(String(body || ''));
+    if (!m) return [];
+    const html = m[1]
+      .replace(/\\x([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/\\(["'\\])/g, '$1');
+    const filas = [];
+    for (const [, tr] of html.matchAll(/<tr>([\s\S]*?)<\/tr>/gi)) {
+      const celdas = [...tr.matchAll(/<td>([\s\S]*?)<\/td>/gi)].map(([, c]) => c.replace(/<[^>]+>/g, '').trim());
+      if (celdas.length < 6 || !/\.pdf$/i.test(celdas[1])) continue;
+      filas.push({
+        archivo: celdas[1],
+        tipoPdf: celdas[2],
+        tipoDocumento: celdas[3],
+        folio: Number(celdas[4]),
+        copia: celdas[5],
+        caso: celdas[6] || null,
+      });
+    }
+    return filas;
+  }
+
+  /** Una frase con lo que el SII reconoció como set de pruebas y como simulación. */
+  static resumirDetalleMuestras(detalle) {
+    if (!detalle?.length) return '';
+    const tributarias = detalle.filter((d) => !/CEDIBLE/i.test(d.copia));
+    const por = (tipo) => tributarias.filter((d) => d.tipoPdf === tipo);
+    const casos = [...new Set(por('PRUEBA').map((d) => d.caso).filter(Boolean))];
+    const porTipo = (lista) => {
+      const n = new Map();
+      for (const d of lista) n.set(d.tipoDocumento, (n.get(d.tipoDocumento) || 0) + 1);
+      return [...n].map(([t, c]) => `${t} ${c}`).join(', ');
+    };
+    return (
+      `El SII reconoce como set de pruebas ${por('PRUEBA').length} documento(s) ` +
+      `(casos ${casos.join(', ') || 'ninguno'}: ${porTipo(por('PRUEBA'))}) y como simulación ` +
+      `${por('SIMULACION').length} (${porTipo(por('SIMULACION'))}). Si un set no aparece entre ` +
+      `los casos, sus muestras no son del envío que el SII registró para ese set.`
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════

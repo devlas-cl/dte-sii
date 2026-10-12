@@ -8,6 +8,19 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.41.0] - 2026-10-11
+
+### Agregado
+
+- **El rechazo de muestras impresas trae su detalle.** `leeImpreso` solo devuelve la cabecera
+  (`RECHAZADO`); el validador del SII rechaza en segundos aunque apruebe cada PDF por separado. Ahora,
+  ante un rechazo, `CertRunner` llama `muestraMail` (servicio `ServicePdfDte`) y devuelve `detalle` (cada
+  archivo con tipo de PDF PRUEBA/SIMULACION, tipo de documento, folio, copia y caso) y un `error` que
+  dice qué reconoció el SII como set de pruebas y qué como simulación. Un set que falta entre los casos
+  es uno cuyas muestras no son del envío que el SII registró para ese set. La respuesta cruda queda en
+  `pdfte-detalle-revision.txt`.
+- **`CertRunner.parsearDetalleMuestras(body)`** y **`CertRunner.resumirDetalleMuestras(detalle)`**.
+
 ## [2.40.0] - 2026-10-11
 
 ### Corregido
