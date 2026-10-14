@@ -8,6 +8,15 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **`SiiSession` ya no tumba el proceso cuando una petición al SII vence por tiempo.** `got` 11
+  reintentaba por su cuenta (2 veces en GET) y ese reintento lanzaba `The onCancel handler was
+  attached after the promise settled` desde un timer, como excepción no capturada. Visto en
+  producción el 14/10/2026 al solicitar CAF con conexiones al SII que no completaban. Ahora `got`
+  no reintenta (`retry.limit: 0`); el reintento sigue siendo el de `request()` (2, 4 y 8 s). No
+  cambia ninguna firma pública.
+
 ## [2.41.1] - 2026-10-14
 
 ### Corregido
