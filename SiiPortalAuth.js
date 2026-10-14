@@ -181,6 +181,25 @@ const TARGET = 'https://misiir.sii.cl/cgi_misii/siihome.cgi';
 const AUTH_MAX_INTENTOS = 3;
 
 /**
+ * Tiempos máximos de cada petición al portal.
+ *
+ * Sin tope, una conexión que el SII no completa espera el timeout del sistema operativo
+ * (~125 s en Linux) antes de fallar con `ETIMEDOUT`, y el reintento de `autenticar()` ni
+ * siquiera llega a empezar. Medido el 14/10/2026 desde Railway (us-east4): ~7 % de las
+ * conexiones TLS al SII quedan sin completar, y cada una colgaba la llamada 2 minutos o más.
+ *
+ *  - `SII_PORTAL_CONEXION_TIMEOUT_MS` (10 s): hasta completar TCP y el handshake TLS.
+ *  - `SII_PORTAL_RESPUESTA_TIMEOUT_MS` (60 s): inactividad del socket ya conectado.
+ *
+ * Al vencer, la petición falla con `code: 'ETIMEDOUT'`, que `esErrorTransitorio` ya reintenta.
+ * Se leen en cada petición para poder ajustarlos sin redeploy.
+ */
+function _timeoutMs(nombre, porDefecto) {
+  const n = Number(process.env[nombre]);
+  return Number.isFinite(n) && n > 0 ? n : porDefecto;
+}
+
+/**
  * ¿Es una falla de red/TLS que conviene reintentar?
  *
  * ⚠️ Medido el 18/08/2026: el SII devuelve **`EPROTO` de forma intermitente** al abrir la
@@ -389,6 +408,12 @@ class SiiPortalAuth {
 
       if (isHttps) options.agent = usarCert ? this._agenteCert : this._agentePlano;
 
+      const timeoutConexion  = _timeoutMs('SII_PORTAL_CONEXION_TIMEOUT_MS', 10_000);
+      const timeoutRespuesta = _timeoutMs('SII_PORTAL_RESPUESTA_TIMEOUT_MS', 60_000);
+      // `timeout` se aplica al crear el socket, o sea que cubre la conexión y el handshake.
+      options.timeout = timeoutConexion;
+      let fase = 'conexión';
+
       const req = (isHttps ? https : http).request(options, (res) => {
         // Capturar cookies
         for (const cookieHeader of (res.headers['set-cookie'] || [])) {
@@ -432,6 +457,18 @@ class SiiPortalAuth {
         });
       });
 
+      // Con la conexión lista pasa al tope de inactividad de la respuesta. Un socket que el
+      // agente reutiliza ya viene conectado.
+      req.on('socket', (socket) => {
+        const conectado = () => { fase = 'respuesta'; socket.setTimeout(timeoutRespuesta); };
+        if (!socket.connecting && !socket.pending) conectado();
+        else socket.once(isHttps ? 'secureConnect' : 'connect', conectado);
+      });
+      req.on('timeout', () => {
+        const e = new Error(`SiiPortalAuth: tiempo de espera agotado (${fase}) en ${url.hostname}`);
+        e.code = 'ETIMEDOUT';
+        req.destroy(e);
+      });
       req.on('error', reject);
       if (body) req.write(body);
       req.end();

@@ -597,6 +597,19 @@ SiiPortalAuth.limpiarSesionCache()           // borra todas
 > ⚠️ **En un servidor, apunta `DATADIR` a un volumen persistente.** Sin eso el caché vive en el
 > filesystem del contenedor y se pierde en cada redeploy, forzando un re-login de toda la base.
 
+#### Tiempos máximos de cada petición al portal
+
+Cada petición de `SiiPortalAuth` tiene un tope de conexión y otro de respuesta. Sin ellos, una
+conexión que el SII no completa esperaba el timeout del sistema operativo (~125 s en Linux) antes
+de fallar. Al vencer, la petición falla con `code: 'ETIMEDOUT'`, que `autenticar()` ya reintenta.
+
+| Variable | Defecto | Qué acota |
+|---|---|---|
+| `SII_PORTAL_CONEXION_TIMEOUT_MS` | `10000` | TCP y handshake TLS |
+| `SII_PORTAL_RESPUESTA_TIMEOUT_MS` | `60000` | Inactividad del socket ya conectado |
+
+Un valor vacío, no numérico o menor o igual a 0 usa el defecto. Se leen en cada petición.
+
 #### Varias réplicas: sesión y estado compartidos
 
 Con un solo proceso basta el archivo y el mutex de siempre. Con varias réplicas hay que compartir

@@ -8,6 +8,50 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.41.1] - 2026-10-14
+
+### Corregido
+
+- **`SiiPortalAuth` ya no espera ~2 minutos a una conexión que el SII no completa.** `_request` no
+  tenía tiempo máximo: una conexión TCP o TLS que no terminaba esperaba el timeout del sistema
+  operativo (~125 s) antes de fallar, y el reintento de `autenticar()` no llegaba a empezar. Medido
+  el 14/10/2026 desde una IP de Railway: ~7 % de las conexiones TLS al SII quedaban sin completar.
+  Ahora hay un tope de conexión (10 s, `SII_PORTAL_CONEXION_TIMEOUT_MS`) y uno de respuesta (60 s,
+  `SII_PORTAL_RESPUESTA_TIMEOUT_MS`). Al vencer la petición falla con `code: 'ETIMEDOUT'`, que ya
+  se trata como falla transitoria. No cambia ninguna firma pública. Los demás clientes HTTP de la
+  librería (`EnviadorSII`, `CertRunner`, `BoletaCert`) no se tocan en este cambio.
+
+## [2.41.0] - 2026-10-11
+
+### Agregado
+
+- **El rechazo de muestras impresas trae su detalle.** `leeImpreso` solo devuelve la cabecera
+  (`RECHAZADO`); el validador del SII rechaza en segundos aunque apruebe cada PDF por separado. Ahora,
+  ante un rechazo, `CertRunner` llama `muestraMail` (servicio `ServicePdfDte`) y devuelve `detalle` (cada
+  archivo con tipo de PDF PRUEBA/SIMULACION, tipo de documento, folio, copia y caso) y un `error` que
+  dice qué reconoció el SII como set de pruebas y qué como simulación. Un set que falta entre los casos
+  es uno cuyas muestras no son del envío que el SII registró para ese set. La respuesta cruda queda en
+  `pdfte-detalle-revision.txt`.
+- **`CertRunner.parsearDetalleMuestras(body)`** y **`CertRunner.resumirDetalleMuestras(detalle)`**.
+
+## [2.40.0] - 2026-10-11
+
+### Corregido
+
+- **La certificación no usa CAF vencidos.** Un CAF de tipo 33, 46, 56 o 61 vence a los 6 meses de
+  autorizado, y el SII rechaza cada DTE timbrado con uno (`CAF-3-517 RECHAZO- CAF Vencido`). Al
+  faltar folios, la reobtención podía traer un rango autorizado hace años y la corrida lo usaba: todos
+  los DTE de ese tipo salían rechazados, y las notas de débito que los referencian también
+  (`REF-3-750`). Ahora `FolioService.reobtenerCaf` revisa cada CAF descargado, descarta el vencido y
+  sigue con el próximo rango; el resultado trae `vencidos` (rangos a anular en el SII).
+  `CertRunner` tampoco reusa del disco un CAF vencido.
+
+### Agregado
+
+- **`CAF#getFechaAutorizacion()`, `CAF#getVencimiento()`, `CAF#estaVencido(ahora?, margenMs?)`** y
+  **`CAF.vencidoDesdeXml(xml, ahora?)`** (solo lee `<TD>` y `<FA>`, sin parsear la llave). Margen por
+  defecto: 1 día.
+
 ## [2.39.0] - 2026-10-07
 
 ### Corregido
