@@ -763,6 +763,7 @@ class CertRunner {
       // sabemos, pero el registro local puede estar incompleto (medido el 24/08/2026: los 7
       // documentos de un envío rechazados así). Con cupo holgado se piden folios nuevos,
       // que es la vía sin riesgo. Con FOLIOS_DISP=0 no hay nada que reobtener.
+      let reobParcial = null;
       if (tope && (tope.bloqueado || (!this._cupoAlcanza(tope, cantidad) && (tope.foliosDisp ?? 0) > 0))) {
         const reob = await this.folioService.reobtenerCaf({
           tipoDte, cantidad,
@@ -787,6 +788,8 @@ class CertRunner {
           continue;
         }
         console.warn(`[CertRunner] Tipo ${tipoDte}: reobtención no sirvió — ${reob.motivo}`);
+        // Cubrió solo una parte: esos CAF ya están en disco, no se tiran.
+        if (reob.cafPaths?.length) reobParcial = reob;
       }
 
       // ── 3. Pedir folios ──────────────────────────────────────────────────────
@@ -795,8 +798,15 @@ class CertRunner {
       // al SII se le pide solo la diferencia. Pedir el total de nuevo desperdicia esos
       // folios y encima sube FOLIOS_DISP, que es lo que aprieta el tope. Van primero en la
       // lista: el set numera de menor a mayor y gastar lo más viejo baja FOLIOS_DISP antes.
-      const enMano = previo && !previo.alcanza ? [...previo.paths] : [];
+      let enMano = previo && !previo.alcanza ? [...previo.paths] : [];
       let cubiertos = previo && !previo.alcanza ? previo.total : 0;
+      // Lo recuperado del SII sin alcanzar el total: se conserva y se pide solo lo que falta.
+      // Se toma el mayor de los dos y no la suma: un CAF de disco puede ser el mismo rango.
+      if (reobParcial && reobParcial.disponibles > cubiertos) {
+        for (const r of reobParcial.reobtenidos || []) this._restringirCaf(tipoDte, r);
+        enMano = [...reobParcial.cafPaths];
+        cubiertos = reobParcial.disponibles;
+      }
       if (cubiertos > 0) {
         console.log(
           ` Tipo ${tipoDte}: ${cubiertos} folio(s) ya timbrados en disco ` +
