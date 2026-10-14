@@ -302,6 +302,10 @@ class SiiSession {
       ...(this.tlsAgent ? { agent: { https: this.tlsAgent } } : {}),
       responseType: 'buffer',
       timeout: { request: options.timeoutMs ?? 20000 },
+      // El reintento lo hace request() con su propia curva. El interno de got 11
+      // dispara tras vencer el timeout y lanza "onCancel handler was attached
+      // after the promise settled" fuera de toda promesa, lo que tumba el proceso.
+      retry: { limit: 0 },
     });
 
     this.cookieJar = this._mergeCookies(this.cookieJar, res.headers['set-cookie']);
