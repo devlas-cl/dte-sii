@@ -8,6 +8,17 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **`SiiPortalAuth` ya no espera ~2 minutos a una conexión que el SII no completa.** `_request` no
+  tenía tiempo máximo: una conexión TCP o TLS que no terminaba esperaba el timeout del sistema
+  operativo (~125 s) antes de fallar, y el reintento de `autenticar()` no llegaba a empezar. Medido
+  el 14/10/2026 desde una IP de Railway: ~7 % de las conexiones TLS al SII quedaban sin completar.
+  Ahora hay un tope de conexión (10 s, `SII_PORTAL_CONEXION_TIMEOUT_MS`) y uno de respuesta (60 s,
+  `SII_PORTAL_RESPUESTA_TIMEOUT_MS`). Al vencer la petición falla con `code: 'ETIMEDOUT'`, que ya
+  se trata como falla transitoria. No cambia ninguna firma pública. Los demás clientes HTTP de la
+  librería (`EnviadorSII`, `CertRunner`, `BoletaCert`) no se tocan en este cambio.
+
 ## [2.41.0] - 2026-10-11
 
 ### Agregado
