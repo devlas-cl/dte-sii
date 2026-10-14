@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.41.1] - 2026-10-14
+
 ### Corregido
 
 - **`SiiPortalAuth` ya no espera ~2 minutos a una conexión que el SII no completa.** `_request` no
