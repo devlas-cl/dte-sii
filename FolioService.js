@@ -376,12 +376,12 @@ class FolioService {
    * emitir con ellos es justo lo que el SII pide para levantar el bloqueo, mientras que
    * anular lo empeora (los folios anulados pesan 6 meses en contra del cupo).
    *
-   * ⚠️ Solo sirve un rango que por sí solo alcance: el generador de sets recibe UN CAF por
-   * tipo (`cafManager.ensureCaf({ tipoDte })` en CertRunner), así que no se pueden juntar
-   * dos rangos sueltos para el mismo tipo. El SII suele entregarlos de a un folio, así que
-   * esto no siempre alcanza — y cuando no alcanza, se devuelve el motivo en vez de fingir.
+   * Puede juntar varios CAF para el mismo tipo (los sets los aceptan como lista, ver
+   * SetBase._tomarFolio). Cuando no alcanza, se devuelve el motivo en vez de fingir, y junto
+   * con él los CAF que sí se descargaron (`cafPaths`, `reobtenidos`) para que el llamador
+   * los conserve y pida solo la diferencia.
    *
-   * @returns {Promise<{ ok: boolean, cafPath?: string, motivo?: string, disponibles?: number }>}
+   * @returns {Promise<{ ok: boolean, cafPath?: string, cafPaths?: string[], reobtenidos?: object[], motivo?: string, disponibles?: number }>}
    */
   async reobtenerCaf({ tipoDte, cantidad, yaEmitido = null, folioLibre = null }) {
     if (!this.cafSolicitor) {
@@ -503,7 +503,10 @@ class FolioService {
     }
 
     if (cubiertos < cantidad) {
-      return { ok: false, disponibles: cubiertos, vencidos,
+      // Lo ya descargado se devuelve igual: quedó en disco y el llamador puede conservarlo
+      // y pedir solo la diferencia, en vez de pedir el total de nuevo (el SII bloquea el
+      // timbraje justamente por tener folios sin usar).
+      return { ok: false, disponibles: cubiertos, vencidos, cafPaths, reobtenidos,
         motivo: `los rangos usables no alcanzan (se necesitan ${cantidad}, hay ${cubiertos}` +
           `${descartadosSii ? `; ${descartadosSii} folio(s) descartado(s) por ya recibidos en el SII o sin verificar` : ''}` +
           `${vencidos.length ? `; ${vencidos.length} rango(s) vencido(s) descartado(s)` : ''})` };

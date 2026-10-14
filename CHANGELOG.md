@@ -10,6 +10,13 @@ Versionado [SemVer](https://semver.org/lang/es/).
 
 ### Corregido
 
+- **Una reobtención parcial ya no se descarta.** Cuando `reobtenerCaf` recuperaba solo una parte de los folios
+  pedidos (6 de 7 en el tipo 61, 14/10/2026), devolvía solo el motivo y `solicitarCafs` seguía como si no
+  tuviera nada: pedía los 7 con el timbraje bloqueado y el error decía `hay 0`. Ahora `reobtenerCaf`
+  devuelve también `cafPaths` y `reobtenidos` aunque no alcance, y `solicitarCafs` los conserva y pide solo
+  la diferencia. Con el error `se requieren 7 y hay 6`, el consumidor puede decidir qué sets caben en lo que
+  hay (dte-service `setsQueCaben`) y enviarlos, que es lo que levanta el bloqueo. Con un CAF reusable en
+  disco que cubra más, se mantiene ese. No cambia ninguna firma pública: el resultado solo gana campos.
 - **`SiiSession` ya no tumba el proceso cuando una petición al SII vence por tiempo.** `got` 11
   reintentaba por su cuenta (2 veces en GET) y ese reintento lanzaba `The onCancel handler was
   attached after the promise settled` desde un timer, como excepción no capturada. Visto en
