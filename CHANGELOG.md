@@ -10,6 +10,19 @@ Versionado [SemVer](https://semver.org/lang/es/).
 
 ### Corregido
 
+- **El registro de folios usados se compara con el SII antes de reutilizar un folio.** Dos casos reales
+  (certificación de un comercio nuevo, 14/10/2026). (1) Un set quedó EPR con sus 8 documentos rechazados
+  y sus folios 61 y 56 quedaron libres en el SII, pero el registro los daba por consumidos: la corrida no
+  los reutilizaba y el bloqueo de timbraje no se levantaba nunca. `liberarFoliosDeSobresRechazados`
+  ahora también revisa los envíos procesados con documentos rechazados y quita del registro, folio a
+  folio, solo los que el SII confirma sin recibir (`FAU`); los recibidos y los que no se pudieron
+  verificar se quedan. (2) Las facturas 33 salieron con folios de un CAF restaurado de la base que el SII
+  ya había recibido o anulado, y el set cayó entero. `_cafReusable` consulta al SII por los folios que va
+  a usar y salta los ya recibidos; si no se puede saber, se conserva el comportamiento anterior. Nuevos
+  `CertRunner.resultadoDeEnvio`, `foliosDelEnvio` y `quitarFolios`. `liberarFoliosDeSobresRechazados`
+  devuelve además `documentos` en cada envío rechazado; los `liberados` de documentos van como
+  `"tipo:folio"`.
+
 - **Una reobtención parcial ya no se descarta.** Cuando `reobtenerCaf` recuperaba solo una parte de los folios
   pedidos (6 de 7 en el tipo 61, 14/10/2026), devolvía solo el motivo y `solicitarCafs` seguía como si no
   tuviera nada: pedía los 7 con el timbraje bloqueado y el error decía `hay 0`. Ahora `reobtenerCaf`

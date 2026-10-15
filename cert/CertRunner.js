@@ -494,6 +494,54 @@ class CertRunner {
   }
 
   /**
+   * Contadores de un envío procesado, desde el XML de `QueryEstUp` (suma todos los tipos).
+   * Un envío puede estar EPR (procesado) y traer todos sus documentos rechazados.
+   * @param {string} xml
+   * @returns {{ informados: number, aceptados: number, rechazados: number, reparos: number }}
+   */
+  static resultadoDeEnvio(xml) {
+    const x = String(xml || '').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    const suma = (tag) =>
+      [...x.matchAll(new RegExp(`<${tag}>\\s*(\\d+)\\s*</${tag}>`, 'g'))].reduce((n, m) => n + Number(m[1]), 0);
+    return {
+      informados: suma('INFORMADOS'),
+      aceptados: suma('ACEPTADOS'),
+      rechazados: suma('RECHAZADOS'),
+      reparos: suma('REPAROS'),
+    };
+  }
+
+  /** Tipo y folio de cada documento de un sobre, en orden y sin repetidos. */
+  static foliosDelEnvio(xml) {
+    const vistos = new Set();
+    const out = [];
+    const re = /<TipoDTE>\s*(\d+)\s*<\/TipoDTE>\s*<Folio>\s*(\d+)\s*<\/Folio>/g;
+    for (const m of String(xml || '').matchAll(re)) {
+      const clave = `${m[1]}:${m[2]}`;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      out.push({ tipo: Number(m[1]), folio: Number(m[2]) });
+    }
+    return out;
+  }
+
+  /** Quita `folios` de una lista de rangos `[desde, hasta]`, partiendo los rangos que haga falta. */
+  static quitarFolios(rangos, folios) {
+    const quitar = new Set(folios);
+    const out = [];
+    for (const [d, h] of rangos) {
+      let ini = null;
+      for (let f = d; f <= h; f++) {
+        if (quitar.has(f)) {
+          if (ini !== null) { out.push([ini, f - 1]); ini = null; }
+        } else if (ini === null) ini = f;
+      }
+      if (ini !== null) out.push([ini, h]);
+    }
+    return out;
+  }
+
+  /**
    * Devuelve al uso los folios de envíos que el SII rechazó ENTEROS.
    *
    * `_marcarCafsConsumidos` marca como consumido todo CAF que se intentó enviar, sin mirar
@@ -515,11 +563,19 @@ class CertRunner {
   async liberarFoliosDeSobresRechazados(envios = []) {
     const quitar = [];
     const rechazados = [];
+    const docRechazados = [];
     for (const envio of envios || []) {
       if (!envio || !envio.trackId) continue;
       const r = await this.consultarEstadoEnvio(envio.trackId);
       const estado = String((r && r.estado) || '').toUpperCase();
-      if (!CertRunner.RECHAZOS_DE_SOBRE.has(estado)) continue;
+      if (!CertRunner.RECHAZOS_DE_SOBRE.has(estado)) {
+        // Sobre procesado con documentos rechazados: el folio solo vuelve si el SII confirma
+        // que no lo registró. Caso real (14/10/2026): un set EPR con sus 8 documentos
+        // rechazados dejó libres sus folios 61 y 56, y el registro los daba por usados.
+        const cont = CertRunner.resultadoDeEnvio(r && r.xmlRaw);
+        if (cont.rechazados > 0) docRechazados.push({ envio, estado, cont });
+        continue;
+      }
       let xml = envio.xml;
       if (!xml && envio.xmlPath) {
         try { xml = fs.readFileSync(envio.xmlPath, 'utf8'); }
@@ -534,8 +590,32 @@ class CertRunner {
     }
 
     const liberados = [];
-    if (!quitar.length) return { liberados, rechazados };
+    const foliosLibres = [];
+    for (const { envio, estado, cont } of docRechazados) {
+      let xml = envio.xml;
+      if (!xml && envio.xmlPath) {
+        try { xml = fs.readFileSync(envio.xmlPath, 'utf8'); } catch { continue; }
+      }
+      if (!xml) continue;
+      for (const { tipo, folio } of CertRunner.foliosDelEnvio(xml)) {
+        if ((await this._folioRecibidoEnSii(tipo, folio)) === false) foliosLibres.push({ tipo, folio });
+      }
+      rechazados.push({ trackId: envio.trackId, estado, documentos: cont.rechazados });
+    }
+    if (!quitar.length && !foliosLibres.length) return { liberados, rechazados };
     const registro = await this._cargarFoliosUsados();
+    const porTipo = new Map();
+    for (const { tipo, folio } of foliosLibres) porTipo.set(tipo, [...(porTipo.get(tipo) || []), folio]);
+    for (const [tipo, folios] of porTipo) {
+      const lista = registro[String(tipo)] || [];
+      const queda = CertRunner.quitarFolios(lista, folios);
+      const antes = lista.reduce((n, [d, h]) => n + (h - d + 1), 0);
+      const despues = queda.reduce((n, [d, h]) => n + (h - d + 1), 0);
+      if (despues < antes) {
+        registro[String(tipo)] = queda;
+        for (const f of folios) liberados.push(`${tipo}:${f}`);
+      }
+    }
     for (const { tipo, desde, hasta } of quitar) {
       const lista = registro[String(tipo)] || [];
       const queda = lista.filter(([d, h]) => !(d === desde && h === hasta));
@@ -642,6 +722,43 @@ class CertRunner {
         );
         return null;
       }
+
+      // El registro local puede ir detrás del SII: un CAF restaurado de la base trae folios
+      // que un envío anterior ya dejó recibidos (14/10/2026: facturas 33 con los folios 77 a
+      // 79 ya recibidos y el 80 anulado, rechazadas todas y, en cascada, el set entero). Se
+      // consulta al SII por los folios que se van a usar y se saltan los que ya recibió.
+      // Si no se puede saber, se conserva el comportamiento anterior.
+      candidatos.sort((a, b) => a.desde - b.desde);
+      let porVerificar = cantidad;
+      for (const c of candidatos) {
+        if (porVerificar <= 0) break;
+        const lista = c.libres || Array.from({ length: c.hasta - c.desde + 1 }, (_, i) => c.desde + i);
+        const recibidos = new Set();
+        let buenos = 0;
+        let consultas = 0;
+        for (const f of lista) {
+          if (buenos >= porVerificar || consultas >= 30) break;
+          consultas++;
+          const rec = await this._folioRecibidoEnSii(tipoDte, f);
+          if (rec === true) recibidos.add(f);
+          else buenos++;
+        }
+        porVerificar -= buenos;
+        if (recibidos.size) {
+          console.warn(
+            `[CertRunner] Tipo ${tipoDte}: el CAF ${c.desde}-${c.hasta} trae folios que el SII ya recibió ` +
+            `(${[...recibidos].join(', ')}): se saltan`
+          );
+          c.libres = lista.filter((f) => !recibidos.has(f));
+          this._restringirCaf(tipoDte, { cafPath: c.path, folioDesde: c.desde, folioHasta: c.hasta, libres: c.libres });
+        }
+      }
+
+      // Un CAF al que no le quedó ningún folio libre no sirve.
+      for (let i = candidatos.length - 1; i >= 0; i--) {
+        if (candidatos[i].libres && candidatos[i].libres.length === 0) candidatos.splice(i, 1);
+      }
+      if (!candidatos.length) return null;
 
       // Descuento del contador de ESTA corrida: si el helper ya reservó folios de este
       // tipo, no vuelven a estar disponibles. Va sobre el total y no por CAF porque el
@@ -889,6 +1006,21 @@ class CertRunner {
       if (!fs.existsSync(ruta)) return null;
       const libres = JSON.parse(fs.readFileSync(ruta, 'utf8'));
       return Array.isArray(libres) ? libres.map(Number) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * ¿El SII tiene un documento con este tipo y folio? `true` recibido, `false` libre, `null`
+   * si no se pudo saber. A diferencia de `_folioLibreEnSii`, distingue "no sé" de "recibido".
+   * @private
+   */
+  async _folioRecibidoEnSii(tipoDte, folio) {
+    try {
+      this._enviadorConsulta = this._enviadorConsulta || new EnviadorSII(this.certificado, this.ambiente);
+      const r = await this._enviadorConsulta.folioRecibido(this.config.emisor.rut, tipoDte, folio);
+      return r.recibido === true ? true : r.recibido === false ? false : null;
     } catch {
       return null;
     }
