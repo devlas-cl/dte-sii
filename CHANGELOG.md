@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.42.2] - 2026-10-20
+
 ### Corregido
 
 - **Ante el bloqueo de la persona por "situaciones pendientes", la certificación reobtiene folios antes de anular.**
