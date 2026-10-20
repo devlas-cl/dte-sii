@@ -905,6 +905,7 @@ export type CafSolicitarErrorCode =
   | 'RANGO_YA_AUTORIZADO'
   | 'EMPRESA_NO_AUTORIZADA'
   | 'USUARIO_SIN_PERMISO'
+  | 'PERSONA_CON_SITUACIONES_PENDIENTES'
   | 'NO_AUTORIZADO_INGRESAR_OPCION'
   | 'REQUIERE_TRAMITE_PRESENCIAL'
   | 'VERIFICACION_ACTIVIDADES_PENDIENTE'
@@ -966,6 +967,11 @@ export class CafSolicitor {
   static esRechazoDuro(html: string): boolean;
   /** true si el usuario del certificado no tiene permiso o autorización en la empresa. */
   static esUsuarioSinPermiso(html: string): boolean;
+  /**
+   * true si el SII bloquea a la persona autenticada para trámites de Factura Electrónica porque tiene
+   * situaciones pendientes con el SII. No se levanta reintentando.
+   */
+  static esPersonaConSituacionesPendientes(html: string): boolean;
   /**
    * Texto visible de un HTML del portal: sin etiquetas, scripts ni estilos, con las
    * entidades de vocales acentuadas pasadas a vocal simple y recortado a `max` caracteres
