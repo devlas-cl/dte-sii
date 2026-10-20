@@ -8,6 +8,16 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **Ante el bloqueo de la persona por "situaciones pendientes", la certificación reobtiene folios antes de anular.**
+  Con ese bloqueo el SII no muestra el formulario de timbraje, el tope no se puede leer y el paso de reobtención
+  (que depende del tope) nunca corría; 2.42.1 pasaba directo a anular, que agrava el bloqueo. Ahora, si
+  `_pedirFolios` devuelve `PERSONA_CON_SITUACIONES_PENDIENTES` y la reobtención no se había intentado, se intenta
+  recuperar los folios ya autorizados y emitir con ellos; solo si no sirve se anula, como último recurso. Si el
+  portal también bloquea la reobtención, `reobtenerCaf` devuelve `ok: false` y el flujo sigue como en 2.42.1.
+  No cambia ninguna firma ni el XML.
+
 ## [2.42.1] - 2026-10-20
 
 ### Corregido
