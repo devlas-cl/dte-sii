@@ -1125,7 +1125,12 @@ class CertRunner {
    * @private
    */
   _convieneAnular(res, enManoFolios) {
-    const porTope = ['MAX_AUTOR_INSUFICIENTE', 'TIMBRAJE_BLOQUEADO', 'TOPE_SII_INSUFICIENTE'].includes(res.errorCode);
+    // PERSONA_CON_SITUACIONES_PENDIENTES: el SII no dice cuáles son las situaciones, y entre las posibles están
+    // folios sin utilizar. Anular es el único remedio que la librería puede intentar sola; si el portal no lo
+    // permite, `_anularSinUsar` devuelve 0 y el error original sube sin cambios.
+    const porTope = [
+      'MAX_AUTOR_INSUFICIENTE', 'TIMBRAJE_BLOQUEADO', 'TOPE_SII_INSUFICIENTE', 'PERSONA_CON_SITUACIONES_PENDIENTES',
+    ].includes(res.errorCode);
     if (!porTope) return false;
     return res.foliosDisp == null || res.foliosDisp > enManoFolios;
   }
@@ -1158,6 +1163,8 @@ class CertRunner {
     console.warn(
       res.errorCode === 'TIMBRAJE_BLOQUEADO'
         ? `[CertRunner] Tipo ${tipoDte}: el SII tiene el timbraje BLOQUEADO — anulando folios sin usar (último recurso)...`
+        : res.errorCode === 'PERSONA_CON_SITUACIONES_PENDIENTES'
+        ? `[CertRunner] Tipo ${tipoDte}: el SII bloquea a la persona por situaciones pendientes — anulando folios sin usar (último recurso)...`
         : `[CertRunner] Tipo ${tipoDte}: el SII no autorizó los ${cantidad} folios (MAX_AUTOR=${res.maxAutor}, ` +
           `FOLIOS_DISP=${res.foliosDisp}) — anulando folios sin usar (último recurso)...`
     );
