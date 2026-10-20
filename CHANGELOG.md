@@ -8,6 +8,16 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Corregido
+
+- **La certificación intenta anular folios sin usar cuando el SII bloquea a la persona por "situaciones pendientes".**
+  `CertRunner._convieneAnular` solo anulaba ante los códigos de tope o bloqueo de timbraje. El bloqueo de la persona
+  (`PERSONA_CON_SITUACIONES_PENDIENTES`) no es uno de ellos, así que no se probaba el único remedio que la librería
+  puede intentar sola: el SII no dice cuáles son las situaciones y una de las posibles son folios sin utilizar. Ahora
+  se intenta anular, con la misma ventana acotada de siempre (180 días en maullín, 1 día en producción, máximo 10
+  rangos). Si el portal no lo permite, la anulación devuelve 0 y el error original sube sin cambios. No cambia ninguna
+  firma ni el XML.
+
 ## [2.42.0] - 2026-10-20
 
 ### Corregido
