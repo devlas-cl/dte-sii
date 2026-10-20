@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.42.0] - 2026-10-20
+
 ### Corregido
 
 - **El domicilio del portal se separa en calle, villa/población, ciudad y comuna.** El portal entrega el domicilio
@@ -28,6 +30,10 @@ Versionado [SemVer](https://semver.org/lang/es/).
   (regularizar en el SII). La boleta (39) no recibe este bloqueo. **Valor nuevo en la unión `CafSolicitarErrorCode`:**
   un consumidor con un `switch` exhaustivo sobre los códigos debe agregarlo.
 
+## [2.41.4] - 2026-10-14
+
+### Corregido
+
 - **El registro de folios usados se compara con el SII antes de reutilizar un folio.** Dos casos reales
   (certificación de un comercio nuevo, 14/10/2026). (1) Un set quedó EPR con sus 8 documentos rechazados
   y sus folios 61 y 56 quedaron libres en el SII, pero el registro los daba por consumidos: la corrida no
@@ -41,6 +47,10 @@ Versionado [SemVer](https://semver.org/lang/es/).
   devuelve además `documentos` en cada envío rechazado; los `liberados` de documentos van como
   `"tipo:folio"`.
 
+## [2.41.3] - 2026-10-14
+
+### Corregido
+
 - **Una reobtención parcial ya no se descarta.** Cuando `reobtenerCaf` recuperaba solo una parte de los folios
   pedidos (6 de 7 en el tipo 61, 14/10/2026), devolvía solo el motivo y `solicitarCafs` seguía como si no
   tuviera nada: pedía los 7 con el timbraje bloqueado y el error decía `hay 0`. Ahora `reobtenerCaf`
@@ -48,6 +58,11 @@ Versionado [SemVer](https://semver.org/lang/es/).
   la diferencia. Con el error `se requieren 7 y hay 6`, el consumidor puede decidir qué sets caben en lo que
   hay (dte-service `setsQueCaben`) y enviarlos, que es lo que levanta el bloqueo. Con un CAF reusable en
   disco que cubra más, se mantiene ese. No cambia ninguna firma pública: el resultado solo gana campos.
+
+## [2.41.2] - 2026-10-14
+
+### Corregido
+
 - **`SiiSession` ya no tumba el proceso cuando una petición al SII vence por tiempo.** `got` 11
   reintentaba por su cuenta (2 veces en GET) y ese reintento lanzaba `The onCancel handler was
   attached after the promise settled` desde un timer, como excepción no capturada. Visto en
