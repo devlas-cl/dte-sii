@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.42.1] - 2026-10-20
+
 ### Corregido
 
 - **La certificación intenta anular folios sin usar cuando el SII bloquea a la persona por "situaciones pendientes".**
