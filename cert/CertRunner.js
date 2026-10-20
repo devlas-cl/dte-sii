@@ -881,15 +881,18 @@ class CertRunner {
       // documentos de un envío rechazados así). Con cupo holgado se piden folios nuevos,
       // que es la vía sin riesgo. Con FOLIOS_DISP=0 no hay nada que reobtener.
       let reobParcial = null;
+      let reobIntentada = false;
+      const reobtener = () => this.folioService.reobtenerCaf({
+        tipoDte, cantidad,
+        // El portal lista folios ya emitidos sin marcarlos: el único que lo sabe es este
+        // registro, el mismo con el que se descartan los CAF de disco en _cafReusable.
+        yaEmitido: (r) => this._rangoYaConsumido(tipoDte, r.folioDesde, r.folioHasta), // puede ser asíncrono
+        // Y el SII: el registro local no sabe de corridas viejas ni de otro software.
+        folioLibre: (folio) => this._folioLibreEnSii(tipoDte, folio),
+      });
       if (tope && (tope.bloqueado || (!this._cupoAlcanza(tope, cantidad) && (tope.foliosDisp ?? 0) > 0))) {
-        const reob = await this.folioService.reobtenerCaf({
-          tipoDte, cantidad,
-          // El portal lista folios ya emitidos sin marcarlos: el único que lo sabe es este
-          // registro, el mismo con el que se descartan los CAF de disco en _cafReusable.
-          yaEmitido: (r) => this._rangoYaConsumido(tipoDte, r.folioDesde, r.folioHasta), // puede ser asíncrono
-          // Y el SII: el registro local no sabe de corridas viejas ni de otro software.
-          folioLibre: (folio) => this._folioLibreEnSii(tipoDte, folio),
-        });
+        reobIntentada = true;
+        const reob = await reobtener();
         if (reob.ok) {
           // Un CAF reobtenido puede traer folios ya recibidos por el SII: el set solo usa
           // los verificados libres, ahora y en un reintento que lo reuse del disco.
@@ -934,6 +937,33 @@ class CertRunner {
       let res = await this._pedirFolios(tipoDte, cantidad - cubiertos, tope);
       enMano.push(...res.cafPaths);
       cubiertos += res.otorgados;
+
+      // ── 3b. Bloqueo de la persona: recuperar antes de anular ────────────────
+      //
+      // Con este bloqueo el SII no muestra el formulario de timbraje, así que el tope no se puede leer y el
+      // paso 2 no corre. Pero el remedio sigue siendo el mismo: recuperar los folios ya autorizados
+      // (reobtención) y emitir con ellos, antes de anular, que agrava el bloqueo. Si el portal también
+      // bloquea la reobtención, `reobtenerCaf` no sirve y se sigue con el flujo de siempre.
+      if (cubiertos < cantidad && res.errorCode === 'PERSONA_CON_SITUACIONES_PENDIENTES' && !reobIntentada) {
+        reobIntentada = true;
+        const reob = await reobtener();
+        if (reob.ok) {
+          for (const r of reob.reobtenidos || []) this._restringirCaf(tipoDte, r);
+          cafs[tipoKey] = reob.cafPaths.length > 1 ? reob.cafPaths : reob.cafPaths[0];
+          emitProgress(STEPS.CAF_OK, { tipo: tipoDte });
+          console.log(
+            ` ✓ CAF tipo ${tipoDte} recuperado del SII: ${reob.cafPaths.length} CAF ` +
+            `de folios ya autorizados, sin gastar cupo`
+          );
+          continue;
+        }
+        console.warn(`[CertRunner] Tipo ${tipoDte}: reobtención no sirvió — ${reob.motivo}`);
+        if (reob.cafPaths?.length && reob.disponibles > cubiertos) {
+          for (const r of reob.reobtenidos || []) this._restringirCaf(tipoDte, r);
+          enMano = [...enMano, ...reob.cafPaths];
+          cubiertos = reob.disponibles;
+        }
+      }
 
       // ── 4. Anular, solo como último recurso ─────────────────────────────────
       if (cubiertos < cantidad && this._convieneAnular(res, cubiertos)) {
