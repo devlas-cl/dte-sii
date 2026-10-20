@@ -339,6 +339,22 @@ class CafSolicitor {
   }
 
   /**
+   * "La persona autenticada no puede realizar trámites de Factura Electrónica, ya que tiene situaciones
+   * pendientes con el SII. Para regularizarlas debe concurrir a la Unidad del SII..."
+   *
+   * El sujeto es la PERSONA que se autentica con el certificado, no la empresa ni sus folios. Es un bloqueo
+   * del SII sobre esa persona para los trámites de factura (33, 34, 52, 56, 61): no se levanta esperando ni
+   * reintentando, solo regularizando lo pendiente en el SII. Boleta (39) no lo recibe.
+   *
+   * Caso real (20/10/2026, certificación de factura en maullín): la página llegaba en el paso de solicitud y
+   * la librería la devolvía como genérico `UNKNOWN`; el consumidor la tomó por racionamiento de folios y
+   * reintentó durante horas.
+   */
+  static esPersonaConSituacionesPendientes(html) {
+    return /situaciones\s+pendientes\s+con\s+el\s+SII/i.test(CafSolicitor.textoVisible(html, 4000));
+  }
+
+  /**
    * ¿Este HTML es un rechazo que hace inútil seguir el flujo?
    *
    * ⚠️ Los rechazos del SII NO llegan siempre en la última respuesta. Este caso real
@@ -357,6 +373,7 @@ class CafSolicitor {
       || CafSolicitor.esEmpresaNoAutorizada(h)
       || CafSolicitor.esNoAutorizadoIngresarOpcion(h)
       || CafSolicitor.esUsuarioSinPermiso(h)
+      || CafSolicitor.esPersonaConSituacionesPendientes(h)
       || /no\s+registra\s+Verificaci.{0,8}n\s+de\s+Actividades/i.test(CafSolicitor.textoVisible(h, 4000));
   }
 
@@ -670,6 +687,14 @@ class CafSolicitor {
           success: false,
           errorCode: 'USUARIO_SIN_PERMISO',
           error: `SII (106): el RUT del certificado no tiene permisos para solicitar folios en la empresa (ambiente ${this.ambiente}). Vuelve a ejecutar la inscripción para reasignar permisos de firmar, enviar y obtener folios.`,
+        };
+      }
+
+      if (response.body && CafSolicitor.esPersonaConSituacionesPendientes(response.body)) {
+        return {
+          success: false,
+          errorCode: 'PERSONA_CON_SITUACIONES_PENDIENTES',
+          error: `SII (${this.ambiente}): la persona que firma con el certificado tiene situaciones pendientes con el SII y no puede realizar trámites de Factura Electrónica, entre ellos solicitar folios. No se resuelve esperando ni reintentando: debe regularizarlas en el SII (unidad de su jurisdicción o sii.cl). El SII no indica cuáles son.`,
         };
       }
 

@@ -19,6 +19,14 @@ Versionado [SemVer](https://semver.org/lang/es/).
   `obtenerEmisor` ahora entrega la `ciudad` real en vez de repetir la comuna. **Cambio de comportamiento visible:**
   quien componía el domicilio a partir de `direccion` y esperaba la villa o la ciudad dentro debe leer
   `villaPoblacion` y `ciudad`. No cambia ninguna firma ni la forma del XML.
+- **`solicitar()` distingue el bloqueo de la persona que firma por "situaciones pendientes con el SII".** Al pedir
+  folios de factura, nota o guía, el SII puede responder "La persona autenticada no puede realizar trámites de
+  Factura Electrónica, ya que tiene situaciones pendientes con el SII". Esa página no se reconocía y volvía como
+  `UNKNOWN: No se obtuvo CAF`, que un consumidor tomó por racionamiento de folios y reintentó durante horas (caso
+  real, certificación de factura en maullín, 20/10/2026). Nuevo `CafSolicitor.esPersonaConSituacionesPendientes`,
+  incluido en `esRechazoDuro`, y nuevo `errorCode` `PERSONA_CON_SITUACIONES_PENDIENTES` con el motivo y la acción
+  (regularizar en el SII). La boleta (39) no recibe este bloqueo. **Valor nuevo en la unión `CafSolicitarErrorCode`:**
+  un consumidor con un `switch` exhaustivo sobre los códigos debe agregarlo.
 
 - **El registro de folios usados se compara con el SII antes de reutilizar un folio.** Dos casos reales
   (certificación de un comercio nuevo, 14/10/2026). (1) Un set quedó EPR con sus 8 documentos rechazados
