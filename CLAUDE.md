@@ -46,7 +46,7 @@ Published as `@devlas/dte-sii` (MIT). Consumed from ESM projects via `createRequ
 ├── scripts/              ← Herramientas de mantenimiento, NO se publican a npm
 │   └── scan-datos-reales.js  ← Barrido previo al push (npm run scan)
 ├── .github/              ← CI, plantillas de PR e issues, dependabot, CODEOWNERS
-├── .claude/skills/       ← Reglas para agentes (pr-dte-sii)
+├── .claude/skills/       ← Reglas para agentes (pr-dte-sii, release-dte-sii)
 └── docs/                 ← Solo material PUBLICO del SII: PDFs oficiales, XSD y
                           ejemplos del propio SII. Nada nuestro, nada de clientes.
 ```
