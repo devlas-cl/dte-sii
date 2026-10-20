@@ -1028,17 +1028,10 @@ class SiiPortalAuth {
       }
     }
 
-    // Extraer dirección y comuna (la dirección incluye "Comuna XXXX" al final)
+    // El SII entrega el domicilio en una sola celda, con cada dato precedido de su etiqueta y la comuna al final
+    // ("CALLE 123, Villa/Pob. NOMBRE, Ciudad NOMBRE, Comuna NOMBRE"). Se separa en sus partes.
     const dirRaw = datos['DIRECCIÓN DE LA EMPRESA'] || datos['DIRECCION DE LA EMPRESA'] || null;
-    let direccion = dirRaw;
-    let comuna = null;
-    if (dirRaw) {
-      const comunaMatch = dirRaw.match(/,?\s*Comuna\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑA-Z ]+)$/i);
-      if (comunaMatch) {
-        comuna = comunaMatch[1].trim();
-        direccion = dirRaw.slice(0, comunaMatch.index).replace(/,\s*$/, '').trim();
-      }
-    }
+    const { direccion, villaPoblacion, ciudad, comuna } = SiiPortalAuth._separarDomicilio(dirRaw);
 
     const dirReg = datos['DIRECCIÓN REGIONAL DEL CONTRIBUYENTE'] || datos['DIRECCION REGIONAL DEL CONTRIBUYENTE'] || null;
     const glosa  = datos['GLOSA DESCRIPTIVA'] || null;
@@ -1048,13 +1041,48 @@ class SiiPortalAuth {
       razonSocial:  datos['NOMBRE O RAZÓN SOCIAL'] || datos['NOMBRE O RAZON SOCIAL'] || null,
       giro:         actividades[0]?.descripcion || null,  // descripción de la primera actividad económica
       direccion,
+      villaPoblacion,
+      ciudad,
       comuna,
+      direccionPortal: dirRaw,
       dirReg,
       sucursal_sii: dirReg ? `S.I.I. - ${dirReg}` : null,
       acteco:       actividades[0]?.codigo || null,
       actividades:  actividades.length ? actividades : null,
       glosa,
     };
+  }
+
+  /**
+   * Separa el domicilio tal como lo muestra el portal. Las etiquetas "Villa/Pob.", "Ciudad" y "Comuna" son texto del
+   * propio SII, no parte del dato: pegadas en `DirOrigen` el campo pasa los 70 caracteres del XSD y el SII rechaza el
+   * envio completo. Se quitan desde el final, en cualquier orden, y cada dato queda en su campo.
+   * No recorta ni cambia ningun dato: `direccionPortal` conserva el texto original.
+   * @param {string|null} dirRaw
+   * @returns {{direccion: string|null, villaPoblacion: string|null, ciudad: string|null, comuna: string|null}}
+   * @private
+   */
+  static _separarDomicilio(dirRaw) {
+    if (!dirRaw) return { direccion: dirRaw ?? null, villaPoblacion: null, ciudad: null, comuna: null };
+    let resto = String(dirRaw);
+    const partes = { villaPoblacion: null, ciudad: null, comuna: null };
+    const etiquetas = [
+      ['comuna', /,?\s*Comuna\s+([^,]+)$/i],
+      ['ciudad', /,?\s*Ciudad\s+([^,]+)$/i],
+      ['villaPoblacion', /,?\s*Villa\/Pob\.?\s+([^,]+)$/i],
+    ];
+    for (let cambio = true; cambio;) {
+      cambio = false;
+      for (const [campo, re] of etiquetas) {
+        const m = resto.match(re);
+        if (m && partes[campo] === null) {
+          partes[campo] = m[1].trim();
+          resto = resto.slice(0, m.index);
+          cambio = true;
+        }
+      }
+    }
+    return { direccion: resto.replace(/,\s*$/, '').trim() || null, ...partes };
   }
 
   // ─── Parser interno ──────────────────────────────────────────────────────────

@@ -10,6 +10,16 @@ Versionado [SemVer](https://semver.org/lang/es/).
 
 ### Corregido
 
+- **El domicilio del portal se separa en calle, villa/población, ciudad y comuna.** El portal entrega el domicilio
+  en una sola celda con las etiquetas del propio SII ("CALLE 123, Villa/Pob. NOMBRE, Ciudad NOMBRE, Comuna NOMBRE").
+  `obtenerDatosContribuyente` solo quitaba la comuna del final, así que `direccion` llevaba "Villa/Pob." y "Ciudad"
+  y podía pasar los 70 caracteres de `DirOrigen`: el SII rechazaba el EnvioBOLETA entero por XSD (`cvc-maxLength-valid`,
+  caso real de un comercio con domicilio con villa y ciudad). Ahora `direccion` es solo la calle, y `villaPoblacion`,
+  `ciudad` y `comuna` van en su campo; `direccionPortal` conserva el texto original sin tocar. No se recorta ningún dato.
+  `obtenerEmisor` ahora entrega la `ciudad` real en vez de repetir la comuna. **Cambio de comportamiento visible:**
+  quien componía el domicilio a partir de `direccion` y esperaba la villa o la ciudad dentro debe leer
+  `villaPoblacion` y `ciudad`. No cambia ninguna firma ni la forma del XML.
+
 - **El registro de folios usados se compara con el SII antes de reutilizar un folio.** Dos casos reales
   (certificación de un comercio nuevo, 14/10/2026). (1) Un set quedó EPR con sus 8 documentos rechazados
   y sus folios 61 y 56 quedaron libres en el SII, pero el registro los daba por consumidos: la corrida no
