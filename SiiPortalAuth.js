@@ -1028,6 +1028,20 @@ class SiiPortalAuth {
       }
     }
 
+    // Tabla "DIRECCION SUCURSALES" (codigo, tipo de direccion, direccion): son las mismas sucursales de Mi SII, con el codigo
+    // a 9 digitos. Se lee solo el tramo entre su titulo y el de las actividades, porque los codigos de actividad tambien son
+    // filas de tres celdas.
+    const sucursales = [];
+    const tramo = html.match(/DIRECCI(?:&Oacute;|Ó|O)N\s+SUCURSALES[\s\S]*?(?=ACTIVIDADES\s+ECON|$)/i);
+    if (tramo) {
+      for (const row of tramo[0].matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
+        const celdas = [...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => clean(m[1]));
+        if (celdas.length === 3 && /^\d{1,9}$/.test(celdas[0])) {
+          sucursales.push({ codigo: parseInt(celdas[0], 10), tipo: celdas[1], direccion: celdas[2] });
+        }
+      }
+    }
+
     // El SII entrega el domicilio en una sola celda, con cada dato precedido de su etiqueta y la comuna al final
     // ("CALLE 123, Villa/Pob. NOMBRE, Ciudad NOMBRE, Comuna NOMBRE"). Se separa en sus partes.
     const dirRaw = datos['DIRECCIÓN DE LA EMPRESA'] || datos['DIRECCION DE LA EMPRESA'] || null;
@@ -1049,6 +1063,7 @@ class SiiPortalAuth {
       sucursal_sii: dirReg ? `S.I.I. - ${dirReg}` : null,
       acteco:       actividades[0]?.codigo || null,
       actividades:  actividades.length ? actividades : null,
+      sucursales,
       glosa,
     };
   }
