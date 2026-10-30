@@ -45,6 +45,8 @@ export interface Emisor {
   Acteco?: number | string;
   Telefono?: string;
   CorreoEmisor?: string;
+  /** Codigo de sucursal inscrito en el SII (entero de 1 a 999999999); se emite como `CdgSIISucur`. */
+  CdgSIISucur?: number | string;
   DirOrigen: string;
   CmnaOrigen: string;
   CiudadOrigen?: string;
