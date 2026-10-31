@@ -8,6 +8,8 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.43.0] - 2026-10-30
+
 ### Agregado
 
 - **El emisor puede declarar el código de sucursal del SII (`CdgSIISucur`).** El campo existe en el esquema del DTE y de la
