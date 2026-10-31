@@ -41,6 +41,7 @@ function buildEmisor(config) {
     telefono,
     correo,
     acteco,
+    codigoSucursalSii,
   } = config;
 
   const emisor = {
@@ -53,6 +54,7 @@ function buildEmisor(config) {
   if (telefono) emisor.Telefono = telefono;
   if (correo) emisor.CorreoEmisor = correo;
 
+  if (codigoSucursalSii) emisor.CdgSIISucur = codigoSucursalSii;
   emisor.DirOrigen = sanitizeSiiText(direccion);
   emisor.CmnaOrigen = comuna;
   emisor.CiudadOrigen = ciudad || comuna || '';
@@ -73,12 +75,13 @@ function buildEmisor(config) {
  * @returns {Object} Emisor formateado para Boleta
  */
 function buildEmisorBoleta(config) {
-  const { rut, razonSocial, giro, direccion, comuna, ciudad } = config;
+  const { rut, razonSocial, giro, direccion, comuna, ciudad, codigoSucursalSii } = config;
 
   return {
     RUTEmisor: formatRutSii(rut),
     RznSocEmisor: sanitizeSiiText(razonSocial),
     GiroEmisor: sanitizeSiiText(giro),
+    ...(codigoSucursalSii ? { CdgSIISucur: codigoSucursalSii } : {}),
     DirOrigen: sanitizeSiiText(direccion),
     CmnaOrigen: comuna,
     CiudadOrigen: ciudad || comuna || '',
@@ -101,6 +104,7 @@ function normalizeEmisor(emisor, esBoleta = false) {
       RUTEmisor: rutNorm,
       RznSocEmisor: sanitizeSiiText(emisor.RznSocEmisor || emisor.RznSoc),
       GiroEmisor: sanitizeSiiText(emisor.GiroEmisor || emisor.GiroEmis),
+      ...(emisor.CdgSIISucur ? { CdgSIISucur: emisor.CdgSIISucur } : {}),
       DirOrigen: sanitizeSiiText(emisor.DirOrigen),
       CmnaOrigen: emisor.CmnaOrigen,
       CiudadOrigen: emisor.CiudadOrigen || emisor.CmnaOrigen || '',
@@ -117,6 +121,7 @@ function normalizeEmisor(emisor, esBoleta = false) {
   if (emisor.Telefono) result.Telefono = emisor.Telefono;
   if (emisor.CorreoEmisor) result.CorreoEmisor = emisor.CorreoEmisor;
 
+  if (emisor.CdgSIISucur) result.CdgSIISucur = emisor.CdgSIISucur;
   result.DirOrigen = sanitizeSiiText(emisor.DirOrigen);
   result.CmnaOrigen = emisor.CmnaOrigen;
   result.CiudadOrigen = emisor.CiudadOrigen || emisor.CmnaOrigen || '';
@@ -151,6 +156,13 @@ function validarEmisor(emisor) {
   const giro = emisor.GiroEmis || emisor.GiroEmisor;
   if (!giro) {
     errors.push('Giro requerido');
+  }
+
+  if (emisor.CdgSIISucur !== undefined && emisor.CdgSIISucur !== null && emisor.CdgSIISucur !== '') {
+    const c = Number(emisor.CdgSIISucur);
+    if (!Number.isInteger(c) || c < 1 || c > 999999999) {
+      errors.push('CdgSIISucur debe ser un entero entre 1 y 999999999');
+    }
   }
 
   if (!emisor.DirOrigen) {

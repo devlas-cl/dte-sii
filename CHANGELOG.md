@@ -8,6 +8,18 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+### Agregado
+
+- **El emisor puede declarar el código de sucursal del SII (`CdgSIISucur`).** El campo existe en el esquema del DTE y de la
+  boleta (entero de 1 a 999999999, opcional) y la librería no lo emitía, así que todo documento salía con el domicilio de la
+  casa matriz aunque saliera de una sucursal inscrita. Ahora `Emisor.CdgSIISucur` (y `codigoSucursalSii` en `buildEmisor` y
+  `buildEmisorBoleta`) se emite justo antes de `DirOrigen`, después de `Acteco` en el DTE y de `GiroEmisor` en la boleta, en el
+  orden del XSD. `validarEmisor` rechaza un valor que no sea entero entre 1 y 999999999. Sin el campo el XML no cambia.
+- **`obtenerDatosContribuyente` entrega `sucursales`.** Lee la tabla "Dirección sucursales" de `ce_consulta_muestra_e`: una
+  lista de `{ codigo, tipo, direccion }` con las sucursales inscritas en el SII (las mismas de Mi SII) y su código como
+  entero. Es la lista vacía si la empresa no tiene sucursales inscritas o la página no trae la sección. No cambia ningún
+  campo existente.
+
 ## [2.42.2] - 2026-10-20
 
 ### Corregido
