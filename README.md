@@ -1,19 +1,43 @@
+<p align="center">
+  <a href="https://sii.devlas.cl"><img src="https://raw.githubusercontent.com/devlas-cl/dte-sii/master/.github/banner.svg" alt="Intégrate con el SII con SII SDK de Devlas" width="100%"></a>
+</p>
+
+<p align="center">
+  <a href="https://sii.devlas.cl"><img alt="Sucesor: SII SDK" src="https://img.shields.io/badge/sucesor-SII%20SDK-3b82f6?style=for-the-badge"></a>
+  <img alt="Estado: deprecada" src="https://img.shields.io/badge/@devlas/dte--sii-deprecada-f26b21?style=for-the-badge">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178c6?style=for-the-badge&logo=typescript&logoColor=white">
+  <img alt="Hecho en Chile" src="https://img.shields.io/badge/hecho%20en-Chile-d52b1e?style=for-the-badge">
+</p>
+
 # @devlas/dte-sii
 
-> **Esta librería está deprecada y ya no recibe cambios.**
->
-> - Quienes la usan en su propio proyecto pueden seguir con un fork propio. Las versiones 2.x (MIT) siguen disponibles en npm, sin soporte.
-> - El trabajo de Devlas continúa en **SII SDK** (`@devlas-cl/*`), una librería TypeScript nueva y mantenida que cubre el flujo completo contra el SII de Chile: emisión y firma de DTE (facturas, boletas, notas, guías), folios y CAF, libros y RCOF, intercambio, certificación completa de factura y de boleta, impresión y muestras impresas.
-> - Guía de salida paso a paso: [MIGRACION.md](./MIGRACION.md).
-> - SII SDK se distribuye con licencia por GitHub Packages. Para conocerlo o pedir acceso: [sii.devlas.cl](https://sii.devlas.cl).
+> [!IMPORTANT]
+> **Esta librería está deprecada y ya no recibe cambios. Su sucesor es [SII SDK](https://sii.devlas.cl).**
+> Es la misma librería que Devlas mantiene y usa en producción, escrita desde cero en TypeScript y con cobertura completa del SII.
+
+## Pásate a SII SDK
+
+| | |
+|---|---|
+| **Emisión y firma** | Boletas (39, 41), facturas (33, 34), notas de crédito y débito (61, 56) y guías de despacho (52), con validación, timbre y envío |
+| **Folios** | Solicitud de CAF por el portal del SII y reposición automática antes de que se agoten (AutoCAF) |
+| **Libros y recepción** | Libros electrónicos, RCV, intercambio entre contribuyentes y consulta del estado de cada envío |
+| **Certificación** | Motor completo de certificación de factura y de boleta, con sets, libros y muestras impresas |
+| **Impresión** | Ticket térmico y PDF con timbre PDF417 |
+| **Para desarrolladores** | TypeScript tipado, errores en español con el texto literal del SII, y documentación pensada también para asistentes de IA |
+
+> [!TIP]
+> **Empieza gratis.** El nivel Libre cubre la boleta electrónica sin costo: crea tu cuenta en [sii.devlas.cl](https://sii.devlas.cl) y sigue la [guía de migración](./MIGRACION.md).
+
+Las versiones 2.x (MIT) siguen disponibles en npm, sin soporte.
+
+---
+
+## Documentación de la librería anterior
 
 **Librería de facturación y boletas electrónicas para el SII de Chile.**
 
 Genera, timbra, firma y envía facturas electrónicas, boletas electrónicas, libros contables y automatiza el proceso de certificación ante el SII.
-
-> Desarrollada por [Estudio Devlas](https://devlas.cl), de forma independiente y abierta.
->
-> Hecha en Chile, para quienes facturan en Chile. Si te ha sido útil, puedes [apoyar su desarrollo](https://github.com/sponsors/devlas-cl).
 
 ---
 
