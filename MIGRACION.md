@@ -107,13 +107,13 @@ Como verificar:
 - Compara las salidas con las de `dte-sii` sobre los mismos datos. Hay diferencias intencionales de bytes, como la hora de Chile y la validacion que antes no se hacia, y las encontraras de inmediato.
 - Los documentos emitidos por un camino se consultan por el otro sin problema, porque el estado depende del track id del SII.
 
-## 5. Si no quieres migrar
+## 5. Si todavia no puedes migrar
 
-Puedes quedarte con 2.x. La licencia MIT te permite copiar, modificar y mantener tu propio fork, sin pedir permiso.
+Lo recomendado es migrar a SII SDK: es la unica libreria de Devlas que sigue recibiendo adaptaciones a los cambios del SII, y el nivel Libre (boletas) no tiene costo.
 
-Advertencia: el SII cambia. Cambian esquemas, cadenas TLS, reglas de folios, el portal y los plazos, y estos cambios llegan sin aviso previo. Si haces un fork, alguien en tu equipo debe seguir esas novedades, probar contra certificacion de forma periodica, publicar correcciones y mantener las dependencias. Esta libreria no tendra quien lo haga por ti. Antes de decidir, estima ese costo frente al de migrar.
+Mientras migras, las versiones 2.x siguen disponibles en npm, sin soporte ni correcciones. El SII cambia sin aviso previo: esquemas, cadenas TLS, reglas de folios, el portal y los plazos. Por eso conviene que la migracion no se postergue mas de lo necesario.
 
-Recomendaciones minimas si te quedas:
+Recomendaciones minimas mientras tanto:
 
 - Fija la version exacta y no dependas de actualizaciones.
 - Resuelve el intermedio TLS de boletas con `NODE_EXTRA_CA_CERTS`. El intermedio vence el 2027-11-02, renuevalo antes.
