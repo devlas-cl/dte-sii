@@ -122,4 +122,4 @@ Recomendaciones minimas si te quedas:
 
 ## 6. Como obtener SII SDK
 
-SII SDK es privado, con licencia, y se distribuye por GitHub Packages. Para conocerlo o pedir acceso, entra a [devlas.cl](https://devlas.cl). Quien obtiene acceso recibe las instrucciones de instalacion (token de lectura de paquetes y `.npmrc` para el registro de GitHub Packages) junto con la guia completa de migracion.
+SII SDK es privado, con licencia, y se distribuye por GitHub Packages. Para conocerlo o pedir acceso, entra a [sii.devlas.cl](https://sii.devlas.cl) y crea tu cuenta. Quien obtiene acceso recibe las instrucciones de instalacion (token de lectura de paquetes y `.npmrc` para el registro de GitHub Packages) junto con la guia completa de migracion.
