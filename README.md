@@ -1,5 +1,12 @@
 # @devlas/dte-sii
 
+> **Esta librería está deprecada y ya no recibe cambios.**
+>
+> - Quienes la usan en su propio proyecto pueden seguir con un fork propio. Las versiones 2.x (MIT) siguen disponibles en npm, sin soporte.
+> - El trabajo de Devlas continúa en **SII SDK** (`@devlas-cl/*`), una librería TypeScript nueva y mantenida que cubre el flujo completo contra el SII de Chile: emisión y firma de DTE (facturas, boletas, notas, guías), folios y CAF, libros y RCOF, intercambio, certificación completa de factura y de boleta, impresión y muestras impresas.
+> - Guía de salida paso a paso: [MIGRACION.md](./MIGRACION.md).
+> - SII SDK se distribuye con licencia por GitHub Packages. Para conocerlo o pedir acceso: [sii.devlas.cl](https://sii.devlas.cl).
+
 **Librería de facturación y boletas electrónicas para el SII de Chile.**
 
 Genera, timbra, firma y envía facturas electrónicas, boletas electrónicas, libros contables y automatiza el proceso de certificación ante el SII.
