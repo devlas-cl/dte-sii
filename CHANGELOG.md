@@ -8,6 +8,14 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.43.1] - 2026-11-04
+
+### Documentación
+
+- **La librería queda deprecada.** El README y la guía `MIGRACION.md` explican que ya no recibe cambios y apuntan a SII SDK
+  (https://sii.devlas.cl). Esta versión no cambia ningún comportamiento: solo existe para que la página de npm muestre el
+  aviso. Las versiones 2.x (MIT) siguen disponibles, sin soporte.
+
 ## [2.43.0] - 2026-10-30
 
 ### Agregado
