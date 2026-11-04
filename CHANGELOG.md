@@ -8,6 +8,13 @@ Versionado [SemVer](https://semver.org/lang/es/).
 <!-- Los PRs agregan aca, sin elegir numero de version. Al publicar, esta seccion
      pasa a ser una version numerada con su fecha. Ver CONTRIBUTING.md. -->
 
+## [2.43.2] - 2026-11-04
+
+### Documentación
+
+- **README con banner y un llamado claro a pasarse a SII SDK.** La guía `MIGRACION.md` ya no recomienda mantener un fork:
+  recomienda migrar. Sin cambios de comportamiento.
+
 ## [2.43.1] - 2026-11-04
 
 ### Documentación
